@@ -26,7 +26,7 @@ _JOINT_LIMITS = [
     (-2.094, 2.094),   # arm_joint1
     (0.0,    3.142),   # arm_joint2
     (0.0,    3.142),   # arm_joint3
-    (-1.309, 1.309),   # arm_joint4
+    (-1.484, 1.484),   # arm_joint4
     (-1.484, 1.484),   # arm_joint5
     (-2.007, 2.007),   # arm_joint6
 ]
