@@ -36,7 +36,7 @@ _DEFAULT_KD = np.array([1.0,  1.0,  1.0,  0.5,  0.5,  0.5])
 _GRAVITY_TORQUE_SIGN = np.array([1.0, 1.0, 1.0, -1.0, 1.0, 1.0])
 _GRAVITY_TORQUE_SCALE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 _MAX_GRAVITY_TORQUE = np.array([50.0, 50.0, 50.0, 24.0, 10.0, 10.0])
-_TORQUE_CLIP = np.array([70.0, 70.0, 70.0, 27.0, 12.0, 12.0])
+_TORQUE_CLIP = np.array([70.0, 70.0, 70.0, 27.0, 10.0, 10.0])
 
 # MotorA ranges (EC-A4315-P2-36)
 _MOTOR_A_RANGES = MotorARanges(
@@ -53,7 +53,7 @@ _MOTOR_A_KT = 2.8
 _MOTOR_B_RANGES_DEFAULT = MotorBRanges(
     pos_min=-12.5, pos_max=12.5,
     vel_min=-30.0, vel_max=30.0,
-    torque_min=-12.0, torque_max=12.0,
+    torque_min=-10.0, torque_max=10.0,
     kp_min=0.0, kp_max=500.0,
     kd_min=0.0, kd_max=5.0,
 )
