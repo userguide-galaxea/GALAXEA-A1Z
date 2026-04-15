@@ -314,6 +314,16 @@ SDK 在每个控制周期（默认 250 Hz）执行：
 | MotorA KT | 2.8 (电流→扭矩转换系数) |
 | 控制频率 | 250 Hz |
 
-## 许可
+## 开源许可
 
-MIT License
+本项目基于 [MIT License](LICENSE) 开源，版权归 **星海图** 所有。
+
+### 第三方依赖许可
+
+| 依赖 | 许可证 | 说明 |
+|------|--------|------|
+| [numpy](https://numpy.org) | BSD-3-Clause | 数值计算 |
+| [python-can](https://github.com/hardbyte/python-can) | LGPL-3.0 | CAN 总线通信 |
+| [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | 机器人动力学计算 |
+
+以上依赖均与 MIT 协议兼容，可自由用于商业和非商业项目。
