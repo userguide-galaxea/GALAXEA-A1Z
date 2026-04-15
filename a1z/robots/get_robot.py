@@ -13,7 +13,7 @@ from a1z.motor_drivers.motor_a_driver import MotorA, MotorARanges
 from a1z.robots.arm_robot import ArmRobot
 
 # Default URDF path (bundled inside the package)
-_DEFAULT_URDF_PATH = str(Path(__file__).parent.parent / "robot_models" / "a1z" / "A1Z_2kg.urdf")
+_DEFAULT_URDF_PATH = str(Path(__file__).parent.parent / "robot_models" / "a1z" / "A1Z_Flange.urdf")
 
 # Default A1Z configuration
 _NUM_JOINTS = 6
