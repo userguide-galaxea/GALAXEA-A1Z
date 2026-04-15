@@ -2,14 +2,25 @@
 """Gravity compensation example for the A1Z arm.
 
 Usage:
-    # Zero-gravity (floating) mode:
+    # Zero-gravity (floating) mode, default URDF (A1Z_2kg.urdf):
     python examples/gravity_comp.py
 
-    # With custom gravity factor:
-    python examples/gravity_comp.py --gravity_factor 0.5
+    # Use nogripper URDF, start with small gravity factor (recommended):
+    python examples/gravity_comp.py --urdf a1z/robot_models/a1z/A1Z_nogripper.urdf --gravity_factor 0.3
+
+    # Full gravity compensation with nogripper URDF:
+    python examples/gravity_comp.py --urdf a1z/robot_models/a1z/A1Z_nogripper.urdf --gravity_factor 1.0
 
     # Position hold mode:
-    python examples/gravity_comp.py --mode hold
+    python examples/gravity_comp.py --mode hold --urdf a1z/robot_models/a1z/A1Z_nogripper.urdf
+
+    # Custom CAN channel:
+    python examples/gravity_comp.py --can can1 --urdf a1z/robot_models/a1z/A1Z_nogripper.urdf
+
+Available URDF models (a1z/robot_models/a1z/):
+    A1Z_2kg.urdf          -- default, with 2kg end-effector payload
+    A1Z_nogripper.urdf    -- no gripper / bare flange
+    A1XGEN2_Noumenon.urdf -- A1X Gen2 variant
 """
 
 import argparse
@@ -30,6 +41,7 @@ def main():
                         help="Gravity compensation scale (0=off, 1=full). Start small (e.g. 0.3).")
     parser.add_argument("--freq", type=int, default=250, help="Control loop frequency (Hz).")
     parser.add_argument("--can", default="can0", help="CAN channel.")
+    parser.add_argument("--urdf", default=None, help="Override URDF path.")
     args = parser.parse_args()
 
     zero_gravity = (args.mode == "gravity")
@@ -47,6 +59,7 @@ def main():
         gravity_comp_factor=args.gravity_factor,
         zero_gravity_mode=zero_gravity,
         control_freq_hz=args.freq,
+        urdf_path=args.urdf,
     )
 
     def signal_handler(sig, frame):

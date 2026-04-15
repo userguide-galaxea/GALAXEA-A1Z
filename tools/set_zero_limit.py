@@ -52,7 +52,7 @@ _MOTOR_A_RANGES = MotorARanges(
     kd_min=0.0, kd_max=5.0,
     pos_min=-12.5, pos_max=12.5,
     vel_min=-18.0, vel_max=18.0,
-    torque_min=-80.0, torque_max=80.0,
+    torque_min=-70.0, torque_max=70.0,
     current_fb_min=-30.0, current_fb_max=30.0,
 )
 

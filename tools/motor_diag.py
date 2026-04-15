@@ -409,7 +409,7 @@ def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
                     kd_u9 = float_to_uint(0.5, 0.0, 5.0, 9)
                     pos_u16 = float_to_uint(0.0, -12.5, 12.5, 16)
                     vel_u12 = float_to_uint(0.0, -18.0, 18.0, 12)
-                    tor_u12 = float_to_uint(0.0, -80.0, 80.0, 12)
+                    tor_u12 = float_to_uint(0.0, -70.0, 70.0, 12)
                     data = pack_motor_a_mit(0, kp_u12, kd_u9, pos_u16, vel_u12, tor_u12)
                 else:
                     # MotorB 零指令：pos=0, vel=0, kp=0, kd=0.5, torque=0
