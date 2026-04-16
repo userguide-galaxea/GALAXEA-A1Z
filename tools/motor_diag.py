@@ -204,19 +204,34 @@ def check_can_errors(channel: str) -> Optional[str]:
         output = result.stdout
         warnings = []
 
-        if "bus-off" in output:
+        # 检查实际 CAN 状态（"can state bus-off" / "can state error-passive"）
+        # 注意：ip 输出中 "bus-off" / "error-passive" 也出现在统计列头，不能用简单 in 匹配
+        if "can state bus-off" in output:
             warnings.append("CAN 总线 BUS-OFF！可能线路短路或终端电阻问题。")
-        if "error-passive" in output:
+        if "can state error-passive" in output:
             warnings.append("CAN 总线 ERROR-PASSIVE，错误计数较高。检查接线和终端电阻。")
-        if "restarts" in output:
-            for line in output.split("\n"):
-                if "restarts" in line:
-                    parts = line.split()
-                    for i, p in enumerate(parts):
-                        if p == "restarts" and i > 0:
-                            count = parts[i - 1]
-                            if count.isdigit() and int(count) > 0:
-                                warnings.append(f"CAN 总线已重启 {count} 次，通信不稳定。")
+
+        # 检查 bus-off 计数器（统计行格式：headers行 + 数值行）
+        lines = output.split("\n")
+        for i, line in enumerate(lines):
+            if "bus-off" in line and "error-pass" in line and i + 1 < len(lines):
+                counts = lines[i + 1].split()
+                headers = line.split()
+                try:
+                    idx = headers.index("bus-off")
+                    if int(counts[idx]) > 0:
+                        warnings.append(f"CAN 总线曾发生 {counts[idx]} 次 BUS-OFF，已恢复但曾有异常。")
+                except (ValueError, IndexError):
+                    pass
+                break
+
+        # 检查重启次数
+        for i, line in enumerate(lines):
+            if "re-started" in line and i + 1 < len(lines):
+                counts = lines[i + 1].split()
+                if counts and counts[0].isdigit() and int(counts[0]) > 0:
+                    warnings.append(f"CAN 总线已重启 {counts[0]} 次，通信不稳定。")
+                break
 
         return "\n".join(warnings) if warnings else None
 
@@ -344,8 +359,11 @@ def print_scan_results(results: List[MotorStatus]):
         resp_str = f"{s.response_time_ms:5.1f}  " if s.online else "   N/A "
         error_str = s.error_msg if s.error_msg else "无"
 
-        if s.online and s.motor_type != "MOTOR_A" and s.error_code not in (0x0, 0x1):
-            error_str = MOTOR_B_ERROR_CODES.get(s.error_code, f"code={s.error_code:#x}")
+        if s.online and s.motor_type != "MOTOR_A":
+            if s.error_code not in (0x0, 0x1):
+                error_str = MOTOR_B_ERROR_CODES.get(s.error_code, f"code={s.error_code:#x}")
+            else:
+                error_str = "无"
 
         print(
             f"│   {s.joint_idx}   │ {s.name:10s} │ {s.motor_type:8s} │ 0x{s.can_id:02X}   │ {status_str} │ {pos_str}│ {resp_str}│ {error_str:15s} │"

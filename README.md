@@ -55,6 +55,8 @@ pip install .
 
 ### 配置 CAN 总线（SocketCAN 模式）
 
+注意：检查can盒电阻是否正确安装！
+
 使用 HHS USB-CANFD 适配器（VID/PID `a8fa:8598`）：
 
 ```bash
@@ -185,16 +187,6 @@ sudo python tools/set_zero.py --motor-a
 sudo python tools/set_zero.py --joints 0 3
 ```
 
-### 基于限位的零点标定
-
-```bash
-# 用机械限位标定关节 1（下限位方向）
-sudo python tools/set_zero_limit.py --joints 1 --lower
-
-# 用上限位方向
-sudo python tools/set_zero_limit.py --joints 3 --upper
-```
-
 ## 项目结构
 
 ```
@@ -224,8 +216,7 @@ a1z/
 │   └── position_hold.py           # 位置保持示例
 └── tools/
     ├── motor_diag.py              # 电机通信诊断与故障排查
-    ├── set_zero.py                # 电机零点标定
-    └── set_zero_limit.py          # 基于限位的零点标定
+    └── set_zero.py                # 电机零点标定
 ```
 
 ## 控制原理
