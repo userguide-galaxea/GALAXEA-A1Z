@@ -51,9 +51,9 @@ JOINT_CONFIG = {
     0: ("arm_joint1", "MOTOR_A", 0x01),
     1: ("arm_joint2", "MOTOR_A", 0x02),
     2: ("arm_joint3", "MOTOR_A", 0x03),
-    3: ("arm_joint4", "DM4340", 0x04),
-    4: ("arm_joint5", "DM4310", 0x05),
-    5: ("arm_joint6", "DM4310", 0x06),
+    3: ("arm_joint4", "MotorB4340", 0x04),
+    4: ("arm_joint5", "MotorB4310", 0x05),
+    5: ("arm_joint6", "MotorB4310", 0x06),
 }
 
 # MotorA 反馈解析范围
@@ -65,18 +65,19 @@ MOTOR_A_CUR_RANGE = (-30.0, 30.0)
 MOTOR_B_POS_RANGE = (-12.5, 12.5)
 MOTOR_B_VEL_RANGE = (-30.0, 30.0)
 MOTOR_B_TOR_RANGE_4340 = (-28.0, 28.0)
-MOTOR_B_TOR_RANGE_4310 = (-12.0, 12.0)
+MOTOR_B_TOR_RANGE_4310 = (-10.0, 10.0)
 
 MOTOR_B_ERROR_CODES = {
-    0x0: "正常",
-    0x1: "过压",
-    0x2: "欠压",
-    0x3: "过流",
-    0x4: "MOS 过温",
-    0x5: "线圈过温",
-    0x6: "通信丢失",
-    0x7: "过载",
-    0x8: "位置越限",
+    0x0: "未使能",
+    0x1: "正常",
+    0x8: "过压",
+    0x9: "欠压",
+    0xA: "过流",
+    0xB: "MOS 过温",
+    0xC: "线圈过温",
+    0xD: "通信丢失",
+    0xE: "过载",
+    0xF: "位置越限",
 }
 
 MOTOR_A_KT = 2.8  # 电流→扭矩转换系数
@@ -123,8 +124,9 @@ def parse_motor_a_feedback(data: bytes) -> dict:
     pos_raw = (frame >> 40) & 0xFFFF
     vel_raw = (frame >> 28) & 0xFFF
     cur_raw = (frame >> 16) & 0xFFF
-    temp_motor = (frame >> 8) & 0xFF
-    temp_mos = frame & 0xFF
+    # Temperature encoding: raw = actual_°C * 2 + 50
+    temp_motor = ((frame >> 8) & 0xFF - 50) / 2
+    temp_mos = (frame & 0xFF - 50) / 2
 
     return {
         "error_code": error_code,
@@ -180,14 +182,9 @@ def check_can_interface(channel: str) -> Tuple[bool, str]:
             return False, (
                 f"接口 {channel} 存在但未启动。请执行:\n"
                 f"  sudo ip link set {channel} down\n"
-                f"  sudo ip link set {channel} type can bitrate 1000000 restart-ms 100 txqueuelen 1000\n"
+                f"  sudo ip link set {channel} type can bitrate 1000000\n"
                 f"  sudo ip link set {channel} up"
             )
-
-        if "bitrate" in output:
-            for part in output.split():
-                if part.isdigit() and output[output.index(part) - 8:output.index(part)].strip().endswith("bitrate"):
-                    break
 
         return True, f"接口 {channel} 正常 (UP)"
 
@@ -245,17 +242,43 @@ def scan_motor(bus: can.BusABC, joint_idx: int, timeout: float = 0.3) -> MotorSt
     t_send = time.time()
     try:
         bus.send(can.Message(arbitration_id=can_id, data=enable_data, is_extended_id=False))
-    except can.CanOperationError as e:
+    except (can.CanOperationError, can.CanError, OSError) as e:
         status.error_msg = f"CAN 发送失败: {e}"
         return status
 
+    # MotorA 收到 enable 后不主动回包，需额外发一条 MIT 零指令才会返回反馈帧。
+    # MotorB 收到 enable 即回包，不需要额外指令。
+    mit_data = None
+    if motor_type == "MOTOR_A":
+        from a1z.motor_drivers.motor_a_driver import pack_motor_a_mit
+        time.sleep(0.01)
+        kp_u12  = float_to_uint(0.0, 0.0,   500.0, 12)
+        kd_u9   = float_to_uint(0.5, 0.0,   5.0,    9)
+        pos_u16 = float_to_uint(0.0, -12.5, 12.5,  16)
+        vel_u12 = float_to_uint(0.0, -18.0, 18.0,  12)
+        tor_u12 = float_to_uint(0.0, -70.0, 70.0,  12)
+        mit_data = pack_motor_a_mit(0, kp_u12, kd_u9, pos_u16, vel_u12, tor_u12)
+        try:
+            bus.send(can.Message(arbitration_id=can_id, data=mit_data, is_extended_id=False))
+        except (can.CanOperationError, can.CanError, OSError) as e:
+            status.error_msg = f"CAN 发送失败: {e}"
+            return status
+
     # 等待回包
+    # gs_usb 带 IFF_ECHO：驱动会将发出的帧回显，data 与发送帧完全相同，需过滤。
+    echo_set = {enable_data}
+    if mit_data is not None:
+        echo_set.add(bytes(mit_data))
+
     t_deadline = time.time() + timeout
     while time.time() < t_deadline:
         msg = bus.recv(timeout=0.05)
         if msg is None:
             continue
         if msg.arbitration_id != can_id:
+            continue
+        # 过滤 gs_usb ECHO 帧
+        if bytes(msg.data) in echo_set:
             continue
 
         status.online = True
@@ -321,7 +344,7 @@ def print_scan_results(results: List[MotorStatus]):
         resp_str = f"{s.response_time_ms:5.1f}  " if s.online else "   N/A "
         error_str = s.error_msg if s.error_msg else "无"
 
-        if s.online and s.motor_type != "MOTOR_A" and s.error_code != 0:
+        if s.online and s.motor_type != "MOTOR_A" and s.error_code not in (0x0, 0x1):
             error_str = MOTOR_B_ERROR_CODES.get(s.error_code, f"code={s.error_code:#x}")
 
         print(
@@ -357,22 +380,22 @@ def print_scan_results(results: List[MotorStatus]):
         for s in hot:
             print(f"  [Joint {s.joint_idx}] {s.name}: 电机温度={s.temp_motor}°C, MOS温度={s.temp_mos}°C")
 
-    # 错误码检查
-    errored = [s for s in results if s.online and s.error_code != 0 and s.motor_type != "MOTOR_A"]
+    # 错误码检查（0x0=未使能, 0x1=正常，均不报错；0x8+ 才是真实故障）
+    errored = [s for s in results if s.online and s.error_code not in (0x0, 0x1) and s.motor_type != "MOTOR_A"]
     if errored:
         print("\n--- 电机错误 ---")
         for s in errored:
             msg = MOTOR_B_ERROR_CODES.get(s.error_code, f"未知({s.error_code:#x})")
             print(f"  [Joint {s.joint_idx}] {s.name}: 错误码=0x{s.error_code:X} ({msg})")
-            if s.error_code == 0x6:
+            if s.error_code == 0xD:
                 print("    → 通信丢失：检查控制回路是否在发送指令，或 MotorB 超时保护触发")
-            elif s.error_code in (0x4, 0x5):
+            elif s.error_code in (0xB, 0xC):
                 print("    → 过温：等待冷却后重试，检查散热和负载")
-            elif s.error_code in (0x1, 0x2):
+            elif s.error_code in (0x8, 0x9):
                 print("    → 电压异常：检查电源电压是否在额定范围内")
-            elif s.error_code == 0x3:
+            elif s.error_code == 0xA:
                 print("    → 过流：检查是否堵转或负载过大")
-            elif s.error_code == 0x7:
+            elif s.error_code == 0xE:
                 print("    → 过载：降低负载或减小增益")
             print(f"    → 清除错误：发送 0xFF*7+0xFB 到 CAN ID 0x{s.can_id:02X}")
 
@@ -514,7 +537,7 @@ def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
                         temp_mos = fb.get("temp_mos", 0)
                         if temp_m > 60 or temp_mos > 60:
                             warnings.append(f"  [!] Joint {j}: 温度偏高 (电机={temp_m}°C, MOS={temp_mos}°C)")
-                        if fb["error_code"] != 0:
+                        if fb["error_code"] not in (0, 1):
                             msg = MOTOR_B_ERROR_CODES.get(fb["error_code"], f"code=0x{fb['error_code']:X}")
                             warnings.append(f"  [!] Joint {j}: 错误 {msg}")
 
@@ -671,18 +694,20 @@ def run_probe(bus: can.BusABC, joint_idx: int):
             print(f"  MOS温度:  {fb['temp_mos']}°C")
             print(f"  转子温度: {fb['temp_rotor']}°C")
 
-            if fb["error_code"] != 0:
+            if fb["error_code"] not in (0x0, 0x1):
                 print()
                 print(f"  *** 电机有错误！***")
                 err = fb["error_code"]
-                if err == 0x6:
+                if err == 0xD:
                     print("  → 通信丢失: 电机长时间未收到指令。需要清错后持续发送控制帧。")
-                elif err in (0x4, 0x5):
+                elif err in (0xB, 0xC):
                     print("  → 过温: 等待冷却。检查散热条件和持续负载。")
-                elif err in (0x1, 0x2):
+                elif err in (0x8, 0x9):
                     print("  → 电压异常: 检查电源电压（额定 24V）。")
-                elif err == 0x3:
+                elif err == 0xA:
                     print("  → 过流: 检查是否堵转。降低增益或限制扭矩指令。")
+                elif err == 0xE:
+                    print("  → 过载: 降低负载或减小增益。")
                 print(f"  → 清除错误: 发送 0xFF*7+0xFB 到 0x{can_id:02X}")
 
     # 步骤 5: 失能
@@ -692,7 +717,7 @@ def run_probe(bus: can.BusABC, joint_idx: int):
     print("  → 完成")
 
 
-# ── 清除 DM 电机错误 ─────────────────────────────────
+# ── 清除 MotorB 错误 ─────────────────────────────────
 
 def run_clear_error(bus: can.BusABC, joints: List[int]):
     """清除 MotorB 错误码。"""
@@ -732,7 +757,7 @@ def main():
     group.add_argument("--monitor", action="store_true", help="持续监控电机状态")
     group.add_argument("--listen", action="store_true", help="被动监听 CAN 总线")
     group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-5)")
-    group.add_argument("--clear-error", action="store_true", help="清除 DM 电机错误码")
+    group.add_argument("--clear-error", action="store_true", help="清除 MotorB 错误码")
 
     parser.add_argument("--channel", default=CAN_CHANNEL, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
     parser.add_argument("--bitrate", type=int, default=CAN_BITRATE, help=f"CAN 波特率 (默认: {CAN_BITRATE})")

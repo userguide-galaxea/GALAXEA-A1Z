@@ -53,60 +53,31 @@ pip install .
 
 依赖会自动安装：`numpy`、`python-can>=4.0`、`pin`（Pinocchio）。
 
-### 配置 CAN 总线
+### 配置 CAN 总线（SocketCAN 模式）
+
+使用 HHS USB-CANFD 适配器（VID/PID `a8fa:8598`）：
 
 ```bash
-sudo ip link set can0 down
+# 1. 加载驱动
+sudo modprobe gs_usb
+
+# 2. 将 HHS 适配器绑定到 gs_usb（已绑定时忽略报错）
+sudo sh -c 'echo "a8fa 8598" > /sys/bus/usb/drivers/gs_usb/new_id' 2>/dev/null || true
+
+# 3. 确认接口出现（单适配器通常为 can0）
+ip link show type can
+
+# 4. 配置并启动（1 Mbps）
 sudo ip link set can0 type can bitrate 1000000
 sudo ip link set can0 up
 ```
 
 ## 快速开始
 
-### 零力漂浮模式（零重力示教）
-
-```python
-from a1z.robots.get_robot import get_a1z_robot
-
-robot = get_a1z_robot(
-    can_channel="can0",
-    gravity_comp_factor=1.0,
-    zero_gravity_mode=True,
-)
-robot.start()
-# 机械臂进入零力漂浮状态，可自由拖拽
-# Ctrl+C 停止
-robot.stop()
-```
-
-### 位置保持模式
-
-```python
-import numpy as np
-from a1z.robots.get_robot import get_a1z_robot
-
-robot = get_a1z_robot(
-    can_channel="can0",
-    zero_gravity_mode=False,
-)
-robot.start()
-
-# 读取当前关节角
-pos = robot.get_joint_pos()
-print(f"当前关节角 (rad): {pos}")
-
-# 移动到目标位置
-target = np.array([0.0, 0.6, 0.4, -0.5, 0.0, 0.0])
-robot.move_joints(target, speed=0.5)
-
-robot.stop()
-```
-
 ### 使用 example 脚本
 
 ```bash
 # 零力漂浮（默认 URDF A1Z_Flange.urdf，末端无负载）
-python examples/gravity_comp.py
 
 # 从小补偿因子开始（推荐首次调试方式）
 python examples/gravity_comp.py --gravity_factor 0.3
@@ -118,7 +89,7 @@ python examples/gravity_comp.py --gravity_factor 1.0
 python examples/gravity_comp.py --mode hold
 
 # 位置保持 + 移动到目标
-python examples/position_hold.py --q_target_deg 0,30,0,-45,0,0 --speed 0.3
+python examples/position_hold.py --q_target_deg 0,30,20,-15,0,0 --speed 0.5
 ```
 
 ## API 参考

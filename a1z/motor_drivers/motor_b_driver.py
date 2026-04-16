@@ -24,15 +24,16 @@ logger = logging.getLogger(__name__)
 
 
 MOTOR_B_ERROR_CODES = {
-    0x0: "normal",
-    0x1: "over voltage",
-    0x2: "under voltage",
-    0x3: "over current",
-    0x4: "mos over temperature",
-    0x5: "motor coil over temperature",
-    0x6: "communication lost",
-    0x7: "overload",
-    0x8: "position out of range",
+    0x0: "disabled",
+    0x1: "normal",
+    0x8: "over voltage",
+    0x9: "under voltage",
+    0xA: "over current",
+    0xB: "mos over temperature",
+    0xC: "motor coil over temperature",
+    0xD: "communication lost",
+    0xE: "overload",
+    0xF: "position out of range",
 }
 
 

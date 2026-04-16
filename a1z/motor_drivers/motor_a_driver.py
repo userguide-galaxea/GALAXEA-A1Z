@@ -54,7 +54,8 @@ class MotorAFeedback:
     velocity: float = 0.0
     current: float = 0.0
     error: int = 0
-    temperature: int = 0
+    temperature: float = 0.0      # motor coil temperature (°C)
+    temperature_mos: float = 0.0  # MOS temperature (°C)
 
 
 def pack_motor_a_mit(
@@ -163,11 +164,15 @@ class MotorA:
         pos_raw = (frame >> 40) & 0xFFFF
         vel_raw = (frame >> 28) & 0xFFF
         curr_raw = (frame >> 16) & 0xFFF
-        motor_temp_r = (frame >> 8) & 0xFF
+        motor_temp_raw = (frame >> 8) & 0xFF
+        mos_temp_raw = frame & 0xFF
 
         position = uint_to_float(pos_raw, r.pos_min, r.pos_max, 16)
         velocity = uint_to_float(vel_raw, r.vel_min, r.vel_max, 12)
         current = uint_to_float(curr_raw, r.current_fb_min, r.current_fb_max, 12)
+        # Temperature encoding: raw = actual_°C * 2 + 50
+        temperature = (motor_temp_raw - 50) / 2
+        temperature_mos = (mos_temp_raw - 50) / 2
 
         return MotorAFeedback(
             motor_id=msg.arbitration_id,
@@ -175,5 +180,6 @@ class MotorA:
             velocity=velocity,
             current=current,
             error=error_code,
-            temperature=motor_temp_r,
+            temperature=temperature,
+            temperature_mos=temperature_mos,
         )

@@ -42,7 +42,16 @@ def main():
     parser.add_argument("--freq", type=int, default=250, help="Control loop frequency (Hz).")
     parser.add_argument("--can", default="can0", help="CAN channel.")
     parser.add_argument("--urdf", default=None, help="Override URDF path.")
+    parser.add_argument("--kd", type=str, default=None,
+                        help="Override kd gains, comma-separated (6 values). "
+                             "E.g. --kd 0.2,0.2,0.2,0.1,0.1,0.1")
     args = parser.parse_args()
+
+    kd_override = None
+    if args.kd is not None:
+        kd_override = np.fromstring(args.kd, sep=",", dtype=np.float64)
+        if kd_override.shape[0] != 6:
+            raise ValueError(f"--kd expects 6 values, got {kd_override.shape[0]}")
 
     zero_gravity = (args.mode == "gravity")
 
@@ -52,6 +61,8 @@ def main():
     print(f"  Gravity factor:  {args.gravity_factor}")
     print(f"  Control freq:    {args.freq} Hz")
     print(f"  CAN channel:     {args.can}")
+    if kd_override is not None:
+        print(f"  kd override:     {kd_override}")
     print("=" * 60)
 
     robot = get_a1z_robot(
@@ -70,7 +81,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
-        robot.start()
+        robot.start(initial_kd=kd_override)
         print("\nRobot running. Press Ctrl+C to stop.\n")
 
         while robot.is_running:

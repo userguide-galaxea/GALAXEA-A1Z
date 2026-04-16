@@ -83,7 +83,7 @@ def set_motor_a_zero(bus: can.BusABC, motor_id: int, timeout: float = 1.0) -> bo
     return False
 
 
-# ── DM zero setting ───────────────────────────────────────
+# ── MotorB zero setting ───────────────────────────────────
 
 def set_motor_b_zero(bus: can.BusABC, motor_id: int, timeout: float = 1.0) -> bool:
     """Set MotorB zero point (saves current position as zero offset).

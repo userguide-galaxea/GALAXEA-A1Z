@@ -86,7 +86,10 @@ class CanInterface:
             if message:
                 return message
             else:
-                message = self.bus.recv(timeout=0.0008)
+                if self.use_buffered_reader:
+                    message = self.buffered_reader.get_message(timeout=0.0008)
+                else:
+                    message = self.bus.recv(timeout=0.0008)
                 if message:
                     return message
         if not supress_warning:

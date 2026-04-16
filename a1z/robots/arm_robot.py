@@ -114,6 +114,15 @@ class ArmRobot:
         logger.info("Enabling motors...")
         self._motor_chain.enable_all()
 
+        # MotorA does not return feedback on enable alone — it needs at least one
+        # MIT command first.  Send a zero-gain probe (kp=0, tiny kd, zero torque)
+        # so the motor responds without applying any position correction, then wait
+        # for the replies before reading the actual initial position.
+        _zero = np.zeros(self._num_joints)
+        _probe_kd = np.full(self._num_joints, 0.05)
+        self._motor_chain.send_commands(_zero, _zero, _zero, _probe_kd, _zero)
+        time.sleep(0.05)
+
         # Read initial state
         self._read_state()
         logger.info(f"Initial joint positions: {np.round(self._state.pos, 3)} rad")

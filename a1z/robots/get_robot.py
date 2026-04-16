@@ -49,7 +49,7 @@ _MOTOR_A_RANGES = MotorARanges(
 )
 _MOTOR_A_KT = 2.8
 
-# MotorB default ranges (DM4310)
+# MotorB default ranges (4310)
 _MOTOR_B_RANGES_DEFAULT = MotorBRanges(
     pos_min=-12.5, pos_max=12.5,
     vel_min=-30.0, vel_max=30.0,
