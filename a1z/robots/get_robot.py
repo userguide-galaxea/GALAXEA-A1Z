@@ -25,7 +25,7 @@ _MOTOR_B_IDS = [0x04, 0x05, 0x06]
 _JOINT_LIMITS = [
     (-2.094, 2.094),   # arm_joint1
     (0.0,    3.142),   # arm_joint2
-    (0.0,    3.142),   # arm_joint3
+    (-3.142, 0.0),     # arm_joint3
     (-1.484, 1.484),   # arm_joint4
     (-1.484, 1.484),   # arm_joint5
     (-2.007, 2.007),   # arm_joint6
@@ -33,7 +33,7 @@ _JOINT_LIMITS = [
 
 _DEFAULT_KP = np.array([30.0, 30.0, 30.0, 20.0, 5.0, 5.0])
 _DEFAULT_KD = np.array([1.0,  1.0,  1.0,  0.5,  0.5,  0.5])
-_GRAVITY_TORQUE_SIGN = np.array([1.0, 1.0, -1.0, 1.0, 1.0, 1.0])
+_JOINT_SIGN = np.array([1.0, 1.0, -1.0, 1.0, 1.0, 1.0])
 _GRAVITY_TORQUE_SCALE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 _MAX_GRAVITY_TORQUE = np.array([50.0, 50.0, 50.0, 24.0, 10.0, 10.0])
 _TORQUE_CLIP = np.array([70.0, 70.0, 70.0, 27.0, 10.0, 10.0])
@@ -137,7 +137,7 @@ def get_a1z_robot(
         num_joints=_NUM_JOINTS,
         gravity_comp_factor=gravity_comp_factor,
         zero_gravity_mode=zero_gravity_mode,
-        gravity_torque_sign=_GRAVITY_TORQUE_SIGN,
+        joint_sign=_JOINT_SIGN,
         gravity_torque_scale=_GRAVITY_TORQUE_SCALE,
         max_gravity_torque=_MAX_GRAVITY_TORQUE,
         torque_clip=_TORQUE_CLIP,

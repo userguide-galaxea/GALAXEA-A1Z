@@ -50,7 +50,7 @@ class ArmRobot:
         num_joints: int = 6,
         gravity_comp_factor: float = 1.0,
         zero_gravity_mode: bool = True,
-        gravity_torque_sign: Optional[np.ndarray] = None,
+        joint_sign: Optional[np.ndarray] = None,
         gravity_torque_scale: Optional[np.ndarray] = None,
         max_gravity_torque: Optional[np.ndarray] = None,
         torque_clip: Optional[np.ndarray] = None,
@@ -68,7 +68,7 @@ class ArmRobot:
         self.gravity_comp_factor = gravity_comp_factor
         self.zero_gravity_mode = zero_gravity_mode
 
-        self._gravity_torque_sign = gravity_torque_sign if gravity_torque_sign is not None else np.ones(num_joints)
+        self._joint_sign = joint_sign if joint_sign is not None else np.ones(num_joints)
         self._gravity_torque_scale = gravity_torque_scale if gravity_torque_scale is not None else np.ones(num_joints)
         self._max_gravity_torque = max_gravity_torque if max_gravity_torque is not None else np.full(num_joints, 50.0)
         self._torque_clip = torque_clip if torque_clip is not None else np.full(num_joints, 50.0)
@@ -340,12 +340,11 @@ class ArmRobot:
                 torque_ff=self._command.torque_ff.copy(),
             )
 
-        # 3) Compute gravity compensation
+        # 3) Compute gravity compensation (state is already in URDF frame)
         with self._state_lock:
-            q_raw = self._state.pos.copy()
+            q = self._state.pos.copy()
 
-        q_urdf = q_raw * self._gravity_torque_sign
-        tau_g = self._gravity_model.compute_gravity_torque(q_urdf)
+        tau_g = self._gravity_model.compute_gravity_torque(q)
 
         # Safety check
         if np.any(np.abs(tau_g) > self._max_gravity_torque):
@@ -354,15 +353,15 @@ class ArmRobot:
                 f"Max allowed: {self._max_gravity_torque} Nm."
             )
 
-        # 4) Combine torques
-        tau_g_signed = tau_g * self._gravity_torque_sign * self._gravity_torque_scale
-        motor_torques = cmd.torque_ff + tau_g_signed * self.gravity_comp_factor
-        motor_torques = np.clip(motor_torques, -self._torque_clip, self._torque_clip)
+        # 4) Combine torques (in URDF frame), then convert to motor frame
+        tau_g_scaled = tau_g * self._gravity_torque_scale
+        torques_urdf = cmd.torque_ff + tau_g_scaled * self.gravity_comp_factor
+        motor_torques = np.clip(torques_urdf * self._joint_sign, -self._torque_clip, self._torque_clip)
 
-        # 5) Send commands to motor chain
+        # 5) Send commands to motor chain (convert position/velocity to motor frame)
         self._motor_chain.send_commands(
-            pos=cmd.pos,
-            vel=cmd.vel,
+            pos=cmd.pos * self._joint_sign,
+            vel=cmd.vel * self._joint_sign,
             kp=cmd.kp,
             kd=cmd.kd,
             torque=motor_torques,
@@ -372,9 +371,9 @@ class ArmRobot:
         """Read all motor feedback and update internal state."""
         self._motor_chain.drain_and_update(self._bus)
         with self._state_lock:
-            self._state.pos = self._motor_chain.get_positions()
-            self._state.vel = self._motor_chain.get_velocities()
-            self._state.eff = self._motor_chain.get_efforts()
+            self._state.pos = self._motor_chain.get_positions() * self._joint_sign
+            self._state.vel = self._motor_chain.get_velocities() * self._joint_sign
+            self._state.eff = self._motor_chain.get_efforts() * self._joint_sign
 
     # --- Safety ---
 
