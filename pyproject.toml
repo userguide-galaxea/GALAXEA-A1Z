@@ -1,0 +1,36 @@
+[build-system]
+requires = ["flit_core >= 3.4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "a1z"
+version = "0.0.1"
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["description"]
+dependencies = [
+    "numpy",
+    "python-can>=4.0",
+    "pin",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.flit.module]
+name = "a1z"
+
+[tool.ruff]
+line-length = 119
+lint.select = [
+    "E",
+    "F",
+    "I",
+]
+lint.ignore = [
+    "E501",
+    "E741",
+    "F841",
+]
