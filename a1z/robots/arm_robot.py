@@ -169,8 +169,8 @@ class ArmRobot:
         _RAMP_S = 0.8
         try:
             if self._running:
-                with self._command_lock:
-                    hold_pos = self._command.pos.copy()
+                with self._state_lock:
+                    hold_pos = self._state.pos.copy()  # hold current actual position, not stale command
                 original_grav = self.gravity_comp_factor
                 t0 = time.time()
                 while time.time() - t0 < _RAMP_S:
