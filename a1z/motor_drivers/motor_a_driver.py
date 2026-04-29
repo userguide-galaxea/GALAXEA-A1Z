@@ -103,16 +103,18 @@ class MotorA:
         self.last_feedback: Optional[MotorAFeedback] = None
 
     def enable(self) -> None:
-        """Send motor enable command (0xFC)."""
-        data = bytes([0xFF] * 7 + [0xFC])
-        msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
+        """Send motor enable command via 0x7FF config frame (cmd=0x01)."""
+        mid = self.motor_id
+        data = bytes([(mid >> 8) & 0xFF, mid & 0xFF, 0x00, 0x01])
+        msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
         self.bus.send(msg)
         time.sleep(0.01)
 
     def disable(self) -> None:
-        """Send motor disable command (0xFD)."""
-        data = bytes([0xFF] * 7 + [0xFD])
-        msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
+        """Send motor disable command via 0x7FF config frame (cmd=0x02)."""
+        mid = self.motor_id
+        data = bytes([(mid >> 8) & 0xFF, mid & 0xFF, 0x00, 0x02])
+        msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
         self.bus.send(msg)
         time.sleep(0.01)
 

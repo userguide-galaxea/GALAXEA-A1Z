@@ -164,28 +164,8 @@ class ArmRobot:
         logger.info(f"Control loop started at {self._control_freq_hz} Hz")
 
     def stop(self) -> None:
-        """Stop the control loop and disable motors with smooth ramp-down."""
+        """Stop the control loop and disable all motors."""
         logger.info("Stopping control loop...")
-        _RAMP_S = 0.8
-        try:
-            if self._running:
-                with self._state_lock:
-                    hold_pos = self._state.pos.copy()  # hold current actual position, not stale command
-                original_grav = self.gravity_comp_factor
-                t0 = time.time()
-                while time.time() - t0 < _RAMP_S:
-                    alpha = max(0.0, 1.0 - (time.time() - t0) / _RAMP_S)
-                    self.gravity_comp_factor = original_grav * alpha
-                    with self._command_lock:
-                        self._command.pos = hold_pos
-                        self._command.vel = np.zeros(self._num_joints)
-                        self._command.kp = self._default_kp.copy() * alpha
-                        self._command.kd = self._default_kd.copy() * 1.5
-                        self._command.torque_ff = np.zeros(self._num_joints)
-                    time.sleep(0.01)
-        except Exception:
-            pass
-
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
@@ -394,6 +374,13 @@ class ArmRobot:
             sleep_time = self._control_period_s - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+        # Send zero-torque as the final frame so motors cache zero instead of gravity comp.
+        _zeros = np.zeros(self._num_joints)
+        try:
+            self._motor_chain.send_commands(_zeros, _zeros, _zeros, _zeros, _zeros)
+        except Exception:
+            pass
 
     def _update(self) -> None:
         """Single control step: read state -> compute gravity -> send commands."""

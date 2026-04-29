@@ -250,16 +250,24 @@ class MixedMotorChain:
             motor.enable()
 
     def disable_all(self) -> None:
+        # ENCOS (MotorA): disable via 0x7FF config frame, cmd=0x02.
         for motor in self._motor_a_list:
             try:
-                motor.disable()
+                mid = motor.motor_id
+                data = bytes([(mid >> 8) & 0xFF, mid & 0xFF, 0x00, 0x02])
+                msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
+                motor.bus.send(msg)
             except Exception:
                 pass
+        # DM (MotorB): disable via 0xFD.
+        disable_dm = bytes([0xFF] * 7 + [0xFD])
         for motor in self._motor_b_list:
             try:
-                motor.disable()
+                msg = can.Message(arbitration_id=motor.motor_id, data=disable_dm, is_extended_id=False)
+                motor.bus.send(msg)
             except Exception:
                 pass
+        time.sleep(0.05)
 
     def drain_and_update(self, bus: can.BusABC, timeout: float = 0.001, max_messages: int = 0) -> int:
         """Drain all pending CAN messages from the bus, dispatching to the correct motor parser.
