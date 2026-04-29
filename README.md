@@ -51,7 +51,11 @@ a1z/
 ### 安装 SDK
 
 ```bash
-cd /path/to/a1z
+
+# 注意拉取带夹爪的SDK需要指定分支
+git clone -b gripper https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+
+cd /path/to/GALAXEA-a1z
 
 # 开发模式安装（推荐）
 pip install -e .
@@ -106,7 +110,7 @@ python examples/position_hold.py --q_target_deg 0,30,20,-15,0,0 --speed 0.5
 python examples/gripper_test.py --can can0
 ```
 
-### 使用 a1zctl 服务端
+### 使用 a1zctl 服务端（可用于openclaw交互）
 
 ```bash
 # 终端 1：启动服务端（含夹爪）
@@ -214,9 +218,6 @@ python tools/motor_diag.py --clear-error --joints 3 4
 ```bash
 # 标定所有电机（当前位置设为零点）
 sudo python tools/set_zero.py --all
-
-# 仅标定 MotorA
-sudo python tools/set_zero.py --motor-a
 
 # 标定指定关节
 sudo python tools/set_zero.py --joints 0 3
