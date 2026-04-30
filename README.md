@@ -189,10 +189,6 @@ python tools/motor_diag.py --check-can
 # 扫描所有 6 个电机（检查通信、读取状态、自动诊断）
 python tools/motor_diag.py --scan
 
-# 只扫描 MotorA 或 MotorB
-python tools/motor_diag.py --scan --type motor_a
-python tools/motor_diag.py --scan --type motor_b
-
 # 详细探测某个关节（完整收发流程 + 反馈解析）
 python tools/motor_diag.py --probe 3
 
@@ -361,7 +357,7 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 |------|------|
 | 默认 KP | `[30, 30, 30, 20, 5, 5]` |
 | 默认 KD | `[1, 1, 1, 0.5, 0.5, 0.5]` |
-| 关节坐标系符号 | `[1, 1, -1, 1, 1, 1]` (关节3与URDF方向相反) |
+| 关节坐标系符号 | `[1, 1, -1, 1, -1, 1]` (关节3，5与URDF方向相反) |
 | 重力扭矩缩放 | `[1, 1, 1, 1, 1, 1]` |
 | 最大重力扭矩 | `[50, 50, 50, 24, 10, 10]` Nm |
 | 扭矩限幅 | `[70, 70, 70, 27, 10, 10]` Nm |
