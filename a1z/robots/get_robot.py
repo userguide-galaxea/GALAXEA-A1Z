@@ -79,9 +79,7 @@ def get_a1z_robot(
     default_kp: Optional[np.ndarray] = None,
     default_kd: Optional[np.ndarray] = None,
     with_gripper: bool = False,
-    gripper_max_torque: float = -1.0,
-    gripper_kp: Optional[float] = None,
-    gripper_clog_threshold: Optional[float] = None,
+    gripper_max_torque: float = 2.0,
 ) -> ArmRobot:
     """Create and return a configured A1Z ArmRobot.
 
@@ -97,11 +95,8 @@ def get_a1z_robot(
         default_kp: Override default position gains.
         default_kd: Override default velocity gains.
         with_gripper: If True, attach a Gripper at CAN ID 0x07.
-        gripper_max_torque: Holding torque limit (Nm) for the force limiter.
-                            -1 (default) disables force limiting.
-        gripper_kp: Override gripper position gain (default: GRIPPER_KP = 10.0).
-        gripper_clog_threshold: Override clog detection torque threshold (Nm)
-                                for the force limiter (default: 0.3).
+        gripper_max_torque: Maximum gripping torque (Nm). Default 2.0 Nm.
+                            Passed to Gripper as i_des = max_torque / 11.0.
 
     Returns:
         Configured ArmRobot instance (call .start() to begin control).
@@ -144,12 +139,7 @@ def get_a1z_robot(
     gripper = None
     if with_gripper:
         gripper_motor = MotorB(motor_id=GRIPPER_CAN_ID, bus=bus, ranges=GRIPPER_MOTOR_RANGES)
-        kw = {}
-        if gripper_kp is not None:
-            kw["kp"] = gripper_kp
-        if gripper_clog_threshold is not None:
-            kw["clog_torque_threshold"] = gripper_clog_threshold
-        gripper = Gripper(gripper_motor, max_torque=gripper_max_torque, **kw)
+        gripper = Gripper(gripper_motor, max_torque=gripper_max_torque)
 
     return ArmRobot(
         motor_chain=motor_chain,

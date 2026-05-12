@@ -9,7 +9,7 @@ After calibration:
   open_rad  = -half_travel  (e.g. -2.87)
   Both within (-π, π) — no encoder wrap after power cycle.
 
-Protocol (DM-J4310P-2EC manual V1.0, p.10-13):
+Protocol (motor manual V1.0, p.10-13):
   - 保存位置零点 (0xFE): sets zero in RAM only.
   - 存储参数 (0xAA → 0x7FF): writes all parameters to flash.
     Requires 失能 (disabled) mode.
@@ -30,7 +30,11 @@ import tty
 import can
 
 from a1z.motor_drivers.motor_b_driver import MotorB
-from a1z.robots.gripper import GRIPPER_CAN_ID, GRIPPER_KD, GRIPPER_KP, GRIPPER_MOTOR_RANGES
+from a1z.robots.gripper import GRIPPER_CAN_ID, GRIPPER_MOTOR_RANGES
+
+# MIT gains used only during calibration (not related to normal operation)
+GRIPPER_KP = 10.0
+GRIPPER_KD = 0.5
 
 CLOSE_VEL   = 2.0    # homing velocity toward close stop (rad/s)
 KD_HOME     = 1.8    # damping gain during homing (kp=0, velocity-only)
@@ -163,6 +167,7 @@ Examples:
     try:
         # Step 1+2: home to close, set RAM zero there
         motor.enable()
+        motor.set_ctrl_mode(1)  # calibration uses MIT mode regardless of flash setting
         _home_to_close(motor)
         _set_ram_zero(motor)
         print("[calib] RAM zero set at close stop.")
