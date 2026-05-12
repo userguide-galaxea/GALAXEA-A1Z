@@ -31,7 +31,7 @@ a1z/
 ├── examples/
 │   ├── gravity_comp.py            # 重力补偿示例
 │   ├── position_hold.py           # 位置保持示例
-│   └── gripper_test.py            # 独立夹爪测试 (100 Hz + 交互输入)
+│   └── gripper_hybrid_test.py     # 夹爪测试：自由行程 + 力矩饱和验证
 └── tools/
     ├── a1zctl                     # 机械臂控制 CLI（serve/move/gripper/dance/stop）
     ├── gripper_set_zero.py        # 夹爪零点标定（出厂已完成，一般无需执行）
@@ -106,8 +106,8 @@ python examples/gravity_comp.py --mode hold
 # 位置保持 + 移动到目标
 python examples/position_hold.py --q_target_deg 0,30,20,-15,0,0 --speed 0.5
 
-# 独立夹爪测试（100 Hz 控制回路 + 交互式开度输入）
-python examples/gripper_test.py --can can0
+# 夹爪测试（自由行程 + 力矩饱和验证，默认 0.5 Nm）
+python examples/gripper_hybrid_test.py --can can0
 ```
 
 ### 使用 a1zctl 服务端（可用于openclaw交互）
@@ -142,9 +142,7 @@ get_a1z_robot(
     default_kp=None,              # 覆盖默认位置增益
     default_kd=None,              # 覆盖默认速度增益
     with_gripper=False,           # True=启用夹爪 (CAN ID 0x07)
-    gripper_max_torque=-1.0,      # 夹爪力限制 (Nm)，-1=不限制
-    gripper_kp=None,              # 覆盖夹爪位置增益（默认 10.0）
-    gripper_clog_threshold=None,  # 覆盖夹爪堵转扭矩阈值 (Nm)，默认 0.3
+    gripper_max_torque=0.5,       # 夹爪最大夹持力矩 (Nm)，默认 0.5 Nm
 ) -> ArmRobot
 ```
 
@@ -231,7 +229,7 @@ from a1z.robots.get_robot import get_a1z_robot
 # 创建带夹爪的机械臂
 robot = get_a1z_robot(
     with_gripper=True,
-    gripper_max_torque=2.5,   # 可选：限制夹持力（Nm），防止夹坏物体
+    gripper_max_torque=0.5,   # 夹持力矩上限（Nm），默认 0.5 Nm
 )
 robot.start()   # 自动使能夹爪并归零到张开位
 
@@ -252,19 +250,14 @@ robot.move_joints(np.array([0, 0.3, -0.3, 0, 0, 0, 0.0]), speed=0.5)
 robot.stop()
 ```
 
-### 力限制（夹持保护）
+### 力矩限制（夹持保护）
 
-当 `gripper_max_torque > 0` 时，`GripperForceLimiter` 自动介入：
-
-- **堵转检测**：滑动窗口均值扭矩 > 阈值 且 速度 < 0.3 rad/s，判定为堵转
-- **保护行为**：退回到刚好产生 `max_torque` 的位置，停止继续施力
-- **自动解除**：指令方向转向张开，或扭矩降至 0.2 Nm 以下
+`gripper_max_torque` 通过力位混控模式的硬件电流饱和环节直接限制夹持力矩：夹爪接触物体后，电流被钳位在 `i_des = max_torque / 11.0`，力矩不再随位置误差增大，无论物体尺寸如何均不会超力。
 
 ```python
 robot = get_a1z_robot(
     with_gripper=True,
-    gripper_max_torque=2.5,        # 2.5 Nm 限制
-    gripper_clog_threshold=0.4,    # 堵转判定阈值（默认 0.3 Nm）
+    gripper_max_torque=1.0,   # 1.0 Nm 限制，适合轻物体
 )
 ```
 
