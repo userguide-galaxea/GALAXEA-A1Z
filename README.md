@@ -31,6 +31,7 @@ a1z/
 ├── examples/
 │   ├── gravity_comp.py            # 重力补偿示例
 │   ├── position_hold.py           # 位置保持示例
+│   ├── teach_and_play.py          # 零力示教录制与回放
 │   └── gripper_hybrid_test.py     # 夹爪测试：自由行程 + 力矩饱和验证
 └── tools/
     ├── a1zctl                     # 机械臂控制 CLI（serve/move/gripper/dance/stop）
@@ -109,6 +110,62 @@ python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
 # 夹爪测试（自由行程 + 力矩饱和验证，默认 0.5 Nm）
 python examples/gripper_hybrid_test.py --can can0
 ```
+
+### 零力示教与回放
+
+`teach_and_play.py` 分为两个子命令：`record`（录制）和 `play`（回放）。
+
+#### 录制轨迹
+
+```bash
+# 录制并保存到文件（默认 can0，50 Hz 采样）
+python examples/teach_and_play.py record teach.json
+
+# 指定 CAN 口和采样频率
+python examples/teach_and_play.py --can can1 record teach.json --sample-hz 100
+```
+
+启动后机械臂进入零力漂浮模式，可自由拖拽：
+
+```
+[record] Arm running in zero-gravity mode.
+[record] Press ENTER to START recording...   ← 按 Enter 开始录制
+[record] Recording — move the arm freely.  Press ENTER to STOP.
+                                             ← 拖动到目标轨迹后按 Enter 停止
+[record] Recorded 243 frames (4.86s).
+[record] Saved to teach.json
+```
+
+录制完成后机械臂自动回零位再失能。Ctrl+C 可随时中止（同样会回零再失能）。
+
+#### 回放轨迹
+
+```bash
+# 以原速回放
+python examples/teach_and_play.py play teach.json
+
+# 0.5 倍速回放
+python examples/teach_and_play.py play teach.json --speed 0.5
+
+# 循环回放直到 Ctrl+C
+python examples/teach_and_play.py play teach.json --loop
+
+# 指定 CAN 口
+python examples/teach_and_play.py --can can1 play teach.json
+```
+
+启动后机械臂先运动到轨迹起点，按 Enter 开始回放：
+
+```
+[play] Loaded 243 frames (4.86s).
+[play] Returning to start position...
+[play] Ready.
+[play] Press ENTER to PLAY (4.86s at 1.0x)...   ← 按 Enter 播放
+[play] Playing (loop 1)...
+[play] Playback complete.
+```
+
+回放结束（或 Ctrl+C 中止）后机械臂自动回零位再失能。
 
 ### 使用 a1zctl 服务端（可用于openclaw交互）
 
