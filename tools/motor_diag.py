@@ -54,6 +54,7 @@ JOINT_CONFIG = {
     3: ("arm_joint4", "MotorB4340", 0x04),
     4: ("arm_joint5", "MotorB4310", 0x05),
     5: ("arm_joint6", "MotorB4310", 0x06),
+    6: ("gripper",   "MotorB4310", 0x07),
 }
 
 # MotorA 反馈解析范围
@@ -125,8 +126,9 @@ def parse_motor_a_feedback(data: bytes) -> dict:
     vel_raw = (frame >> 28) & 0xFFF
     cur_raw = (frame >> 16) & 0xFFF
     # Temperature encoding: raw = actual_°C * 2 + 50
-    temp_motor = ((frame >> 8) & 0xFF - 50) / 2
-    temp_mos = (frame & 0xFF - 50) / 2
+    # Parentheses required — '-' has higher precedence than '&' in Python.
+    temp_motor = (((frame >> 8) & 0xFF) - 50) / 2
+    temp_mos   = ((frame & 0xFF) - 50) / 2
 
     return {
         "error_code": error_code,
@@ -392,7 +394,7 @@ def print_scan_results(results: List[MotorStatus]):
                 print("    6. MotorB CAN 波特率不是 1 Mbps")
 
     # 温度检查
-    hot = [s for s in results if s.online and (s.temp_motor > 70 or s.temp_mos > 70)]
+    hot = [s for s in results if s.online and (s.temp_motor > 80 or s.temp_mos > 85)]
     if hot:
         print("\n--- 温度警告 ---")
         for s in hot:
@@ -553,7 +555,7 @@ def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
                     if fb:
                         temp_m = fb.get("temp_motor", fb.get("temp_rotor", 0))
                         temp_mos = fb.get("temp_mos", 0)
-                        if temp_m > 60 or temp_mos > 60:
+                        if temp_m > 80 or temp_mos > 85:
                             warnings.append(f"  [!] Joint {j}: 温度偏高 (电机={temp_m}°C, MOS={temp_mos}°C)")
                         if fb["error_code"] not in (0, 1):
                             msg = MOTOR_B_ERROR_CODES.get(fb["error_code"], f"code=0x{fb['error_code']:X}")
@@ -791,13 +793,13 @@ def main():
     elif args.type == "motor_a":
         joints = [0, 1, 2]
     elif args.type == "motor_b":
-        joints = [3, 4, 5]
+        joints = [3, 4, 5, 6]
     else:
-        joints = list(range(6))
+        joints = list(range(7))
 
     for j in joints:
         if j not in JOINT_CONFIG:
-            print(f"错误: 关节 {j} 不存在 (有效范围: 0-5)")
+            print(f"错误: 关节 {j} 不存在 (有效范围: 0-6)")
             sys.exit(1)
 
     print("=" * 60)

@@ -104,7 +104,7 @@ python examples/gravity_comp.py --gravity_factor 1.0
 python examples/gravity_comp.py --mode hold
 
 # 位置保持 + 移动到目标
-python examples/position_hold.py --q_target_deg 0,30,20,-15,0,0 --speed 0.5
+python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
 
 # 夹爪测试（自由行程 + 力矩饱和验证，默认 0.5 Nm）
 python examples/gripper_hybrid_test.py --can can0
@@ -184,7 +184,7 @@ converged, q_sol = kin.ik(target_pose, init_q=q0)
 # 检查 CAN 接口是否正常
 python tools/motor_diag.py --check-can
 
-# 扫描所有 6 个电机（检查通信、读取状态、自动诊断）
+# 扫描所有 7 个电机（检查通信、读取状态、自动诊断）
 python tools/motor_diag.py --scan
 
 # 详细探测某个关节（完整收发流程 + 反馈解析）
