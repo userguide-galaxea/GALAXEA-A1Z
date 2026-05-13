@@ -175,8 +175,12 @@ class ArmRobot:
         logger.info("Stopping control loop...")
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
+            # Normal path: control loop disables motors before returning.
+            # disable_all() below is a safety net in case join times out.
             self._thread.join(timeout=2.0)
         self._running = False
+        # Safety net: disable again from main thread in case the control thread
+        # was killed before its own disable_all() completed (e.g. join timeout).
         self._motor_chain.disable_all()
         if self.gripper is not None:
             self.gripper.disable()
@@ -493,12 +497,21 @@ class ArmRobot:
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        # Send zero-torque as the final frame so motors cache zero instead of gravity comp.
+        # Send zero-torque first so motors cache a safe state, then disable immediately
+        # from this thread — guarantees disable frames follow the last command in-order
+        # on the CAN bus with no race against the main thread.
         _zeros = np.zeros(self._num_joints)
         try:
             self._motor_chain.send_commands(_zeros, _zeros, _zeros, _zeros, _zeros)
         except Exception:
             pass
+        self._motor_chain.disable_all()
+        if self.gripper is not None:
+            try:
+                self.gripper.disable()
+            except Exception:
+                pass
+        self._running = False
 
     def _update(self) -> None:
         """Single control step: read state -> compute gravity -> send commands."""

@@ -9,10 +9,10 @@ Usage:
     python examples/position_hold.py
 
     # Move to target (radians):
-    python examples/position_hold.py --q_target 0,0.6,0.4,-0.5,0,0
+    python examples/position_hold.py --q_target 0,0.6,-0.4,-0.5,0,0
 
     # Move to target (degrees):
-    python examples/position_hold.py --q_target_deg 0,30,0,-45,0,0
+    python examples/position_hold.py --q_target_deg 0,10,-10,-15,0,0
 """
 
 import argparse
@@ -72,12 +72,7 @@ def main():
         control_freq_hz=args.freq,
     )
 
-    def signal_handler(sig, frame):
-        print("\nCtrl+C received, stopping...")
-        robot.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     try:
         robot.start()
@@ -103,6 +98,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if robot.is_running:
+            print("\nReturning to zero...")
+            robot.move_joints(np.zeros(6), speed=args.speed * 0.5)
+            time.sleep(0.3)
         robot.stop()
         print("\nDone.")
 

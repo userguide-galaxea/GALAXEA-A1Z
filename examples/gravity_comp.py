@@ -73,12 +73,7 @@ def main():
         urdf_path=args.urdf,
     )
 
-    def signal_handler(sig, frame):
-        print("\nCtrl+C received, stopping...")
-        robot.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     try:
         robot.start(initial_kd=kd_override)
@@ -98,6 +93,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if robot.is_running:
+            print("\nReturning to zero...")
+            robot.move_joints(np.zeros(6), speed=0.3)
+            time.sleep(0.3)
         robot.stop()
         print("\nDone.")
 
