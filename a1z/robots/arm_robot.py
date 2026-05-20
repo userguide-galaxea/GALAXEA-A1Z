@@ -31,6 +31,7 @@ class JointCommand:
 
     pos: np.ndarray = field(default_factory=lambda: np.zeros(6))
     vel: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    acc: np.ndarray = field(default_factory=lambda: np.zeros(6))
     kp: np.ndarray = field(default_factory=lambda: np.zeros(6))
     kd: np.ndarray = field(default_factory=lambda: np.zeros(6))
     torque_ff: np.ndarray = field(default_factory=lambda: np.zeros(6))
@@ -237,6 +238,8 @@ class ArmRobot:
         """Smoothly interpolate to target position at the given speed (rad/s).
 
         Blocks until the target is reached or close enough.
+        Uses minimum-jerk (5th-order polynomial) interpolation so velocity and
+        acceleration are zero at both endpoints, eliminating start/stop jolts.
         """
         target_pos = self._clip_joint_pos(target_pos)
         current_pos = self.get_joint_pos()
@@ -250,18 +253,26 @@ class ArmRobot:
         duration = max_dist / speed
         dt = self._control_period_s
         steps = max(1, int(duration / dt))
+        delta = target_pos - current_pos
 
         for step in range(1, steps + 1):
-            alpha = step / steps
-            interp_pos = current_pos + alpha * (target_pos - current_pos)
+            t = step / steps
+            # minimum-jerk profile: pos and vel are zero at t=0 and t=1
+            alpha = 10*t**3 - 15*t**4 + 6*t**5
+            alpha_dot = (30*t**2 - 60*t**3 + 30*t**4) / duration
+            alpha_ddot = (60*t - 180*t**2 + 120*t**3) / duration**2
             with self._command_lock:
-                self._command.pos = interp_pos
+                self._command.pos = current_pos + alpha * delta
+                self._command.vel = alpha_dot * delta
+                self._command.acc = alpha_ddot * delta
                 self._command.kp = kp.copy()
                 self._command.kd = kd.copy()
             time.sleep(dt)
 
         with self._command_lock:
             self._command.pos = target_pos.copy()
+            self._command.vel = np.zeros(self._num_joints)
+            self._command.acc = np.zeros(self._num_joints)
 
     def start_recording(self, sample_hz: int = 50) -> None:
         """Start recording joint positions (during gravity-comp teaching).
@@ -443,27 +454,29 @@ class ArmRobot:
             cmd = JointCommand(
                 pos=self._command.pos.copy(),
                 vel=self._command.vel.copy(),
+                acc=self._command.acc.copy(),
                 kp=self._command.kp.copy(),
                 kd=self._command.kd.copy(),
                 torque_ff=self._command.torque_ff.copy(),
             )
 
-        # 3) Compute gravity compensation (state is already in URDF frame)
+        # 4) Full inverse dynamics: gravity + Coriolis + inertia
+        # When vel=0 and acc=0 (static hold) this degenerates to pure gravity comp.
         with self._state_lock:
             q = self._state.pos.copy()
 
-        tau_g = self._gravity_model.compute_gravity_torque(q)
+        tau_id = self._gravity_model.compute_inverse_dynamics(q, cmd.vel, cmd.acc)
 
         # Safety check
-        if np.any(np.abs(tau_g) > self._max_gravity_torque):
+        if np.any(np.abs(tau_id) > self._max_gravity_torque):
             raise RuntimeError(
-                f"Gravity torques too large! tau_g={np.round(tau_g, 2)} Nm. "
+                f"Inverse dynamics torques too large! tau={np.round(tau_id, 2)} Nm. "
                 f"Max allowed: {self._max_gravity_torque} Nm."
             )
 
-        # 4) Combine torques (in URDF frame), then convert to motor frame
-        tau_g_scaled = tau_g * self._gravity_torque_scale
-        torques_urdf = cmd.torque_ff + tau_g_scaled * self.gravity_comp_factor
+        # 5) Combine torques (in URDF frame), then convert to motor frame
+        tau_id_scaled = tau_id * self._gravity_torque_scale
+        torques_urdf = cmd.torque_ff + tau_id_scaled * self.gravity_comp_factor
         motor_torques = np.clip(torques_urdf * self._joint_sign, -self._torque_clip, self._torque_clip)
 
         # 5) Send commands to motor chain (convert position/velocity to motor frame)
