@@ -1,3 +1,7 @@
+<a id="chinese"></a>
+
+[中文](#chinese) | [English](#english)
+
 # A1Z — 6-DOF 机械臂 Python SDK（带G1Z夹爪）
 
 A1Z 六轴机械臂的 Python 控制 SDK，提供 CAN 总线电机驱动、基于 Pinocchio 的重力补偿、正/逆运动学，以及零力示教和位置保持等功能。
@@ -427,3 +431,414 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 | [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | 机器人动力学计算 |
 
 以上依赖均与 MIT 协议兼容，可自由用于商业和非商业项目。
+
+---
+
+<a id="english"></a>
+
+[中文](#chinese) | [English](#english)
+
+# A1Z — 6-DOF Robotic Arm Python SDK (with G1Z Gripper)
+
+A Python control SDK for the A1Z six-axis robotic arm, providing CAN-bus motor drivers, Pinocchio-based gravity compensation, forward/inverse kinematics, zero-force teaching, position hold, and G1Z gripper control.
+
+## Project Structure
+
+```
+a1z/
+├── pyproject.toml                 # Build config (flit)
+├── setup.py                       # setuptools fallback
+├── README.md
+├── a1z/                       # SDK main package
+│   ├── dynamics/
+│   │   └── gravity_model.py       # Pinocchio RNEA gravity compensation
+│   ├── motor_drivers/
+│   │   ├── can_interface.py       # CAN bus wrapper
+│   │   ├── motor_a_driver.py      # MotorA driver (MIT mixed control)
+│   │   ├── motor_b_driver.py      # MotorB driver + MixedMotorChain
+│   │   └── utils.py               # Data structures, float↔uint conversion
+│   ├── robots/
+│   │   ├── robot.py               # Robot Protocol (abstract interface)
+│   │   ├── arm_robot.py           # ArmRobot implementation (control loop + gravity comp)
+│   │   ├── get_robot.py           # Factory function get_a1z_robot()
+│   │   ├── gripper.py             # Gripper control (MotorB CAN ID 0x07)
+│   │   ├── server.py              # Unix socket control server
+│   │   └── kinematics.py          # FK/IK (Pinocchio)
+│   ├── robot_models/
+│   │   └── a1z/               # URDF model files (defaults to A1Z_G1Z.urdf)
+│   └── utils/
+│       └── utils.py               # RateRecorder, logging utilities
+├── examples/
+│   ├── gravity_comp.py            # Gravity compensation example
+│   ├── position_hold.py           # Position hold example
+│   ├── teach_and_play.py          # Zero-force teach recording and playback
+│   └── gripper_hybrid_test.py     # Gripper test: free travel + torque saturation
+└── tools/
+    ├── a1zctl                     # Arm control CLI (serve/move/gripper/dance/stop)
+    ├── gripper_set_zero.py        # Gripper zero calibration (factory-done, rarely needed)
+    ├── motor_diag.py              # Motor communication diagnostics
+    └── set_zero.py                # Motor zero calibration
+```
+
+## Installation
+
+### Prerequisites
+
+- Python >= 3.10
+- Linux + SocketCAN (hardware CAN interface required)
+- URDF model files (bundled, see `a1z/robot_models/a1z/`, defaults to `A1Z_G1Z.urdf` which includes the gripper)
+
+### Install the SDK
+
+```bash
+# Gripper branch is required for G1Z gripper support
+git clone -b gripper https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+
+cd /path/to/GALAXEA-A1Z
+
+# Development mode (recommended)
+pip install -e .
+
+# Or standard install
+pip install .
+```
+
+Dependencies are installed automatically: `numpy`, `python-can>=4.0`, `pin` (Pinocchio).
+
+### Configure the CAN Bus (SocketCAN)
+
+> Note: verify that the CAN termination resistor is installed correctly!
+
+Using the HHS USB-CANFD adapter (VID/PID `a8fa:8598`):
+
+```bash
+# 1. Load the driver
+sudo modprobe gs_usb
+
+# 2. Bind the HHS adapter to gs_usb (ignore errors if already bound)
+sudo sh -c 'echo "a8fa 8598" > /sys/bus/usb/drivers/gs_usb/new_id' 2>/dev/null || true
+
+# 3. Confirm the interface appears (usually can0 for a single adapter)
+ip link show type can
+
+# 4. Configure and bring up (1 Mbps)
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+```
+
+## Quick Start
+
+### Example Scripts
+
+```bash
+# Zero-force float (default URDF A1Z_G1Z.urdf, includes gripper)
+
+# Start with a small compensation factor (recommended for first-time setup)
+python examples/gravity_comp.py --gravity_factor 0.3
+
+# Increase to full compensation once direction is confirmed correct
+python examples/gravity_comp.py --gravity_factor 1.0
+
+# Position hold mode
+python examples/gravity_comp.py --mode hold
+
+# Position hold + move to target
+python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
+
+# Gripper test (free travel + torque saturation, default 0.5 Nm)
+python examples/gripper_hybrid_test.py --can can0
+```
+
+### Zero-Force Teaching and Playback
+
+`teach_and_play.py` has two sub-commands: `record` and `play`.
+
+#### Record a Trajectory
+
+```bash
+# Record and save to file (default can0, 50 Hz sampling)
+python examples/teach_and_play.py record teach.json
+
+# Specify CAN channel and sample rate
+python examples/teach_and_play.py --can can1 record teach.json --sample-hz 100
+```
+
+The arm enters zero-force float mode and can be freely backdriven:
+
+```
+[record] Arm running in zero-gravity mode.
+[record] Press ENTER to START recording...   ← press Enter to begin
+[record] Recording — move the arm freely.  Press ENTER to STOP.
+                                             ← guide the arm, then press Enter
+[record] Recorded 243 frames (4.86s).
+[record] Saved to teach.json
+```
+
+The arm returns to zero position and disables after recording. Ctrl+C aborts safely (also returns to zero).
+
+#### Play Back a Trajectory
+
+```bash
+# Play at original speed
+python examples/teach_and_play.py play teach.json
+
+# Play at 0.5× speed
+python examples/teach_and_play.py play teach.json --speed 0.5
+
+# Loop until Ctrl+C
+python examples/teach_and_play.py play teach.json --loop
+
+# Specify CAN channel
+python examples/teach_and_play.py --can can1 play teach.json
+```
+
+The arm moves to the trajectory start position first, then waits for Enter:
+
+```
+[play] Loaded 243 frames (4.86s).
+[play] Returning to start position...
+[play] Ready.
+[play] Press ENTER to PLAY (4.86s at 1.0x)...   ← press Enter to play
+[play] Playing (loop 1)...
+[play] Playback complete.
+```
+
+After playback (or Ctrl+C), the arm returns to zero and disables.
+
+### Using the a1zctl Server
+
+```bash
+# Terminal 1: start the server (with gripper)
+python3 tools/a1zctl serve --with-gripper
+
+# Terminal 2: send control commands
+python3 tools/a1zctl status              # show joint state (including gripper)
+python3 tools/a1zctl move --preset home  # move to preset position
+python3 tools/a1zctl move 0,60,-60,0,0,0 --speed 0.5
+python3 tools/a1zctl gripper 0.5         # set gripper to 50% open
+python3 tools/a1zctl dance --moves salute,wave,nod
+python3 tools/a1zctl info                # list all presets and limits
+python3 tools/a1zctl stop               # stop the server
+```
+
+## API Reference
+
+### `get_a1z_robot()`
+
+Factory function that creates a configured `ArmRobot` instance:
+
+```python
+get_a1z_robot(
+    can_channel="can0",           # CAN channel name
+    gravity_comp_factor=1.0,      # Gravity compensation scale (0=off, 1=full)
+    zero_gravity_mode=True,       # True=zero-force float, False=position hold
+    control_freq_hz=250,          # Control loop frequency (Hz)
+    urdf_path=None,               # Override URDF path
+    default_kp=None,              # Override default position gains
+    default_kd=None,              # Override default velocity gains
+    with_gripper=False,           # True=enable gripper (CAN ID 0x07)
+    gripper_max_torque=0.5,       # Max gripping torque (Nm), default 0.5 Nm
+) -> ArmRobot
+```
+
+### `ArmRobot` Key Methods
+
+| Method | Description |
+|--------|-------------|
+| `start(initial_kp, initial_kd)` | Enable motors and start the control loop (gripper homing included) |
+| `stop()` | Smooth shutdown (0.8 s decay), disable motors |
+| `get_joint_pos() -> np.ndarray` | Get current joint angles (rad); returns 7-element array when gripper is attached (7th = normalized gripper position) |
+| `get_joint_state() -> dict` | Get `{pos, vel, eff}` (arm joints only) |
+| `get_observations() -> dict` | Get `{joint_pos, gripper_pos, joint_vel, joint_eff}`; equivalent to `get_joint_state` without gripper |
+| `command_joint_pos(pos)` | Set target joint angles; accepts 7-element array (7th = gripper [0, 1]) |
+| `command_joint_state(joint_state)` | Set target joint angles + custom gains |
+| `command_gripper(value)` | Set gripper target position [0.0=closed, 1.0=fully open] |
+| `get_gripper_pos() -> float\|None` | Get current gripper command position; returns None without gripper |
+| `move_joints(target, speed, kp, kd)` | Interpolate to target position (blocking); accepts 7-element array |
+| `is_running` | Whether the control loop is active |
+
+### `Kinematics`
+
+```python
+from a1z.robots.kinematics import Kinematics
+
+kin = Kinematics("/path/to/urdf")
+
+# Forward kinematics → 4×4 homogeneous transform
+T = kin.fk(q)
+
+# Inverse kinematics (damped least squares)
+converged, q_sol = kin.ik(target_pose, init_q=q0)
+```
+
+## Tools
+
+### Motor Communication Diagnostics
+
+```bash
+# Check CAN interface
+python tools/motor_diag.py --check-can
+
+# Scan all 7 motors (check communication, read state, auto-diagnose)
+python tools/motor_diag.py --scan
+
+# Detailed probe of a specific joint (full TX/RX flow + feedback parsing)
+python tools/motor_diag.py --probe 3
+
+# Continuous monitoring of all motor states (position/velocity/temperature/error codes)
+python tools/motor_diag.py --monitor
+
+# Passive CAN bus listener (no commands sent, for diagnosing bus conflicts)
+python tools/motor_diag.py --listen --duration 10
+
+# Clear MotorB error codes
+python tools/motor_diag.py --clear-error
+python tools/motor_diag.py --clear-error --joints 3 4
+```
+
+The diagnostic script automatically detects and suggests remedies for common issues:
+- Motor not responding (unpowered / reversed CAN wiring / wrong ID / firmware mode)
+- MotorB error codes (overvoltage / undervoltage / overcurrent / overtemperature / comm loss / overload)
+- CAN bus faults (bus-off / error-passive / restart count)
+- Temperature warnings
+
+### Motor Zero Calibration
+
+```bash
+# Calibrate all motors (set current position as zero)
+sudo python tools/set_zero.py --all
+
+# Calibrate specific joints
+sudo python tools/set_zero.py --joints 0 3
+```
+
+## Gripper
+
+The gripper ships with factory zero calibration and requires no re-homing after power cycle.
+
+### Usage
+
+```python
+from a1z.robots.get_robot import get_a1z_robot
+
+robot = get_a1z_robot(
+    with_gripper=True,
+    gripper_max_torque=0.5,   # max gripping torque (Nm), default 0.5 Nm
+)
+robot.start()   # enables gripper and homes to open position
+
+# Control the gripper
+robot.command_gripper(0.0)   # close
+robot.command_gripper(1.0)   # fully open
+robot.command_gripper(0.5)   # 50% open
+
+# Read gripper state
+norm = robot.get_gripper_pos()           # current command position
+obs  = robot.get_observations()          # full observation dict including gripper_pos
+
+# Control arm and gripper together (7-element array, 7th = gripper)
+import numpy as np
+robot.command_joint_pos(np.array([0, 0.5, -0.5, 0, 0, 0, 0.8]))
+robot.move_joints(np.array([0, 0.3, -0.3, 0, 0, 0, 0.0]), speed=0.5)
+
+robot.stop()
+```
+
+### Torque Limiting (Grasp Protection)
+
+`gripper_max_torque` limits gripping force directly via the hardware current saturation in MIT mixed control mode. Once the gripper contacts an object, current is clamped to `i_des = max_torque / 11.0` and torque no longer grows with position error, regardless of object size.
+
+```python
+robot = get_a1z_robot(
+    with_gripper=True,
+    gripper_max_torque=1.0,   # 1.0 Nm, suitable for lighter objects
+)
+```
+
+## Control Architecture
+
+### MIT Position-Velocity-Torque Mixed Control
+
+Each control cycle, the SDK sends a five-tuple (`pos`, `vel`, `kp`, `kd`, `torque`) to each motor via `send_mit_command`. The motor firmware executes PD + feedforward internally:
+
+```python
+# motor_a_driver.py / motor_b_driver.py — send_mit_command
+def send_mit_command(self, pos, vel, kp, kd, torque):
+    pos_u16    = float_to_uint(pos,    r.pos_min,    r.pos_max,    16)
+    vel_u12    = float_to_uint(vel,    r.vel_min,    r.vel_max,    12)
+    kp_u12     = float_to_uint(kp,     r.kp_min,     r.kp_max,     12)
+    kd_u9      = float_to_uint(kd,     r.kd_min,     r.kd_max,      9)
+    torque_u12 = float_to_uint(torque, r.torque_min, r.torque_max, 12)
+    # pack into 8-byte CAN frame and send
+```
+
+The SDK's `_update()` runs at each control cycle (default 250 Hz):
+
+1. Read motor feedback from the CAN bus
+2. Compute gravity compensation torque `τ_g(q)` via Pinocchio RNEA
+3. Safety check: emergency stop if any `|τ_g|` exceeds the per-joint threshold
+4. Compose final torque: `τ_motor = (user_torque + τ_g × scale × factor) × joint_sign`
+5. Clip to safe range and send to all motors
+
+### Zero-Force Float Mode
+
+```python
+# get_a1z_robot(zero_gravity_mode=True)
+self._command.kp = np.zeros(self._num_joints)        # no position stiffness
+self._command.kd = self._default_kd.copy() * 0.5    # low damping
+# only τ_g counteracts gravity; the arm can be freely backdriven
+```
+
+### Position Hold Mode
+
+```python
+# get_a1z_robot(zero_gravity_mode=False)
+self._command.kp = self._default_kp.copy()  # [30, 30, 30, 20, 5, 5]
+self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
+# PD control + gravity compensation, locks to current position
+```
+
+## Safety
+
+- For first use, set `gravity_comp_factor` to a small value (e.g. 0.3) and confirm compensation direction before increasing
+- An emergency stop triggers automatically if gravity torques exceed per-joint safety thresholds
+- On shutdown, gravity compensation decays smoothly over 0.3 s with increased damping to prevent sudden drops
+- All target joint angles are clipped to the URDF joint limits
+
+## Joint Limits
+
+| Joint | Name | Mechanical (°) | Mechanical (rad) | Software (°) | Software (rad) |
+|-------|------|----------------|-----------------|--------------|----------------|
+| 0 | arm_joint1 | [-130°, 130°] | [-2.269, 2.269] | [-120°, 120°] | [-2.094, 2.094] |
+| 1 | arm_joint2 | [-1.94°, 192.78°] | [-0.034, 3.365] | [0°, 180°] | [0.000, 3.142] |
+| 2 | arm_joint3 | [-200.38°, 0°] | [-3.497, 0.000] | [-180°, 0°] | [-3.142, 0] |
+| 3 | arm_joint4 | [-91.88°, 110.38°] | [-1.604, 1.926] | [-85°, 85°] | [-1.484, 1.484] |
+| 4 | arm_joint5 | [-90°, 90°] | [-1.571, 1.571] | [-85°, 85°] | [-1.484, 1.484] |
+| 5 | arm_joint6 | [-120°, 120°] | [-2.094, 2.094] | [-115°, 115°] | [-2.007, 2.007] |
+
+## Default Control Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Default KP | `[30, 30, 30, 20, 5, 5]` |
+| Default KD | `[1, 1, 1, 0.5, 0.5, 0.5]` |
+| Joint sign | `[1, 1, -1, 1, -1, 1]` (joints 3 and 5 are inverted relative to URDF) |
+| Gravity torque scale | `[1, 1, 1, 1, 1, 1]` |
+| Max gravity torque | `[50, 50, 50, 24, 10, 10]` Nm |
+| Torque clip | `[70, 70, 70, 27, 10, 10]` Nm |
+| MotorA KT | 2.8 (current-to-torque conversion factor) |
+| Control frequency | 250 Hz |
+
+## License
+
+This project is open-sourced under the [MIT License](LICENSE), copyright © **Galaxea**.
+
+### Third-Party Dependency Licenses
+
+| Dependency | License | Description |
+|------------|---------|-------------|
+| [numpy](https://numpy.org) | BSD-3-Clause | Numerical computation |
+| [python-can](https://github.com/hardbyte/python-can) | LGPL-3.0 | CAN bus communication |
+| [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | Robot dynamics computation |
+
+All dependencies are compatible with the MIT license and may be used freely in commercial and non-commercial projects.
