@@ -1,3 +1,7 @@
+<a id="chinese"></a>
+
+[中文](#chinese) | [English](#english)
+
 # A1Z — 6-DOF 机械臂 Python SDK
 
 A1Z 六轴机械臂的 Python 控制 SDK，提供 CAN 总线电机驱动、基于 Pinocchio 的重力补偿、正/逆运动学，以及零力示教和位置保持等功能。
@@ -274,3 +278,284 @@ SDK 在每个控制周期（默认 250 Hz）执行：
 | [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | 机器人动力学计算 |
 
 以上依赖均与 MIT 协议兼容，可自由用于商业和非商业项目。
+
+---
+
+<a id="english"></a>
+
+[中文](#chinese) | [English](#english)
+
+# A1Z — 6-DOF Robotic Arm Python SDK
+
+A Python control SDK for the A1Z six-axis robotic arm, providing CAN-bus motor drivers, Pinocchio-based gravity compensation, forward/inverse kinematics, zero-force teaching, and position hold.
+
+## Hardware Overview
+
+| Joint | Name | Motor Type | CAN ID | Torque Range |
+|-------|------|------------|--------|--------------|
+| 0 | arm_joint1 | MotorA | 0x01 | ±50 Nm |
+| 1 | arm_joint2 | MotorA | 0x02 | ±50 Nm |
+| 2 | arm_joint3 | MotorA | 0x03 | ±50 Nm |
+| 3 | arm_joint4 | MotorB | 0x04 | ±25 Nm |
+| 4 | arm_joint5 | MotorB | 0x05 | ±7 Nm |
+| 5 | arm_joint6 | MotorB | 0x06 | ±7 Nm |
+
+All motors share a single CAN bus (`can0`) at 1 Mbps using the MIT position-velocity-torque mixed control protocol.
+
+## Project Structure
+
+```
+a1z/
+├── pyproject.toml                 # Build config (flit)
+├── setup.py                       # setuptools fallback
+├── README.md
+├── a1z/                       # SDK main package
+│   ├── dynamics/
+│   │   └── gravity_model.py       # Pinocchio RNEA gravity compensation
+│   ├── motor_drivers/
+│   │   ├── can_interface.py       # CAN bus wrapper
+│   │   ├── motor_a_driver.py      # MotorA driver (MIT mixed control)
+│   │   ├── motor_b_driver.py      # MotorB driver + MixedMotorChain
+│   │   └── utils.py               # Data structures, float↔uint conversion
+│   ├── robots/
+│   │   ├── robot.py               # Robot Protocol (abstract interface)
+│   │   ├── arm_robot.py           # ArmRobot implementation (control loop + gravity comp)
+│   │   ├── get_robot.py           # Factory function get_a1z_robot()
+│   │   └── kinematics.py          # FK/IK (Pinocchio)
+│   ├── robot_models/
+│   │   └── a1z/               # URDF model files
+│   └── utils/
+│       └── utils.py               # RateRecorder, logging utilities
+├── examples/
+│   ├── gravity_comp.py            # Gravity compensation example
+│   └── position_hold.py           # Position hold example
+└── tools/
+    ├── motor_diag.py              # Motor communication diagnostics
+    └── set_zero.py                # Motor zero calibration
+```
+
+## Installation
+
+### Prerequisites
+
+- Python >= 3.10
+- Linux + SocketCAN (hardware CAN interface required)
+- URDF model files (bundled, see `a1z/robot_models/a1z/`, defaults to `A1Z_Flange.urdf`)
+
+### Install the SDK
+
+```bash
+# A1Z arm SDK (without gripper)
+git clone https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+
+# Note: if you have the G1Z gripper, use the gripper branch instead
+git clone -b gripper https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+
+cd /path/to/GALAXEA-A1Z
+
+# Development mode (recommended)
+pip install -e .
+
+# Or standard install
+pip install .
+```
+
+Dependencies are installed automatically: `numpy`, `python-can>=4.0`, `pin` (Pinocchio).
+
+### Configure the CAN Bus (SocketCAN)
+
+> Note: verify that the CAN termination resistor is installed correctly!
+
+Using the HHS USB-CANFD adapter (VID/PID `a8fa:8598`):
+
+```bash
+# 1. Load the driver
+sudo modprobe gs_usb
+
+# 2. Bind the HHS adapter to gs_usb (ignore errors if already bound)
+sudo sh -c 'echo "a8fa 8598" > /sys/bus/usb/drivers/gs_usb/new_id' 2>/dev/null || true
+
+# 3. Confirm the interface appears (usually can0 for a single adapter)
+ip link show type can
+
+# 4. Configure and bring up (1 Mbps)
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+```
+
+## Quick Start
+
+### Example Scripts
+
+```bash
+# Zero-force float (default URDF A1Z_Flange.urdf, no end-effector load)
+
+# Start with a small compensation factor (recommended for first-time setup)
+python examples/gravity_comp.py --gravity_factor 0.3
+
+# Increase to full compensation once direction is confirmed correct
+python examples/gravity_comp.py --gravity_factor 1.0
+
+# Position hold mode
+python examples/gravity_comp.py --mode hold
+
+# Position hold + move to target
+python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
+```
+
+## API Reference
+
+### `get_a1z_robot()`
+
+Factory function that creates a configured `ArmRobot` instance:
+
+```python
+get_a1z_robot(
+    can_channel="can0",           # CAN channel name
+    gravity_comp_factor=1.0,      # Gravity compensation scale (0=off, 1=full)
+    zero_gravity_mode=True,       # True=zero-force float, False=position hold
+    control_freq_hz=250,          # Control loop frequency (Hz)
+    urdf_path=None,               # Override URDF path
+    default_kp=None,              # Override default position gains
+    default_kd=None,              # Override default velocity gains
+) -> ArmRobot
+```
+
+### `ArmRobot` Key Methods
+
+| Method | Description |
+|--------|-------------|
+| `start(initial_kp, initial_kd)` | Enable motors and start the control loop |
+| `stop()` | Smooth shutdown (0.3 s decay), disable motors |
+| `get_joint_pos() -> np.ndarray` | Get current joint angles (rad) |
+| `get_joint_state() -> dict` | Get `{pos, vel, eff}` |
+| `command_joint_pos(pos)` | Set target joint angles (uses default PD gains) |
+| `command_joint_state(joint_state)` | Set target joint angles + custom gains |
+| `move_joints(target, speed, kp, kd)` | Interpolate to target position (blocking) |
+| `is_running` | Whether the control loop is active |
+
+### `Kinematics`
+
+```python
+from a1z.robots.kinematics import Kinematics
+
+kin = Kinematics("/path/to/urdf")
+
+# Forward kinematics → 4×4 homogeneous transform
+T = kin.fk(q)
+
+# Inverse kinematics (damped least squares)
+converged, q_sol = kin.ik(target_pose, init_q=q0)
+```
+
+## Tools
+
+### Motor Communication Diagnostics
+
+```bash
+# Check CAN interface
+python tools/motor_diag.py --check-can
+
+# Scan all 6 motors (check communication, read state, auto-diagnose)
+python tools/motor_diag.py --scan
+
+# Detailed probe of a specific joint (full TX/RX flow + feedback parsing)
+python tools/motor_diag.py --probe 3
+
+# Continuous monitoring of all motor states (position/velocity/temperature/error codes)
+python tools/motor_diag.py --monitor
+
+# Passive CAN bus listener (no commands sent, for diagnosing bus conflicts)
+python tools/motor_diag.py --listen --duration 10
+
+# Clear MotorB error codes
+python tools/motor_diag.py --clear-error
+python tools/motor_diag.py --clear-error --joints 3 4
+```
+
+The diagnostic script automatically detects and suggests remedies for common issues:
+- Motor not responding (unpowered / reversed CAN wiring / wrong ID / firmware mode)
+- MotorB error codes (overvoltage / undervoltage / overcurrent / overtemperature / comm loss / overload)
+- CAN bus faults (bus-off / error-passive / restart count)
+- Temperature warnings
+
+### Motor Zero Calibration
+
+```bash
+# Calibrate all motors (set current position as zero)
+sudo python tools/set_zero.py --all
+
+# Calibrate specific joints
+sudo python tools/set_zero.py --joints 0 3
+```
+
+## Control Architecture
+
+### MIT Position-Velocity-Torque Mixed Control
+
+The motor firmware executes:
+
+```
+τ_motor = kp × (pos_target − pos_actual) + kd × (vel_target − vel_actual) + τ_ff
+```
+
+The SDK runs the following at each control cycle (default 250 Hz):
+
+1. Read all motor feedback from the CAN bus
+2. Compute gravity compensation torque `τ_g(q)` via Pinocchio RNEA
+3. Safety check: emergency stop if any `|τ_g|` exceeds the per-joint threshold
+4. Compose final torque: `τ_motor = (user_torque + τ_g × scale × factor) × joint_sign`
+5. Clip to safe range and send to motors
+
+### Zero-Force Float Mode
+
+`kp=0, kd=small value` — only gravity compensation torque counters gravity; the arm can be freely backdriven.
+
+### Position Hold Mode
+
+`kp=default gains, kd=default gains` — PD control plus gravity compensation.
+
+## Safety
+
+- For first use, set `gravity_comp_factor` to a small value (e.g. 0.3) and confirm compensation direction before increasing
+- An emergency stop triggers automatically if gravity torques exceed per-joint safety thresholds
+- On shutdown, gravity compensation decays smoothly over 0.3 s with increased damping to prevent sudden drops
+- All target joint angles are clipped to the URDF joint limits
+
+## Joint Limits
+
+| Joint | Name | Mechanical (°) | Mechanical (rad) | Software (°) | Software (rad) |
+|-------|------|----------------|-----------------|--------------|----------------|
+| 0 | arm_joint1 | [-130°, 130°] | [-2.269, 2.269] | [-120°, 120°] | [-2.094, 2.094] |
+| 1 | arm_joint2 | [-1.94°, 192.78°] | [-0.034, 3.365] | [0°, 180°] | [0.000, 3.142] |
+| 2 | arm_joint3 | [-200.38°, 0°] | [-3.497, 0.000] | [-180°, 0°] | [-3.142, 0] |
+| 3 | arm_joint4 | [-91.88°, 110.38°] | [-1.604, 1.926] | [-85°, 85°] | [-1.484, 1.484] |
+| 4 | arm_joint5 | [-90°, 90°] | [-1.571, 1.571] | [-85°, 85°] | [-1.484, 1.484] |
+| 5 | arm_joint6 | [-120°, 120°] | [-2.094, 2.094] | [-115°, 115°] | [-2.007, 2.007] |
+
+## Default Control Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Default KP | `[30, 30, 30, 20, 5, 5]` |
+| Default KD | `[1, 1, 1, 0.5, 0.5, 0.5]` |
+| Joint sign | `[1, 1, -1, 1, -1, 1]` (joints 3 and 5 are inverted relative to URDF) |
+| Gravity torque scale | `[1, 1, 1, 1, 1, 1]` |
+| Max gravity torque | `[50, 50, 50, 24, 10, 10]` Nm |
+| Torque clip | `[70, 70, 70, 27, 10, 10]` Nm |
+| MotorA KT | 2.8 (current-to-torque conversion factor) |
+| Control frequency | 250 Hz |
+
+## License
+
+This project is open-sourced under the [MIT License](LICENSE), copyright © **Galaxea**.
+
+### Third-Party Dependency Licenses
+
+| Dependency | License | Description |
+|------------|---------|-------------|
+| [numpy](https://numpy.org) | BSD-3-Clause | Numerical computation |
+| [python-can](https://github.com/hardbyte/python-can) | LGPL-3.0 | CAN bus communication |
+| [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | Robot dynamics computation |
+
+All dependencies are compatible with the MIT license and may be used freely in commercial and non-commercial projects.
