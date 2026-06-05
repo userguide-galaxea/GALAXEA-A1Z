@@ -61,7 +61,7 @@ _MOTOR_B_RANGES_DEFAULT = MotorBRanges(
 # Joint 3 (arm_joint4) uses higher torque range
 _MOTOR_B_RANGES_JOINT3 = MotorBRanges(
     pos_min=-12.5, pos_max=12.5,
-    vel_min=-30.0, vel_max=30.0,
+    vel_min=-10.0, vel_max=10.0,
     torque_min=-28.0, torque_max=28.0,
     kp_min=0.0, kp_max=500.0,
     kd_min=0.0, kd_max=5.0,
