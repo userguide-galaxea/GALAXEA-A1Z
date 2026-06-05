@@ -165,14 +165,23 @@ Examples:
     motor = MotorB(motor_id=GRIPPER_CAN_ID, bus=bus, ranges=GRIPPER_MOTOR_RANGES)
 
     try:
-        # Step 1+2: home to close, set RAM zero there
+        # Step 1: home to close mechanical stop
+        motor.clear_error()
         motor.enable()
         motor.set_ctrl_mode(1)  # calibration uses MIT mode regardless of flash setting
         _home_to_close(motor)
+
+        # Step 2: disable then set RAM zero (motor must be disabled to accept 0xFE)
+        motor.disable()
+        time.sleep(0.1)
         _set_ram_zero(motor)
+        time.sleep(0.1)
         print("[calib] RAM zero set at close stop.")
 
-        # Step 3: drive to midpoint (-half_travel rad)
+        # Step 3: re-enable and drive to midpoint (-half_travel rad)
+        motor.clear_error()
+        motor.enable()
+        motor.set_ctrl_mode(1)
         midpoint = -half
         print(f"[calib] Driving to midpoint ({midpoint:+.2f} rad) ...")
         t0 = time.time()
