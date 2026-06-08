@@ -40,6 +40,7 @@ GRIPPER_CLOSE_RAD: float = 2.87
 GRIPPER_OPEN_RAD: float = -2.87
 GRIPPER_MAX_VEL: float = 10.0   # rad/s speed limit during normal operation
 GRIPPER_HOME_VEL: float = 5.0   # rad/s speed limit during homing
+GRIPPER_HOME_TORQUE_NM: float = 0.5  # torque limit during homing (Nm)
 GRIPPER_CAN_ID: int = 7
 
 # Peak output torque at 0.8 overcurrent setting (from datasheet)
@@ -114,19 +115,23 @@ class Gripper:
     def disable(self) -> None:
         self._motor.disable()
 
-    def home(self, timeout: float = 3.0) -> None:
+    def home(self, timeout: float = 3.0) -> bool:
         """Drive gripper to open position and wait for arrival.
 
         Args:
             timeout: Maximum seconds to wait (default 3 s).
+
+        Returns:
+            True if gripper reached open position, False if timed out.
         """
         bus = self._motor.bus
         t0 = time.time()
+        i_home = GRIPPER_HOME_TORQUE_NM / MOTOR_PEAK_TORQUE_NM
         logger.info("Gripper init: driving to open (%+.3f rad) ...", self._open_rad)
+        reached = False
         while time.time() - t0 < timeout:
-            # Full torque allowed during homing — moving toward open, no object risk.
             self._motor.send_hybrid_command(
-                pos=self._open_rad, vel=GRIPPER_HOME_VEL, i_des=1.0
+                pos=self._open_rad, vel=GRIPPER_HOME_VEL, i_des=i_home
             )
             msg = bus.recv(timeout=0.01)
             if msg is not None and int(msg.arbitration_id) == self._motor.motor_id:
@@ -138,9 +143,17 @@ class Gripper:
                 logger.info(
                     "Gripper init: open at %+.3f rad (%.1fs).", fb.position, time.time() - t0
                 )
+                reached = True
                 break
+        if not reached:
+            logger.warning(
+                "Gripper home timed out after %.1fs, pos=%s rad.",
+                timeout,
+                f"{self._motor.last_feedback.position:+.3f}" if self._motor.last_feedback else "?",
+            )
         with self._lock:
             self._cmd_norm = 1.0
+        return reached
 
     def command(self, value: float) -> None:
         """Set gripper target position.
