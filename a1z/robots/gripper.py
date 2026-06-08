@@ -36,8 +36,12 @@ from a1z.motor_drivers.motor_b_driver import MotorB, MotorBRanges
 
 logger = logging.getLogger(__name__)
 
-GRIPPER_CLOSE_RAD: float = 2.87
-GRIPPER_OPEN_RAD: float = -2.87
+# ── Gripper hardware configuration ──────────────────────────────────────────
+# Adjust these two values to match the actual mechanical travel of your gripper.
+# Run tools/gripper_set_zero.py --half-travel <GRIPPER_CLOSE_RAD> to calibrate.
+GRIPPER_CLOSE_RAD: float = 2.87   # rad, fully closed (positive mechanical stop)
+GRIPPER_OPEN_RAD: float  = -2.87  # rad, fully open   (negative mechanical stop)
+# ────────────────────────────────────────────────────────────────────────────
 GRIPPER_MAX_VEL: float = 10.0   # rad/s speed limit during normal operation
 GRIPPER_HOME_VEL: float = 5.0   # rad/s speed limit during homing
 GRIPPER_HOME_TORQUE_NM: float = 0.5  # torque limit during homing (Nm)
@@ -96,6 +100,7 @@ class Gripper:
         self._lock = threading.Lock()
 
     def enable(self) -> None:
+        self._motor.clear_error()
         self._motor.enable()
         # Switch to force-position hybrid mode so hardware enforces torque limit.
         self._motor.set_ctrl_mode(4)
@@ -115,7 +120,7 @@ class Gripper:
     def disable(self) -> None:
         self._motor.disable()
 
-    def home(self, timeout: float = 3.0) -> bool:
+    def home(self, timeout: float = 1.5) -> bool:
         """Drive gripper to open position and wait for arrival.
 
         Args:
