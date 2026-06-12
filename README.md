@@ -4,6 +4,10 @@
 
 # A1Z — 6-DOF 机械臂 Python SDK
 
+<p align="center">
+  <img src="docs/images/A1Z.png" alt="A1Z 机械臂" width="500"/>
+</p>
+
 A1Z 六轴机械臂的 Python 控制 SDK，提供 CAN 总线电机驱动、基于 Pinocchio 的重力补偿、正/逆运动学，以及零力示教和位置保持等功能。
 
 ## 硬件概览
@@ -286,6 +290,10 @@ SDK 在每个控制周期（默认 250 Hz）执行：
 [中文](#chinese) | [English](#english)
 
 # A1Z — 6-DOF Robotic Arm Python SDK
+
+<p align="center">
+  <img src="docs/images/A1Z.png" alt="A1Z robotic arm" width="500"/>
+</p>
 
 A Python control SDK for the A1Z six-axis robotic arm, providing CAN-bus motor drivers, Pinocchio-based gravity compensation, forward/inverse kinematics, zero-force teaching, and position hold.
 
