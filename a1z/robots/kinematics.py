@@ -28,6 +28,8 @@ class Kinematics:
         self._model = pinocchio.buildModelFromUrdf(urdf_path)
         self._data = self._model.createData()
         self._end_effector_frame = end_effector_frame
+        self._q_lower = self._model.lowerPositionLimit.copy()
+        self._q_upper = self._model.upperPositionLimit.copy()
 
         if end_effector_frame is not None:
             self._frame_id = self._model.getFrameId(end_effector_frame)
@@ -71,9 +73,16 @@ class Kinematics:
     ) -> Tuple[bool, np.ndarray]:
         """Iterative inverse kinematics using damped least-squares.
 
+        The configuration is projected onto the URDF joint limits at every
+        iteration, so the returned q is always within limits. If the target
+        pose is only reachable by violating a limit, the solver fails to
+        converge and returns (False, best_q) instead of an out-of-limit
+        solution.
+
         Args:
             target_pose: 4x4 target homogeneous transform.
             init_q: Initial joint configuration. If None, uses zero configuration.
+                Clipped to joint limits before iterating.
             frame_name: Override frame name.
             dt: Integration timestep.
             pos_threshold: Position convergence threshold (m).
@@ -90,6 +99,7 @@ class Kinematics:
             fid = self._frame_id
 
         q = init_q.copy() if init_q is not None else np.zeros(self._model.nq)
+        q = np.clip(q, self._q_lower, self._q_upper)
 
         target_se3 = pinocchio.SE3(target_pose[:3, :3], target_pose[:3, 3])
 
@@ -114,5 +124,6 @@ class Kinematics:
             JtJ = J.T @ J + damping * np.eye(self._model.nv)
             dq = np.linalg.solve(JtJ, J.T @ err)
             q = pinocchio.integrate(self._model, q, dq * dt)
+            q = np.clip(q, self._q_lower, self._q_upper)
 
         return False, q

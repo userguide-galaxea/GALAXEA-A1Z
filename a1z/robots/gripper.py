@@ -195,3 +195,20 @@ class Gripper:
         self._motor.send_hybrid_command(
             pos=target_raw, vel=self._max_vel, i_des=self._i_des
         )
+
+    def free_drive_step(self) -> None:
+        """Send a zero-current hybrid frame so the user can move the gripper by hand.
+
+        i_des=0 disables phase current, so the motor produces no torque and the
+        jaw can be opened/closed manually while still streaming feedback. The
+        commanded position is kept at the current feedback so that returning to
+        normal step() does not snap the jaw.
+        """
+        fb = self._motor.last_feedback
+        pos = fb.position if fb is not None else self._open_rad
+        self._motor.send_hybrid_command(pos=pos, vel=0.0, i_des=0.0)
+        with self._lock:
+            self._cmd_norm = float(np.clip(
+                (pos - self._close_rad) / (self._open_rad - self._close_rad),
+                0.0, 1.0,
+            ))

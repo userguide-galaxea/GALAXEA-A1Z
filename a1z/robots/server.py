@@ -12,7 +12,7 @@ newline-terminated JSON response:
   Response: {"ok": true,  "data": {...}}
          or {"ok": false, "error": "<message>"}
 
-Commands: status | move | gripper | dance | stop | info
+Commands: status | move | gripper | dance | stop | info | estop | release
 """
 
 import json
@@ -90,6 +90,10 @@ class RobotServer:
             "pos_deg":    [round(v, 2) for v in pos_deg],
             "vel_rad_s":  [round(v, 3) for v in state["vel"].tolist()],
             "torque_nm":  [round(v, 3) for v in state["eff"].tolist()],
+            "temp_mos_c":   [round(v, 1) for v in state["temp_mos"].tolist()],
+            "temp_rotor_c": [round(v, 1) for v in state["temp_rotor"].tolist()],
+            "error_codes":  [int(v) for v in state["error_codes"].tolist()],
+            "estopped":     bool(self._robot.is_estopped),
         }
         if self._with_gripper:
             gpos = self._robot.get_gripper_pos()
@@ -149,6 +153,14 @@ class RobotServer:
         self._shutdown.set()
         return {"ok": True, "data": {"message": "Stopping server"}}
 
+    def _cmd_estop(self, _args: dict) -> dict:
+        self._robot.estop()
+        return {"ok": True, "data": {"estopped": True}}
+
+    def _cmd_release(self, _args: dict) -> dict:
+        self._robot.release()
+        return {"ok": True, "data": {"estopped": self._robot.is_estopped}}
+
     def _cmd_info(self, _args: dict) -> dict:
         return {
             "ok": True,
@@ -177,7 +189,14 @@ class RobotServer:
         "dance":   _cmd_dance,
         "stop":    _cmd_stop,
         "info":    _cmd_info,
+        "estop":   _cmd_estop,
+        "release": _cmd_release,
     }
+
+    # Commands that bypass the serializing _lock so they remain responsive
+    # while a blocking move/dance is in flight. Must be idempotent and
+    # internally thread-safe (ArmRobot.estop/release use their own locks).
+    _LOCK_FREE = {"status", "estop", "release", "info"}
 
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
@@ -193,6 +212,8 @@ class RobotServer:
             handler = self._HANDLERS.get(cmd)
             if handler is None:
                 result = {"ok": False, "error": f"Unknown command '{cmd}'"}
+            elif cmd in self._LOCK_FREE:
+                result = handler(self, args)
             else:
                 with self._lock:
                     result = handler(self, args)

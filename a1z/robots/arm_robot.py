@@ -16,6 +16,26 @@ from a1z.robots.gripper import Gripper
 
 logger = logging.getLogger(__name__)
 
+# Hard saturation for commanded feedforward velocity/acceleration, applied in
+# the control loop regardless of who produced the command. Legitimate
+# minimum-jerk profiles stay below ~2 rad/s and ~16 rad/s²; anything beyond
+# is a planner bug and must not reach inverse dynamics (inertia torque scales
+# with acc and would otherwise spike the torque safety stop) or the motor
+# velocity setpoint.
+_MAX_CMD_VEL_RAD_S = 4.0
+_MAX_CMD_ACC_RAD_S2 = 20.0
+
+# Bounds on PD gains supplied through command_joint_state. The motor protocol
+# layer also clips to its hardware range (kp_max=500, kd_max=5), but we cap
+# earlier so our own PD math never operates on absurd gains.
+_MAX_CMD_KP = 200.0
+_MAX_CMD_KD = 5.0
+
+# How many consecutive streaming frames may be rejected for out-of-limits
+# before we engage the soft estop. Catches a broken IK upstream flooding the
+# controller with junk instead of silently holding the last good command.
+_MAX_REJECTED_STREAM_FRAMES = 5
+
 
 @dataclass
 class JointState:
@@ -24,6 +44,9 @@ class JointState:
     pos: np.ndarray = field(default_factory=lambda: np.zeros(6))
     vel: np.ndarray = field(default_factory=lambda: np.zeros(6))
     eff: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    error_codes: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=int))
+    temp_mos: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    temp_rotor: np.ndarray = field(default_factory=lambda: np.zeros(6))
 
 
 @dataclass
@@ -64,6 +87,15 @@ class ArmRobot:
         control_freq_hz: int = 250,
         min_freq_hz: float = 80.0,
         motor_a_kt: float = 2.8,
+        # --- runtime safety (P0) ---
+        runtime_limit_buffer_rad: float = 0.15,
+        vel_limit: Optional[np.ndarray] = None,
+        temp_mos_warn_c: float = 70.0,
+        temp_mos_estop_c: float = 85.0,
+        temp_rotor_warn_c: float = 75.0,
+        temp_rotor_estop_c: float = 90.0,
+        stale_feedback_warn_s: float = 0.05,
+        stale_feedback_estop_s: float = 0.2,
     ):
         self._motor_chain = motor_chain
         self._bus = bus
@@ -107,6 +139,33 @@ class ArmRobot:
         self._record_lock = threading.Lock()
         self._record_last_t: float = 0.0
         self._record_period: float = 1.0 / 50.0
+
+        self._gripper_free_drive: bool = False
+
+        self._last_clip_warn_t: float = 0.0
+
+        # --- runtime safety state ---
+        self._runtime_limit_buffer_rad = runtime_limit_buffer_rad
+        # Default per-joint velocity caps: ~70% of each motor's hardware vel_max
+        # (MotorA ±18 → 12; joint4 MotorB ±10 → 7; joints 5,6 MotorB ±30 → 20).
+        self._vel_limit = (
+            vel_limit.copy() if vel_limit is not None
+            else np.array([12.0, 12.0, 12.0, 7.0, 20.0, 20.0])
+        )
+        self._temp_mos_warn_c = temp_mos_warn_c
+        self._temp_mos_estop_c = temp_mos_estop_c
+        self._temp_rotor_warn_c = temp_rotor_warn_c
+        self._temp_rotor_estop_c = temp_rotor_estop_c
+        self._stale_warn_s = stale_feedback_warn_s
+        self._stale_estop_s = stale_feedback_estop_s
+        self._last_feedback_t: float = 0.0
+        self._last_temp_warn_t: float = 0.0
+        self._last_stale_warn_t: float = 0.0
+        self._estop_latch = threading.Event()
+        # Consecutive streaming frames rejected for out-of-limit positions.
+        # Reset on any accepted frame; triggers estop at threshold.
+        self._rejected_frames: int = 0
+        self._last_reject_warn_t: float = 0.0
 
     def num_dofs(self) -> int:
         return self._num_joints + (1 if self.gripper is not None else 0)
@@ -167,6 +226,10 @@ class ArmRobot:
 
         self._stop_event.clear()
         self._running = True
+        self._estop_latch.clear()
+        # Initialize so the first control loop iteration doesn't immediately
+        # flag the bus as stale before any messages have been drained.
+        self._last_feedback_t = time.time()
         self._thread = threading.Thread(target=self._control_loop, name="arm_control_loop", daemon=True)
         self._thread.start()
         logger.info(f"Control loop started at {self._control_freq_hz} Hz")
@@ -198,6 +261,9 @@ class ArmRobot:
         """
         if self.gripper is None:
             raise RuntimeError("No gripper attached. Pass gripper= to get_a1z_robot().")
+        if self._estop_latch.is_set():
+            logger.warning("command_gripper rejected: robot is in estop")
+            return
         self.gripper.command(value)
 
     def get_gripper_pos(self) -> Optional[float]:
@@ -206,14 +272,54 @@ class ArmRobot:
             return None
         return self.gripper.get_pos()
 
+    def set_gripper_free_drive(self, enabled: bool) -> None:
+        """Toggle gripper free-drive (zero-torque) mode for hand teaching.
+
+        When enabled, the control loop sends gripper.free_drive_step() instead
+        of step(), so the jaw produces no torque and the operator can open/close
+        it manually while feedback continues to stream.
+        """
+        if self.gripper is None:
+            return
+        self._gripper_free_drive = bool(enabled)
+
+    def _accept_or_reject_stream(
+        self, pos: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """Run streaming clip, count rejections, engage estop on a flood.
+
+        Returns the (possibly tolerance-clipped) safe position to write to
+        the command, or None if the caller must skip updating the command
+        (caller holds the previous valid command). After
+        :data:`_MAX_REJECTED_STREAM_FRAMES` consecutive rejections the soft
+        estop is engaged to stop a broken upstream from flooding garbage.
+        """
+        safe = self._clip_joint_pos(pos)
+        if safe is None:
+            self._rejected_frames += 1
+            if self._rejected_frames >= _MAX_REJECTED_STREAM_FRAMES:
+                logger.error(
+                    f"{self._rejected_frames} consecutive streaming frames "
+                    "rejected — engaging soft estop"
+                )
+                self.estop()
+            return None
+        self._rejected_frames = 0
+        return safe
+
     def command_joint_pos(self, pos: np.ndarray) -> None:
         """Set target joint angles (rad) with default PD gains.
 
         Accepts either a 6-element arm-only array or a 7-element array where
         pos[6] is the gripper normalized position in [0.0, 1.0].
         """
+        if self._estop_latch.is_set():
+            logger.warning("command_joint_pos rejected: robot is in estop")
+            return
         if self.gripper is not None and len(pos) == self._num_joints + 1:
-            arm_pos = self._clip_joint_pos(pos[:self._num_joints])
+            arm_pos = self._accept_or_reject_stream(pos[:self._num_joints])
+            if arm_pos is None:
+                return
             with self._command_lock:
                 self._command.pos = arm_pos.copy()
                 self._command.kp = self._default_kp.copy()
@@ -221,7 +327,9 @@ class ArmRobot:
                 self._command.torque_ff = np.zeros(self._num_joints)
             self.gripper.command(float(np.clip(pos[self._num_joints], 0.0, 1.0)))
         else:
-            arm_pos = self._clip_joint_pos(pos[:self._num_joints])
+            arm_pos = self._accept_or_reject_stream(pos[:self._num_joints])
+            if arm_pos is None:
+                return
             with self._command_lock:
                 self._command.pos = arm_pos.copy()
                 self._command.kp = self._default_kp.copy()
@@ -233,13 +341,51 @@ class ArmRobot:
 
         Args:
             joint_state: Dict with keys 'pos', 'vel', and optionally 'kp', 'kd'.
+
+        Out-of-range pos / vel / kp / kd reject the entire frame (previous
+        command is held). Silent clipping of garbage feedforward would let
+        a bad upstream silently distort the trajectory or PD response, which
+        is harder to diagnose than a refused frame plus an error log.
         """
-        pos = self._clip_joint_pos(joint_state["pos"])
+        if self._estop_latch.is_set():
+            logger.warning("command_joint_state rejected: robot is in estop")
+            return
+        pos = self._accept_or_reject_stream(joint_state["pos"])
+        if pos is None:
+            return
+
+        vel = np.asarray(joint_state["vel"], dtype=np.float64)
+        if np.any(np.abs(vel) > _MAX_CMD_VEL_RAD_S):
+            offenders = "; ".join(
+                f"joint{i + 1}={vel[i]:.2f}"
+                for i in np.flatnonzero(np.abs(vel) > _MAX_CMD_VEL_RAD_S)
+            )
+            logger.error(
+                f"command_joint_state rejected: vel exceeds "
+                f"{_MAX_CMD_VEL_RAD_S} rad/s ({offenders})"
+            )
+            return
+
+        kp = np.asarray(joint_state.get("kp", self._default_kp), dtype=np.float64)
+        if np.any(kp < 0) or np.any(kp > _MAX_CMD_KP):
+            logger.error(
+                f"command_joint_state rejected: kp out of [0, {_MAX_CMD_KP}] "
+                f"({np.round(kp, 2).tolist()})"
+            )
+            return
+        kd = np.asarray(joint_state.get("kd", self._default_kd), dtype=np.float64)
+        if np.any(kd < 0) or np.any(kd > _MAX_CMD_KD):
+            logger.error(
+                f"command_joint_state rejected: kd out of [0, {_MAX_CMD_KD}] "
+                f"({np.round(kd, 3).tolist()})"
+            )
+            return
+
         with self._command_lock:
             self._command.pos = pos.copy()
-            self._command.vel = joint_state["vel"].copy()
-            self._command.kp = joint_state.get("kp", self._default_kp).copy()
-            self._command.kd = joint_state.get("kd", self._default_kd).copy()
+            self._command.vel = vel.copy()
+            self._command.kp = kp.copy()
+            self._command.kd = kd.copy()
 
     def get_joint_pos(self) -> np.ndarray:
         with self._state_lock:
@@ -254,18 +400,24 @@ class ArmRobot:
                 "pos": self._state.pos.copy(),
                 "vel": self._state.vel.copy(),
                 "eff": self._state.eff.copy(),
+                "error_codes": self._state.error_codes.copy(),
+                "temp_mos": self._state.temp_mos.copy(),
+                "temp_rotor": self._state.temp_rotor.copy(),
             }
 
     def get_observations(self) -> Dict[str, np.ndarray]:
         state = self.get_joint_state()
+        obs: Dict[str, np.ndarray] = {
+            "joint_pos": state["pos"],
+            "joint_vel": state["vel"],
+            "joint_eff": state["eff"],
+            "joint_error_codes": state["error_codes"],
+            "joint_temp_mos": state["temp_mos"],
+            "joint_temp_rotor": state["temp_rotor"],
+        }
         if self.gripper is not None:
-            return {
-                "joint_pos": state["pos"],
-                "gripper_pos": np.array([self.gripper.get_feedback_norm()]),
-                "joint_vel": state["vel"],
-                "joint_eff": state["eff"],
-            }
-        return state
+            obs["gripper_pos"] = np.array([self.gripper.get_feedback_norm()])
+        return obs
 
     def get_robot_info(self) -> Dict[str, Any]:
         return {
@@ -281,12 +433,60 @@ class ArmRobot:
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def is_estopped(self) -> bool:
+        return self._estop_latch.is_set()
+
+    def estop(self) -> None:
+        """Engage soft emergency stop.
+
+        Atomically zeros position gain, halves the velocity damping, clears
+        any feedforward torque, and pins the command position to the current
+        measured position. Gravity compensation keeps running so the arm
+        does not collapse under load.
+
+        Subsequent command_joint_pos / command_joint_state / command_gripper
+        calls are silently rejected until :meth:`release` is called. An
+        in-flight :meth:`move_joints` exits its interpolation loop on the
+        next step and returns early.
+        """
+        if self._estop_latch.is_set():
+            return
+        logger.warning("[ArmRobot] ESTOP engaged — commands suspended")
+        with self._state_lock:
+            cur_pos = self._state.pos.copy()
+        with self._command_lock:
+            self._command.pos = cur_pos
+            self._command.vel = np.zeros(self._num_joints)
+            self._command.acc = np.zeros(self._num_joints)
+            self._command.kp = np.zeros(self._num_joints)
+            self._command.kd = self._default_kd.copy() * 0.5
+            self._command.torque_ff = np.zeros(self._num_joints)
+        self._estop_latch.set()
+
+    def release(self) -> None:
+        """Release the estop latch and resume with default PD at current pose."""
+        if not self._estop_latch.is_set():
+            return
+        with self._state_lock:
+            cur_pos = self._state.pos.copy()
+        with self._command_lock:
+            self._command.pos = cur_pos
+            self._command.vel = np.zeros(self._num_joints)
+            self._command.acc = np.zeros(self._num_joints)
+            self._command.kp = self._default_kp.copy()
+            self._command.kd = self._default_kd.copy()
+            self._command.torque_ff = np.zeros(self._num_joints)
+        self._estop_latch.clear()
+        logger.info("[ArmRobot] ESTOP released")
+
     def move_joints(
         self,
         target_pos: np.ndarray,
         speed: float = 0.5,
         kp: Optional[np.ndarray] = None,
         kd: Optional[np.ndarray] = None,
+        max_jump_rad: Optional[float] = None,
     ) -> None:
         """Smoothly interpolate to target position at the given speed (rad/s).
 
@@ -294,14 +494,62 @@ class ArmRobot:
         target_pos[6] is the gripper normalized position in [0.0, 1.0].
         Gripper command is applied immediately; arm interpolation runs at speed.
         Blocks until the arm target is reached or close enough.
+
+        Args:
+            target_pos: Target joint angles (rad). Must be within joint limits
+                (small overshoot up to 0.05 rad is tolerated and clipped).
+            speed: Max joint speed (rad/s).
+            kp/kd: Optional PD gain overrides.
+            max_jump_rad: If set, refuse to move when any joint is farther than
+                this from the target. Useful to reject far-away IK solutions
+                (e.g. elbow-flipped branches) that would sweep the arm across
+                the workspace.
+
+        Raises:
+            ValueError: If the target exceeds joint limits beyond tolerance,
+                or violates max_jump_rad.
         """
+        if self._estop_latch.is_set():
+            logger.warning("move_joints rejected: robot is in estop")
+            return
+        # Minimum-jerk peak velocity is 1.875 × average. Reject upfront so we
+        # never generate a feedforward that the _update assert would refuse.
+        if speed <= 0:
+            raise ValueError(f"move_joints speed must be > 0, got {speed}")
+        if speed * 1.875 > _MAX_CMD_VEL_RAD_S:
+            raise ValueError(
+                f"move_joints speed {speed:.2f} rad/s exceeds feedforward "
+                f"cap: peak vel {speed * 1.875:.2f} > {_MAX_CMD_VEL_RAD_S} rad/s"
+            )
         gripper_target: Optional[float] = None
         if self.gripper is not None and len(target_pos) == self._num_joints + 1:
             gripper_target = float(np.clip(target_pos[self._num_joints], 0.0, 1.0))
             target_pos = target_pos[:self._num_joints]
 
-        target_pos = self._clip_joint_pos(target_pos)
-        current_pos = self.get_joint_pos()[:self._num_joints]
+        target_pos = self._validate_joint_pos(target_pos)
+        # Safety check uses the *measured* position — this is what max_jump_rad
+        # actually protects (e.g. catching elbow-flipped IK against reality).
+        measured_pos = self.get_joint_pos()[:self._num_joints]
+
+        if max_jump_rad is not None:
+            jumps = np.abs(target_pos - measured_pos)
+            if np.any(jumps > max_jump_rad):
+                offenders = "; ".join(
+                    f"joint{i + 1}: {jumps[i]:.3f} rad"
+                    for i in np.flatnonzero(jumps > max_jump_rad)
+                )
+                raise ValueError(
+                    f"Target too far from current position "
+                    f"(max_jump_rad={max_jump_rad}), refusing to move: {offenders}"
+                )
+
+        # Trajectory start uses the *last commanded* position so back-to-back
+        # move_joints calls keep command-space continuity. Using the measured
+        # position here would inject a backwards step equal to the PD tracking
+        # error between consecutive moves, which the PD loop sees as a jerk.
+        with self._command_lock:
+            current_pos = self._command.pos.copy()
+
         kp = kp if kp is not None else self._default_kp
         kd = kd if kd is not None else self._default_kd
 
@@ -312,12 +560,25 @@ class ArmRobot:
         if max_dist < 0.001:
             return
 
-        duration = max_dist / speed
+        # Minimum-jerk peak acc ≈ 5.7735·delta/duration². A re-command of an
+        # already-reached pose (tiny delta) or a high-speed short-distance
+        # move would otherwise spike past the feedforward cap and trip the
+        # _update assert. Clamp duration from below by:
+        #   (a) the fixed MIN_DURATION (prevents re-command twitch),
+        #   (b) sqrt(6·delta/MAX_ACC) — slight over-estimate of the 5.7735
+        #       coefficient gives ~4% acc headroom for float epsilon.
+        # The vel cap is already guaranteed by the speed pre-check above.
+        _MIN_MOVE_DURATION_S = 0.3
+        _acc_dur = float(np.sqrt(6.0 * max_dist / _MAX_CMD_ACC_RAD_S2))
+        duration = max(max_dist / speed, _acc_dur, _MIN_MOVE_DURATION_S)
         dt = self._control_period_s
         steps = max(1, int(duration / dt))
         delta = target_pos - current_pos
 
         for step in range(1, steps + 1):
+            if self._estop_latch.is_set():
+                logger.warning("move_joints aborted mid-trajectory: estop engaged")
+                return
             t = step / steps
             # minimum-jerk profile: pos and vel are zero at t=0 and t=1
             alpha = 10*t**3 - 15*t**4 + 6*t**5
@@ -529,10 +790,17 @@ class ArmRobot:
         # 1) Read current joint state
         self._read_state()
 
+        # 1.5) Runtime safety checks. Hard faults raise; the control loop's
+        # try/except catches and triggers emergency disable. Warnings are
+        # rate-limited and logged in-place.
+        self._check_runtime_safety()
+
         # 2) Sample for teaching recording
         if self._recording and t_now - self._record_last_t >= self._record_period:
             with self._state_lock:
                 pos_snap = self._state.pos.copy()
+            if self.gripper is not None:
+                pos_snap = np.append(pos_snap, self.gripper.get_feedback_norm())
             with self._record_lock:
                 if self._recording:
                     self._record_buffer.append((t_now, pos_snap))
@@ -551,6 +819,22 @@ class ArmRobot:
 
         # 4) Full inverse dynamics: gravity + Coriolis + inertia
         # When vel=0 and acc=0 (static hold) this degenerates to pure gravity comp.
+        # Hard assertions, not silent clips: if vel/acc ever exceed the
+        # feedforward caps here, an upstream validation in command_joint_state
+        # or move_joints failed and we'd rather emergency-stop than push a
+        # distorted trajectory the caller can't see.
+        if np.any(np.abs(cmd.vel) > _MAX_CMD_VEL_RAD_S):
+            raise RuntimeError(
+                f"Feedforward vel out of bounds in _update: "
+                f"{np.round(cmd.vel, 2).tolist()} "
+                f"(cap ±{_MAX_CMD_VEL_RAD_S} rad/s)"
+            )
+        if np.any(np.abs(cmd.acc) > _MAX_CMD_ACC_RAD_S2):
+            raise RuntimeError(
+                f"Feedforward acc out of bounds in _update: "
+                f"{np.round(cmd.acc, 2).tolist()} "
+                f"(cap ±{_MAX_CMD_ACC_RAD_S2} rad/s²)"
+            )
         with self._state_lock:
             q = self._state.pos.copy()
 
@@ -579,23 +863,201 @@ class ArmRobot:
 
         # 7) Send gripper command (independent of arm gravity comp)
         if self.gripper is not None:
-            self.gripper.step()
+            if self._gripper_free_drive:
+                self.gripper.free_drive_step()
+            else:
+                self.gripper.step()
 
     def _read_state(self) -> None:
         """Read all motor feedback and update internal state."""
-        self._motor_chain.drain_and_update(self._bus)
+        count = self._motor_chain.drain_and_update(self._bus)
+        if count > 0:
+            self._last_feedback_t = time.time()
+        temp_mos, temp_rotor = self._motor_chain.get_temperatures()
         with self._state_lock:
             self._state.pos = self._motor_chain.get_positions() * self._joint_sign
             self._state.vel = self._motor_chain.get_velocities() * self._joint_sign
             self._state.eff = self._motor_chain.get_efforts() * self._joint_sign
+            self._state.error_codes = self._motor_chain.get_error_codes()
+            self._state.temp_mos = temp_mos
+            self._state.temp_rotor = temp_rotor
 
     # --- Safety ---
 
-    def _clip_joint_pos(self, pos: np.ndarray) -> np.ndarray:
+    def _check_runtime_safety(self) -> None:
+        """Run all per-cycle safety checks. Raises on hard fault.
+
+        Order is intentional: bus/health checks first so a downed bus is
+        caught before motion checks are evaluated against stale data.
+        Motion-based checks (joint limits, velocity) are skipped while
+        estop is latched because the user is expected to move the arm
+        by hand in that state.
+        """
+        self._check_feedback_stale()
+        self._check_motor_errors()
+        self._check_motor_temps()
+        if self._estop_latch.is_set():
+            return
+        self._check_runtime_joint_limits()
+        self._check_velocity_limits()
+
+    def _check_runtime_joint_limits(self) -> None:
+        if self._joint_limits is None:
+            return
+        pos = self._state.pos
+        buf = self._runtime_limit_buffer_rad
+        for i, (lo, hi) in enumerate(self._joint_limits):
+            if pos[i] < lo - buf or pos[i] > hi + buf:
+                raise RuntimeError(
+                    f"Runtime joint limit violated: joint{i + 1}={pos[i]:.3f} rad "
+                    f"outside [{lo:.3f}, {hi:.3f}] (buffer={buf:.2f})"
+                )
+
+    def _check_motor_errors(self) -> None:
+        # MotorB codes from MOTOR_B_ERROR_CODES; MotorA codes share the same
+        # convention for 0x0 (disabled) and 0x1 (normal). Anything else is a
+        # hardware fault — over voltage/current, thermal cutout, comm loss, etc.
+        # We can't distinguish "no feedback parsed yet" from a real disabled
+        # report, so a disabled code (0x0) is only flagged when feedback is
+        # arriving fresh — which is already guaranteed by _check_feedback_stale
+        # being called first.
+        errs = self._state.error_codes
+        bad = (errs != 0x1) & (errs != 0x0)
+        if np.any(bad):
+            from a1z.motor_drivers.utils import MotorErrorCode
+            idx = int(np.argmax(bad))
+            code = int(errs[idx])
+            raise RuntimeError(
+                f"Motor fault on joint{idx + 1}: error_code=0x{code:X} "
+                f"({MotorErrorCode.get_error_message(code)})"
+            )
+
+    def _check_motor_temps(self) -> None:
+        t_mos = self._state.temp_mos
+        t_rotor = self._state.temp_rotor
+        if np.any(t_mos > self._temp_mos_estop_c):
+            idx = int(np.argmax(t_mos))
+            raise RuntimeError(
+                f"MOS over-temperature on joint{idx + 1}: {t_mos[idx]:.1f}°C "
+                f"(limit {self._temp_mos_estop_c:.1f}°C)"
+            )
+        if np.any(t_rotor > self._temp_rotor_estop_c):
+            idx = int(np.argmax(t_rotor))
+            raise RuntimeError(
+                f"Motor coil over-temperature on joint{idx + 1}: "
+                f"{t_rotor[idx]:.1f}°C (limit {self._temp_rotor_estop_c:.1f}°C)"
+            )
+        now = time.time()
+        if now - self._last_temp_warn_t > 1.0:
+            hot_mos = t_mos > self._temp_mos_warn_c
+            hot_rotor = t_rotor > self._temp_rotor_warn_c
+            if np.any(hot_mos) or np.any(hot_rotor):
+                parts = []
+                for i in np.flatnonzero(hot_mos):
+                    parts.append(f"joint{i + 1} MOS={t_mos[i]:.1f}°C")
+                for i in np.flatnonzero(hot_rotor):
+                    parts.append(f"joint{i + 1} coil={t_rotor[i]:.1f}°C")
+                logger.warning("Motor temperature warning: " + "; ".join(parts))
+                self._last_temp_warn_t = now
+
+    def _check_velocity_limits(self) -> None:
+        v = self._state.vel
+        absv = np.abs(v)
+        over = absv > self._vel_limit
+        if np.any(over):
+            idx = int(np.argmax(absv - self._vel_limit))
+            raise RuntimeError(
+                f"Joint velocity limit exceeded on joint{idx + 1}: "
+                f"{v[idx]:.2f} rad/s (limit ±{self._vel_limit[idx]:.2f})"
+            )
+
+    def _check_feedback_stale(self) -> None:
+        now = time.time()
+        age = now - self._last_feedback_t
+        if age > self._stale_estop_s:
+            raise RuntimeError(
+                f"CAN feedback stale for {age * 1000:.0f}ms "
+                f"(limit {self._stale_estop_s * 1000:.0f}ms) — bus may be down"
+            )
+        if age > self._stale_warn_s and now - self._last_stale_warn_t > 1.0:
+            logger.warning(f"CAN feedback stale: {age * 1000:.0f}ms")
+            self._last_stale_warn_t = now
+
+    def _clip_joint_pos(
+        self, pos: np.ndarray, tol_rad: float = 0.05
+    ) -> Optional[np.ndarray]:
+        """Clip small overshoots, reject genuinely out-of-limit commands.
+
+        Used by the streaming command entry points (teleop / trajectory replay
+        loops) where raising on a single noisy frame would tank the entire
+        session. The behavior splits the violation by magnitude:
+
+        - Within tol_rad of a limit: clipped silently (feedback noise, teach
+          recordings resting at the boundary).
+        - Beyond tol_rad: command is *rejected*. Returns None so the caller
+          knows to keep the previous valid command instead of driving the arm
+          to a geometrically unrelated clipped pose.
+
+        Rejections are logged at error level on every occurrence (no rate
+        limiting) because a junk IK solution is a serious upstream bug. Small
+        clips are rate-limited at 1 Hz to avoid spamming.
+        """
         pos = pos.copy()
-        if self._joint_limits is not None:
-            for i, (lo, hi) in enumerate(self._joint_limits):
+        if self._joint_limits is None:
+            return pos
+        rejected: List[str] = []
+        clipped: List[str] = []
+        for i, (lo, hi) in enumerate(self._joint_limits):
+            if pos[i] < lo - tol_rad or pos[i] > hi + tol_rad:
+                rejected.append(
+                    f"joint{i + 1}={pos[i]:.3f} outside [{lo:.3f}, {hi:.3f}]"
+                )
+            elif pos[i] < lo or pos[i] > hi:
+                clipped.append(
+                    f"joint{i + 1}: {pos[i]:.3f} -> [{lo:.3f}, {hi:.3f}]"
+                )
                 pos[i] = np.clip(pos[i], lo, hi)
+        if rejected:
+            logger.error(
+                "Streaming command REJECTED (out of limits): "
+                + "; ".join(rejected)
+            )
+            return None
+        if clipped:
+            now = time.time()
+            if now - self._last_clip_warn_t >= 1.0:
+                self._last_clip_warn_t = now
+                logger.warning(
+                    "Joint command minor overshoot, clipped: "
+                    + "; ".join(clipped)
+                )
+        return pos
+
+    def _validate_joint_pos(
+        self, pos: np.ndarray, tolerance_rad: float = 0.05
+    ) -> np.ndarray:
+        """Validate target against joint limits: clip within tolerance, raise beyond.
+
+        Small overshoots (e.g. recorded waypoints resting slightly past a soft
+        limit) are silently clipped; anything beyond tolerance_rad indicates an
+        upstream error (bad IK solution, wrong units) and raises ValueError
+        instead of executing a geometrically unrelated clipped configuration.
+        """
+        pos = pos.copy()
+        if self._joint_limits is None:
+            return pos
+        violations = []
+        for i, (lo, hi) in enumerate(self._joint_limits):
+            if pos[i] < lo - tolerance_rad or pos[i] > hi + tolerance_rad:
+                violations.append(
+                    f"joint{i + 1}: {pos[i]:.3f} rad outside [{lo:.3f}, {hi:.3f}]"
+                )
+            pos[i] = np.clip(pos[i], lo, hi)
+        if violations:
+            raise ValueError(
+                "Target joint position out of limits, refusing to move: "
+                + "; ".join(violations)
+            )
         return pos
 
     def _check_joint_limits(self, pos: np.ndarray, buffer_rad: float = 0.1) -> None:

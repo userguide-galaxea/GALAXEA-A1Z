@@ -33,6 +33,7 @@ def cmd_record(args: argparse.Namespace) -> None:
         can_channel=args.can,
         zero_gravity_mode=True,
         gravity_comp_factor=1.0,
+        with_gripper=True,
     )
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
@@ -44,12 +45,13 @@ def cmd_record(args: argparse.Namespace) -> None:
     print("=" * 60)
 
     robot.start()
-    print("[record] Arm running in zero-gravity mode.\n")
+    robot.set_gripper_free_drive(True)
+    print("[record] Arm in zero-gravity mode; gripper in free-drive (move by hand).\n")
 
     try:
         _wait_enter("[record] Press ENTER to START recording...")
         robot.start_recording(sample_hz=args.sample_hz)
-        print("[record] Recording — move the arm freely.  Press ENTER to STOP.")
+        print("[record] Recording — move the arm and gripper freely.  Press ENTER to STOP.")
 
         _stop_display = threading.Event()
 
@@ -57,8 +59,10 @@ def cmd_record(args: argparse.Namespace) -> None:
             while not _stop_display.is_set():
                 state = robot.get_joint_state()
                 pos_deg = np.degrees(state["pos"])
+                grip = robot.gripper.get_feedback_norm() if robot.gripper else None
+                grip_str = f"  grip: {grip:.2f}" if grip is not None else ""
                 print(
-                    f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]",
+                    f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]{grip_str}",
                     end="\r",
                 )
                 time.sleep(0.1)
@@ -86,6 +90,7 @@ def cmd_record(args: argparse.Namespace) -> None:
         print("\n[record] Interrupted.")
     finally:
         if robot.is_running:
+            robot.set_gripper_free_drive(False)
             print("[record] Returning to zero...")
             robot.move_joints(np.zeros(6), speed=0.3)
             time.sleep(0.3)
@@ -98,6 +103,7 @@ def cmd_play(args: argparse.Namespace) -> None:
         can_channel=args.can,
         zero_gravity_mode=False,
         gravity_comp_factor=1.0,
+        with_gripper=True,
     )
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
