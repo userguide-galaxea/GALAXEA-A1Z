@@ -315,6 +315,49 @@ class MixedMotorChain:
     def get_efforts(self) -> np.ndarray:
         return self._efforts.copy()
 
+    def get_error_codes(self) -> np.ndarray:
+        """Return per-joint motor error codes (int array, length n).
+
+        Motors without feedback yet return 0 (matches "disabled" code). Caller
+        is responsible for distinguishing "no data" vs. "disabled fault" by
+        also checking feedback staleness.
+        """
+        out = np.zeros(self._n, dtype=int)
+        for i, motor in enumerate(self._motor_a_list):
+            idx = self._motor_a_joint_indices[i]
+            fb = motor.last_feedback
+            if fb is not None:
+                out[idx] = int(fb.error)
+        for i, motor in enumerate(self._motor_b_list):
+            idx = self._motor_b_joint_indices[i]
+            fb = motor.last_feedback
+            if fb is not None:
+                out[idx] = int(fb.error)
+        return out
+
+    def get_temperatures(self) -> tuple:
+        """Return (temp_mos, temp_rotor) arrays in °C, length n.
+
+        MotorA reports motor-coil temperature in its ``temperature`` field —
+        we surface that as the rotor temperature for naming consistency with
+        MotorB. Motors without feedback yet read 0.0.
+        """
+        temp_mos = np.zeros(self._n)
+        temp_rotor = np.zeros(self._n)
+        for i, motor in enumerate(self._motor_a_list):
+            idx = self._motor_a_joint_indices[i]
+            fb = motor.last_feedback
+            if fb is not None:
+                temp_mos[idx] = float(fb.temperature_mos)
+                temp_rotor[idx] = float(fb.temperature)
+        for i, motor in enumerate(self._motor_b_list):
+            idx = self._motor_b_joint_indices[i]
+            fb = motor.last_feedback
+            if fb is not None:
+                temp_mos[idx] = float(fb.temperature_mos)
+                temp_rotor[idx] = float(fb.temperature_rotor)
+        return temp_mos, temp_rotor
+
     def send_commands(
         self,
         pos: np.ndarray,
