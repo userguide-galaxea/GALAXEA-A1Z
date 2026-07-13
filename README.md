@@ -119,6 +119,8 @@ python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
 python examples/gripper_hybrid_test.py --can can0
 ```
 
+> ⚠️ **如果上述命令报错或机械臂无反应**，请跳转到 [CAN 通信故障排查](#can-通信故障排查)。
+
 ### 零力示教与回放
 
 `teach_and_play.py` 分为两个子命令：`record`（录制）和 `play`（回放）。
@@ -610,6 +612,8 @@ python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
 # Gripper test (free travel + torque saturation, default 0.5 Nm)
 python examples/gripper_hybrid_test.py --can can0
 ```
+
+> ⚠️ **If the commands above error out or the arm does not respond**, jump to [CAN Communication Troubleshooting](#can-communication-troubleshooting).
 
 ### Zero-Force Teaching and Playback
 
