@@ -144,7 +144,7 @@ python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
 uname -r
 ```
 
-- **方案 A（推荐）**：升级 Linux 内核到 **6.8.0-124** 或更新版本
+- **方案 A**：升级 Linux 内核到 **6.8.0-124** 或更新版本（如果您有其他工作依赖当前内核，建议按照方案 B 操作）
 - **方案 B**：按官方文档给内核 / 驱动打补丁 —— 详见 [Galaxea 内核补丁指引](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
 
 ### 3. 手动确认是否为内核兼容问题（可选）
@@ -484,7 +484,7 @@ Check your current kernel version:
 uname -r
 ```
 
-- **Option A (recommended)**: upgrade the Linux kernel to **6.8.0-124** or newer
+- **Option A**: upgrade the Linux kernel to **6.8.0-124** or newer (if you have other work that depends on the current kernel, prefer Option B)
 - **Option B**: patch the kernel / driver as described in the [Galaxea kernel patch guide](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
 
 ### 3. Manually confirm the kernel compatibility issue (optional)
