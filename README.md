@@ -125,6 +125,60 @@ python examples/gravity_comp.py --mode hold
 python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
 ```
 
+## CAN 通信故障排查
+
+如果运行 `python examples/gravity_comp.py --gravity_factor 0.3` 报错或机械臂无反应，最常见原因是部分较老或特定版本的 Linux 内核，其内置的 socketcan / `gs_usb` 驱动与本 CAN 盒存在兼容性问题。
+
+### 1. 检查硬件接线
+
+- CAN 盒（USB-CANFD 适配器）已插入电脑并牢固接触
+- CAN 总线两端接线正确、无松动
+- 机械臂电源已上电
+- CAN 盒的终端电阻正确安装（参见上文"配置 CAN 总线"）
+
+### 2. 检查内核版本并修复（推荐直接执行）
+
+查看当前内核版本：
+
+```bash
+uname -r
+```
+
+- **方案 A（推荐）**：升级 Linux 内核到 **6.8.0-124** 或更新版本
+- **方案 B**：按官方文档给内核 / 驱动打补丁 —— 详见 [Galaxea 内核补丁指引](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
+
+### 3. 手动确认是否为内核兼容问题（可选）
+
+如果不确定问题是否出在内核，或按上一步升级 / 打补丁后仍无法通信，可以手动向 J6 电机发送 CAN 指令来复现。
+
+打开两个终端：**终端 A** 用 `candump can0` 监听总线收发；**终端 B** 依次向 J6 电机发送使能 / 运动 / 失能指令，观察终端 A 是否有反馈帧、J6 是否实际转动。
+
+终端 A：
+
+```bash
+candump can0
+```
+
+终端 B：
+
+```bash
+# 1. 使能 J6
+cansend can0 006#FFFFFFFFFFFFFFFC
+
+# 2. 正向低速 0.5 rad/s
+cansend can0 006#8000844000199800
+
+# 3. 反向低速 -0.5 rad/s
+cansend can0 006#80007BB000199800
+
+# 4. 失能 J6
+cansend can0 006#FFFFFFFFFFFFFFFD
+```
+
+预期表现：使能命令下发后，J6 应有反馈帧回到 `candump`；正 / 反向运动命令下发后，J6 应实际低速转动。
+
+**判断依据**：如果使能命令完全没有反馈，关闭机械臂电源后重新上电 —— 若上电瞬间可以看到大约 **2 帧 CAN 数据**返回（电机上电反馈），但之后发送使能命令仍无回帧，基本可以确认是内核 / socketcan 兼容性问题，回到第 2 步执行方案 A 或 B。
+
 ## API 参考
 
 ### `get_a1z_robot()`
@@ -410,6 +464,60 @@ python examples/gravity_comp.py --mode hold
 # Position hold + move to target
 python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
 ```
+
+## CAN Communication Troubleshooting
+
+If `python examples/gravity_comp.py --gravity_factor 0.3` errors out or the arm does not respond, the most common cause is a compatibility issue between the built-in SocketCAN / `gs_usb` driver in some older or specific Linux kernel versions and this CAN adapter.
+
+### 1. Check the wiring
+
+- The USB-CANFD adapter is plugged in and seated firmly
+- Both ends of the CAN bus are wired correctly and not loose
+- The arm is powered on
+- The CAN termination resistor is installed correctly (see "Configure the CAN Bus" above)
+
+### 2. Check the kernel version and fix (recommended path)
+
+Check your current kernel version:
+
+```bash
+uname -r
+```
+
+- **Option A (recommended)**: upgrade the Linux kernel to **6.8.0-124** or newer
+- **Option B**: patch the kernel / driver as described in the [Galaxea kernel patch guide](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
+
+### 3. Manually confirm the kernel compatibility issue (optional)
+
+If you are not sure the kernel is the culprit, or CAN still does not work after step 2, manually reproduce the issue by sending CAN commands to the J6 motor.
+
+Open two terminals. **Terminal A** monitors bus traffic with `candump can0`; **Terminal B** sends the enable / motion / disable commands to J6 in sequence. Watch Terminal A for feedback frames and check whether J6 actually rotates.
+
+Terminal A:
+
+```bash
+candump can0
+```
+
+Terminal B:
+
+```bash
+# 1. Enable J6
+cansend can0 006#FFFFFFFFFFFFFFFC
+
+# 2. Forward at 0.5 rad/s
+cansend can0 006#8000844000199800
+
+# 3. Reverse at -0.5 rad/s
+cansend can0 006#80007BB000199800
+
+# 4. Disable J6
+cansend can0 006#FFFFFFFFFFFFFFFD
+```
+
+Expected behavior: after the enable command, J6 should emit a feedback frame visible in `candump`; after forward / reverse, J6 should physically rotate at low speed.
+
+**Diagnosis**: if the enable command produces no feedback at all, power-cycle the arm — if you see roughly **2 CAN frames** returned during power-on (the motor's boot-up feedback) but the enable command still produces nothing, this confirms a kernel / SocketCAN compatibility issue. Go back to step 2 and apply Option A or B.
 
 ## API Reference
 
