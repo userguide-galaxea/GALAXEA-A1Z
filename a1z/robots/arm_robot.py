@@ -30,11 +30,6 @@ _MAX_CMD_ACC_RAD_S2 = 20.0
 _MAX_CMD_KP = 200.0
 _MAX_CMD_KD = 5.0
 
-# How many consecutive streaming frames may be rejected for out-of-limits
-# before we engage the soft estop. Catches a broken IK upstream flooding the
-# controller with junk instead of silently holding the last good command.
-_MAX_REJECTED_STREAM_FRAMES = 5
-
 
 @dataclass
 class JointState:
@@ -157,10 +152,10 @@ class ArmRobot:
         self._last_temp_warn_t: float = 0.0
         self._last_stale_warn_t: float = 0.0
         self._estop_latch = threading.Event()
-        # Consecutive streaming frames rejected for out-of-limit positions.
-        # Reset on any accepted frame; triggers estop at threshold.
-        self._rejected_frames: int = 0
-        self._last_reject_warn_t: float = 0.0
+        # Rate-limits the warning for measured-position outside soft limits.
+        # Fires at 1 Hz max so a teleop session parked at a limit doesn't
+        # flood the log.
+        self._last_limit_warn_t: float = 0.0
 
     def num_dofs(self) -> int:
         return self._num_joints
@@ -241,26 +236,22 @@ class ArmRobot:
     def _accept_or_reject_stream(
         self, pos: np.ndarray
     ) -> Optional[np.ndarray]:
-        """Run streaming clip, count rejections, engage estop on a flood.
+        """Thin wrapper around :meth:`_clip_joint_pos` for streaming callers.
 
-        Returns the (possibly tolerance-clipped) safe position to write to
-        the command, or None if the caller must skip updating the command
-        (caller holds the previous valid command). After
-        :data:`_MAX_REJECTED_STREAM_FRAMES` consecutive rejections the soft
-        estop is engaged to stop a broken upstream from flooding garbage.
+        Returns the (possibly tolerance-clipped) safe position, or None if
+        the frame is out of soft limits beyond the small clip tolerance. In
+        the ``None`` case the caller must skip updating the command so the
+        previous valid command is held — the arm parks near the limit and
+        resumes tracking as soon as the upstream sends an in-range frame
+        again (this is the teleop path: master pulled past a soft limit,
+        then dragged back).
+
+        Rejection logging is handled inside ``_clip_joint_pos`` itself.
+        This wrapper deliberately does NOT engage estop on repeated
+        rejects — teleop naturally produces short bursts of out-of-range
+        frames, and locking the arm out would strand the user.
         """
-        safe = self._clip_joint_pos(pos)
-        if safe is None:
-            self._rejected_frames += 1
-            if self._rejected_frames >= _MAX_REJECTED_STREAM_FRAMES:
-                logger.error(
-                    f"{self._rejected_frames} consecutive streaming frames "
-                    "rejected — engaging soft estop"
-                )
-                self.estop()
-            return None
-        self._rejected_frames = 0
-        return safe
+        return self._clip_joint_pos(pos)
 
     def command_joint_pos(self, pos: np.ndarray) -> None:
         """Set target joint angles (rad) with default PD gains."""
@@ -792,16 +783,33 @@ class ArmRobot:
         self._check_velocity_limits()
 
     def _check_runtime_joint_limits(self) -> None:
+        """Warn — do not estop — when measured position drifts out of limits.
+
+        Teleop naturally parks joints at the soft limits (master lead pulled
+        past the follower's reachable range). Historically this raised and
+        tripped the emergency disable, locking the follower out once the
+        master was dragged back into range. Now we only log at 1 Hz. Real
+        hardware faults still estop through the velocity / motor-error /
+        temperature / stale-feedback checkers.
+        """
         if self._joint_limits is None:
             return
         pos = self._state.pos
         buf = self._runtime_limit_buffer_rad
+        offenders: List[str] = []
         for i, (lo, hi) in enumerate(self._joint_limits):
             if pos[i] < lo - buf or pos[i] > hi + buf:
-                raise RuntimeError(
-                    f"Runtime joint limit violated: joint{i + 1}={pos[i]:.3f} rad "
-                    f"outside [{lo:.3f}, {hi:.3f}] (buffer={buf:.2f})"
+                offenders.append(
+                    f"joint{i + 1}={pos[i]:.3f} rad outside [{lo:.3f}, {hi:.3f}]"
                 )
+        if offenders:
+            now = time.time()
+            if now - self._last_limit_warn_t > 1.0:
+                logger.warning(
+                    "Measured joint position outside soft limits: "
+                    + "; ".join(offenders)
+                )
+                self._last_limit_warn_t = now
 
     def _check_motor_errors(self) -> None:
         # MotorB codes from MOTOR_B_ERROR_CODES; MotorA codes share the same
