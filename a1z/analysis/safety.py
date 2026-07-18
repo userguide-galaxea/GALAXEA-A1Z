@@ -34,9 +34,13 @@ SAFE_RANGES_DEG = {
 }
 
 # Posture other joints must take BEFORE exciting a given joint (1-based, deg).
+# J6 shares J5's pre-posture: exciting J6 from the all-zero pose (only J6 at the
+# waveform low point) self-collides on hardware (2026-07-18); pre-positioning
+# J2/J3/J4 clears the arm first. See SOP-03 §3.1 / §10.11.
 PRECONDITIONS_DEG = {
     2: {4: -40.0},
     5: {2: 20.0, 3: -20.0, 4: 0.0},
+    6: {2: 20.0, 3: -20.0, 4: 0.0},
 }
 
 # SDK-enforced joint limits (rad), mirrored from a1z.robots.get_robot._JOINT_LIMITS.
