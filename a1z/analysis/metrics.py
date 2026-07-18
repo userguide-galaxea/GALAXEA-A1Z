@@ -154,6 +154,42 @@ def summarize_steps(steps: List[dict]) -> dict:
 # ---------------------------------------------------------------------------
 # Triangle-wave error-trajectory metrics (stick-slip signature)
 # ---------------------------------------------------------------------------
+def _zigzag_pivots(x: np.ndarray, eps: float):
+    """Turning points of x via a retracement (ZigZag) filter with dead-band eps.
+
+    Tracks the running max/min since the last confirmed pivot; a pivot is
+    confirmed only when x retraces more than ``eps`` from that running extreme.
+    Returns (indices, values, is_peak) for each pivot in order. Robust to a slow
+    monotonic drift (a tracking-lag ramp yields no pivots until it reverses),
+    which is exactly why it separates stick-slip teeth from the sweep lag —
+    unlike a per-sample |Δ| threshold that fires on every sample of the ramp.
+    """
+    n = len(x)
+    idx: List[int] = []
+    val: List[float] = []
+    is_peak: List[bool] = []
+    if n < 2:
+        return idx, val, is_peak
+    rmax = rmin = x[0]
+    rmax_i = rmin_i = 0
+    trend = 0  # +1 rising, -1 falling, 0 unknown
+    for i in range(n):
+        v = x[i]
+        if v > rmax:
+            rmax, rmax_i = v, i
+        if v < rmin:
+            rmin, rmin_i = v, i
+        if trend <= 0 and (v - rmin) > eps:      # confirmed upturn at the min
+            idx.append(rmin_i); val.append(rmin); is_peak.append(False)
+            trend = 1
+            rmax, rmax_i = v, i
+        elif trend >= 0 and (rmax - v) > eps:     # confirmed downturn at the max
+            idx.append(rmax_i); val.append(rmax); is_peak.append(True)
+            trend = -1
+            rmin, rmin_i = v, i
+    return idx, val, is_peak
+
+
 def triangle_metrics(
     t: np.ndarray,
     ref: np.ndarray,
@@ -161,12 +197,16 @@ def triangle_metrics(
     *,
     jump_eps_deg: float = 0.1,
 ) -> dict:
-    """Error-trajectory range / std / jump stats over a triangle sweep.
+    """Error-trajectory range / std / stick-slip jump stats over a triangle sweep.
 
     ``t/ref/resp`` should already be sliced to the excitation segment (holds
-    removed). A jump event is a maximal run of consecutive samples whose
-    step-to-step error change exceeds ``jump_eps_deg``; its amplitude is the
-    accumulated error change across the run.
+    removed). Jumps are the stick-slip teeth of ``err = resp - ref``: detected as
+    direction reversals via :func:`_zigzag_pivots` with dead-band ``jump_eps_deg``
+    (NOT per-sample |Δerr| — under a triangle sweep err carries a slow tracking-
+    lag ramp that exceeds any small per-sample threshold on nearly every sample,
+    which collapses the count; see SOP-03 §5.3 / §10.12). One stick-slip cycle =
+    one peak + one valley, so ``jump_count`` counts peaks (= cycles/teeth); jump
+    amplitudes are the swings between consecutive pivots (≈ tooth height / slip).
     """
     t = np.asarray(t, dtype=float)
     err = np.asarray(resp, dtype=float) - np.asarray(ref, dtype=float)
@@ -175,33 +215,19 @@ def triangle_metrics(
                     jump_count=0, jump_rate_hz=0.0, jump_mean_deg=0.0,
                     jump_max_deg=0.0, jump_eps_deg=jump_eps_deg)
     eps = math.radians(jump_eps_deg)
-    de = np.diff(err)
-    over = np.abs(de) > eps
-    # Merge consecutive over-threshold diffs into events, sum signed change.
-    events: List[float] = []
-    i = 0
-    n = len(de)
-    while i < n:
-        if over[i]:
-            acc = de[i]
-            j = i + 1
-            while j < n and over[j]:
-                acc += de[j]
-                j += 1
-            events.append(abs(acc))
-            i = j
-        else:
-            i += 1
+    _idx, vals, is_peak = _zigzag_pivots(err, eps)
+    # Leg amplitudes = swing between consecutive pivots (each ≈ one tooth height).
+    amps = np.abs(np.diff(np.asarray(vals))) if len(vals) > 1 else np.array([])
+    n_teeth = int(sum(is_peak))               # one peak per stick-slip cycle
     duration = float(t[-1] - t[0]) if t[-1] > t[0] else float("nan")
-    jump_count = len(events)
-    jump_rate = (jump_count / duration) if duration and not math.isnan(duration) else 0.0
+    jump_rate = (n_teeth / duration) if duration and not math.isnan(duration) else 0.0
     return dict(
         err_range_deg=float(np.ptp(err)) * DEG,
         err_std_deg=float(np.std(err)) * DEG,
-        jump_count=jump_count,
+        jump_count=n_teeth,
         jump_rate_hz=jump_rate,
-        jump_mean_deg=(float(np.mean(events)) * DEG if events else 0.0),
-        jump_max_deg=(float(np.max(events)) * DEG if events else 0.0),
+        jump_mean_deg=(float(np.mean(amps)) * DEG if amps.size else 0.0),
+        jump_max_deg=(float(np.max(amps)) * DEG if amps.size else 0.0),
         jump_eps_deg=jump_eps_deg,
     )
 
