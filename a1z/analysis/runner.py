@@ -82,26 +82,38 @@ class _Base:
         return kp, kd
 
     # --- transit (slow) ---
-    def _joint_diag(self, joints) -> str:
-        """Per-joint telemetry snapshot (temp / effort / error code) for the
-        given 0-based joint indices — attached to arrival-check failures so a
-        stall's cause (thermal derate / driver error / effort saturation) is
-        visible in the log and result.json instead of guessed."""
+    def _joint_diag(self, joints, target=None) -> str:
+        """Per-joint telemetry snapshot attached to arrival-check failures so a
+        stall's cause is a readout, not a guess. Reports, per offending joint:
+        measured pos, commanded pos, target, effort, temp, error code, plus the
+        commanded kp/kd and global estop state. Distinguishes:
+          * cmd≈meas, eff≈0        → command never reached target (command path)
+          * cmd=target, meas lags, eff high → torque-limited (friction/collision)
+          * kp≈0 / estop set        → safety latch zeroed the position gain."""
         try:
             st = self.robot.get_joint_state()
         except Exception:  # noqa: BLE001
             return ""
+        cmd = getattr(self.robot, "_command", None)
+        estopped = getattr(self.robot, "is_estopped", None)
         parts = []
         for i in joints:
             seg = f"J{i+1}"
-            if "temp_mos" in st:
-                seg += f" mos={st['temp_mos'][i]:.0f}C rotor={st['temp_rotor'][i]:.0f}C"
+            if "pos" in st:
+                seg += f" meas={st['pos'][i] * DEG:.1f}°"
+            if cmd is not None:
+                seg += f" cmd={cmd.pos[i] * DEG:.1f}° kp={cmd.kp[i]:.0f} kd={cmd.kd[i]:.2f}"
+            if target is not None:
+                seg += f" tgt={np.asarray(target, float)[i] * DEG:.1f}°"
             if "eff" in st:
                 seg += f" eff={st['eff'][i]:.2f}"
+            if "temp_mos" in st:
+                seg += f" mos={st['temp_mos'][i]:.0f}C"
             if "error_codes" in st:
                 seg += f" err=0x{int(st['error_codes'][i]):x}"
             parts.append(seg)
-        return " | ".join(parts)
+        tail = f" estop={estopped}" if estopped is not None else ""
+        return " | ".join(parts) + tail
 
     def transit_to(self, q_target: np.ndarray, *, max_jump_rad: float = 3.5) -> None:
         """Slow min-jerk move to a full 6-dof pose at the transit speed.
@@ -118,7 +130,7 @@ class _Base:
         if np.any(off > 3.0):
             offenders = np.flatnonzero(off > 3.0)
             bad = "; ".join(f"J{i+1}={off[i]:.1f}°" for i in offenders)
-            diag = self._joint_diag(offenders)
+            diag = self._joint_diag(offenders, target=np.asarray(q_target, dtype=float)[:6])
             msg = f"transit arrival check failed (>3°): {bad}"
             if diag:
                 msg += f"  [{diag}]"
