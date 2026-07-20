@@ -138,6 +138,7 @@ def run_joint_units(args, rundir, meta, result):
         edge_rate_deg_s=args.edge_rate,
         sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed)
     unit = {}
+    failed = []
     try:
         runner.start()
         _stamp_pd_defaults(meta, runner.robot)
@@ -149,11 +150,27 @@ def run_joint_units(args, rundir, meta, result):
             # the actual 6-vector applied (effective_gains resolves None→default).
             eff_kp, eff_kd = runner.effective_gains()
             _record_applied(meta, f"J{j1}", eff_kp, eff_kd)
-            out = runner.run_joint(j1)
-            unit[f"J{j1}"] = _process_joint(args, rundir, j1, out)
+            # Per-joint fault isolation: a transit/arrival fail-safe (e.g. J6
+            # self-collision) aborts THIS joint but must not sink the whole run.
+            # run_joint's own finally has already slow-returned the arm to zero,
+            # so the next joint starts from a safe pose. The failure is recorded
+            # and surfaced; remaining joints + EE (mode=all) still produce data.
+            try:
+                out = runner.run_joint(j1)
+                unit[f"J{j1}"] = _process_joint(args, rundir, j1, out)
+            except Exception as e:  # noqa: BLE001
+                if runner.robot.is_estopped:
+                    raise  # estop is global — do not soldier on into more motion
+                msg = f"{type(e).__name__}: {e}"
+                print(f"[J{j1}] SKIPPED — {msg}")
+                unit[f"J{j1}"] = {"error": msg}
+                failed.append(j1)
     finally:
         runner.shutdown()
     result["unit_tests"] = unit
+    if failed:
+        result["joint_failures"] = failed
+        print(f"[run] joint unit tests skipped: {['J%d' % j for j in failed]}")
 
 
 def _process_joint(args, rundir, j1, out) -> dict:
