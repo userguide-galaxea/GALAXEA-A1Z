@@ -82,6 +82,27 @@ class _Base:
         return kp, kd
 
     # --- transit (slow) ---
+    def _joint_diag(self, joints) -> str:
+        """Per-joint telemetry snapshot (temp / effort / error code) for the
+        given 0-based joint indices — attached to arrival-check failures so a
+        stall's cause (thermal derate / driver error / effort saturation) is
+        visible in the log and result.json instead of guessed."""
+        try:
+            st = self.robot.get_joint_state()
+        except Exception:  # noqa: BLE001
+            return ""
+        parts = []
+        for i in joints:
+            seg = f"J{i+1}"
+            if "temp_mos" in st:
+                seg += f" mos={st['temp_mos'][i]:.0f}C rotor={st['temp_rotor'][i]:.0f}C"
+            if "eff" in st:
+                seg += f" eff={st['eff'][i]:.2f}"
+            if "error_codes" in st:
+                seg += f" err=0x{int(st['error_codes'][i]):x}"
+            parts.append(seg)
+        return " | ".join(parts)
+
     def transit_to(self, q_target: np.ndarray, *, max_jump_rad: float = 3.5) -> None:
         """Slow min-jerk move to a full 6-dof pose at the transit speed.
 
@@ -95,8 +116,13 @@ class _Base:
         meas = self.robot.get_joint_pos()[:6]
         off = np.abs(meas - np.asarray(q_target, dtype=float)[:6]) * DEG
         if np.any(off > 3.0):
-            bad = "; ".join(f"J{i+1}={off[i]:.1f}°" for i in np.flatnonzero(off > 3.0))
-            raise RuntimeError(f"transit arrival check failed (>3°): {bad}")
+            offenders = np.flatnonzero(off > 3.0)
+            bad = "; ".join(f"J{i+1}={off[i]:.1f}°" for i in offenders)
+            diag = self._joint_diag(offenders)
+            msg = f"transit arrival check failed (>3°): {bad}"
+            if diag:
+                msg += f"  [{diag}]"
+            raise RuntimeError(msg)
 
     def return_to_zero(self) -> None:
         """Slow move back to the zero configuration (best-effort, no raise)."""
