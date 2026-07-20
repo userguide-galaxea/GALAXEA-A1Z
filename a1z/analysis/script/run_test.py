@@ -113,6 +113,21 @@ def _waves(args):
     return ("square", "triangle") if args.wave == "both" else (args.wave,)
 
 
+def _stamp_pd_defaults(meta, robot):
+    """Record the robot's live default PD gains into meta once it's started."""
+    info = robot.get_robot_info()
+    meta["pd"]["default_kp"] = info["default_kp"].tolist()
+    meta["pd"]["default_kd"] = info["default_kd"].tolist()
+
+
+def _record_applied(meta, key, kp, kd):
+    """Record the exact gains commanded for one joint / phase (as applied)."""
+    meta["pd"]["applied"][key] = {
+        "kp": np.asarray(kp, dtype=float).tolist(),
+        "kd": np.asarray(kd, dtype=float).tolist(),
+    }
+
+
 def run_joint_units(args, rundir, meta, result):
     """Run joint unit tests, write per-joint CSV/PNG, fill result['unit_tests']."""
     from a1z.analysis.runner import JointUnitTestRunner
@@ -125,10 +140,15 @@ def run_joint_units(args, rundir, meta, result):
     unit = {}
     try:
         runner.start()
+        _stamp_pd_defaults(meta, runner.robot)
         for j1 in _joints_for_mode(args):
             kp = _resolve_gains(args.kp, j1, runner.robot.get_robot_info()["default_kp"])
             kd = _resolve_gains(args.kd, j1, runner.robot.get_robot_info()["default_kd"])
             runner.kp, runner.kd = kp, kd
+            # kp/kd are None when no override → the joint runs on defaults; record
+            # the actual 6-vector applied (effective_gains resolves None→default).
+            eff_kp, eff_kd = runner.effective_gains()
+            _record_applied(meta, f"J{j1}", eff_kp, eff_kd)
             out = runner.run_joint(j1)
             unit[f"J{j1}"] = _process_joint(args, rundir, j1, out)
     finally:
@@ -168,10 +188,16 @@ def run_ee(args, rundir, meta, result, *, dry_run: bool):
     """EE tracking (or dry-run gate only). Fills result['ee'] + joints_rmse_deg."""
     from a1z.analysis.runner import EETrackingRunner
     q_nom_deg = [float(x) for x in args.q_nom_deg.split(",")]
+    # EE tracking honors only a full 6-vector override (a scalar --kp targets a
+    # single tested joint, which is meaningless for a whole-arm trajectory);
+    # otherwise it runs on SDK defaults.
+    ee_kp = args.kp[1] if args.kp and args.kp[0] == "vector" else None
+    ee_kd = args.kd[1] if args.kd and args.kd[0] == "vector" else None
     runner = EETrackingRunner(
         args.can, q_nom_deg=q_nom_deg, ee_kind=args.ee_kind, plane=args.plane,
         radius=args.radius, period=args.period_ee, cycles=args.cycles_ee,
-        sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed)
+        sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed,
+        kp=ee_kp, kd=ee_kd)
     off = runner.solve_offline()
     g = off["gate"]
     lim = safety.effective_limits(safety.LIMIT_BUFFER_RAD, ee.urdf_limits(runner.kin))
@@ -193,6 +219,9 @@ def run_ee(args, rundir, meta, result, *, dry_run: bool):
 
     try:
         runner.start()
+        _stamp_pd_defaults(meta, runner.robot)
+        eff_kp, eff_kd = runner.effective_gains()
+        _record_applied(meta, "ee", eff_kp, eff_kd)
         live = runner.run(off)
     finally:
         runner.shutdown()
@@ -237,10 +266,16 @@ def build_meta(args) -> dict:
         "git": _git_info(),
         "hardware": {"can_channel": args.can, "sample_hz": args.sample_hz,
                      "sdk_loop_hz": 250},
-        "pd": {"override": {"kp": args.kp[1].tolist() if args.kp and args.kp[0] == "vector"
-                            else (args.kp[1] if args.kp else None),
-                            "kd": args.kd[1].tolist() if args.kd and args.kd[0] == "vector"
-                            else (args.kd[1] if args.kd else None)}},
+        "pd": {
+            # default_kp/kd read back from the robot at start() (§2.2);
+            # applied[...] = the exact per-joint / per-phase gains commanded.
+            "default_kp": None, "default_kd": None,
+            "override": {"kp": args.kp[1].tolist() if args.kp and args.kp[0] == "vector"
+                         else (args.kp[1] if args.kp else None),
+                         "kd": args.kd[1].tolist() if args.kd and args.kd[0] == "vector"
+                         else (args.kd[1] if args.kd else None)},
+            "applied": {},
+        },
         "safety": {
             "safe_ranges_deg": {f"J{j}": list(v) for j, v in safety.SAFE_RANGES_DEG.items()},
             "preconditions_deg": {f"J{j}": {f"J{k}": val for k, val in p.items()}
