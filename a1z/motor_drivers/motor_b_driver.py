@@ -268,6 +268,8 @@ class MixedMotorChain:
         motor_a_joint_indices: List[int],
         motor_b_joint_indices: List[int],
         motor_a_kt: float = 2.8,
+        inter_cmd_gap_s: float = 0.0,
+        motor_b_send_reversed: bool = False,
     ):
         """
         Args:
@@ -276,12 +278,23 @@ class MixedMotorChain:
             motor_a_joint_indices: Joint indices corresponding to MotorA motors.
             motor_b_joint_indices: Joint indices corresponding to MotorB motors.
             motor_a_kt: Torque constant for MotorA current->torque conversion.
+            inter_cmd_gap_s: Delay (s) inserted before each command frame send
+                after the first in ``send_commands`` (covers MotorA->MotorB and
+                MotorB->MotorB boundaries uniformly). Default 0.0 = bit-identical
+                to the pre-experiment back-to-back burst. See SOP-05: pacing the
+                burst gives the last-commanded motor's answer a clear bus slot,
+                fixing the J6 feedback/target-latch starvation.
+            motor_b_send_reversed: If True, iterate the MotorB group in reverse
+                order in ``send_commands`` (e.g. J6->J5->J4 instead of J4->J5->J6).
+                Default False. Used by SOP-05's P2 order-falsification experiment.
         """
         self._motor_a_list = motor_a_list
         self._motor_b_list = motor_b_list
         self._motor_a_joint_indices = motor_a_joint_indices
         self._motor_b_joint_indices = motor_b_joint_indices
         self._motor_a_kt = motor_a_kt
+        self._inter_cmd_gap_s = inter_cmd_gap_s
+        self._motor_b_send_reversed = motor_b_send_reversed
         self._n = len(motor_a_list) + len(motor_b_list)
 
         # Build motor_id -> (type, motor, joint_idx) lookup
@@ -452,7 +465,13 @@ class MixedMotorChain:
             torque: Feedforward torques (Nm), shape (n,).
             motor_a_mode: MotorA MIT mode field (default 0).
         """
+        gap = self._inter_cmd_gap_s
+        first = True
+
         for i, motor in enumerate(self._motor_a_list):
+            if not first and gap > 0:
+                time.sleep(gap)
+            first = False
             idx = self._motor_a_joint_indices[i]
             motor.send_mit_command(
                 pos=float(pos[idx]),
@@ -463,7 +482,14 @@ class MixedMotorChain:
                 mode=motor_a_mode,
             )
 
-        for i, motor in enumerate(self._motor_b_list):
+        motor_b_order = range(len(self._motor_b_list))
+        if self._motor_b_send_reversed:
+            motor_b_order = reversed(motor_b_order)
+        for i in motor_b_order:
+            if not first and gap > 0:
+                time.sleep(gap)
+            first = False
+            motor = self._motor_b_list[i]
             idx = self._motor_b_joint_indices[i]
             motor.send_mit_command(
                 pos=float(pos[idx]),

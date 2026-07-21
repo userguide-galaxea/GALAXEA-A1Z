@@ -125,12 +125,24 @@ def get_a1z_robot(
         motor_b_list.append(MotorB(motor_id=mid, bus=bus, ranges=ranges))
 
     # Build motor chain
+    #
+    # SOP-05 CAN command-spacing experiment (opt-in, default-off).
+    #   A1Z_INTER_CMD_GAP_US : microseconds slept before each per-tick command
+    #     frame after the first. 0 (default) = bit-identical back-to-back burst.
+    #     A gap >= ~150 us frees the last-commanded motor's answer slot, fixing
+    #     the J6 feedback/target-latch starvation (see SOP-05 / devlog 2026-07-21).
+    #   A1Z_MOTORB_SEND_ORDER=reversed : send the MotorB group J6->J5->J4 instead
+    #     of J4->J5->J6. Used only by SOP-05's P2 order-falsification experiment.
+    _inter_cmd_gap_s = float(os.environ.get("A1Z_INTER_CMD_GAP_US", "0")) * 1e-6
+    _motor_b_send_reversed = os.environ.get("A1Z_MOTORB_SEND_ORDER", "").lower() == "reversed"
     motor_chain = MixedMotorChain(
         motor_a_list=motor_a_list,
         motor_b_list=motor_b_list,
         motor_a_joint_indices=_MOTOR_A_JOINT_INDICES,
         motor_b_joint_indices=_MOTOR_B_JOINT_INDICES,
         motor_a_kt=_MOTOR_A_KT,
+        inter_cmd_gap_s=_inter_cmd_gap_s,
+        motor_b_send_reversed=_motor_b_send_reversed,
     )
 
     # Load gravity model
