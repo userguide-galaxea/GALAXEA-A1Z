@@ -1,6 +1,5 @@
 """Factory function for creating an A1Z ArmRobot."""
 
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -166,10 +165,7 @@ def get_a1z_robot(
     #     250 µs default; a gap >= ~150 us frees the last-commanded motor's answer
     #     slot, fixing the J6 feedback/target-latch starvation (SOP-05 / devlog
     #     2026-07-21). Pass 0 to disable (legacy burst). No env var is read.
-    #   A1Z_MOTORB_SEND_ORDER=reversed : send the MotorB group J6->J5->J4 instead
-    #     of J4->J5->J6. Used only by SOP-05's P2 order-falsification experiment.
     _inter_cmd_gap_s = _resolve_inter_cmd_gap_us(inter_cmd_gap_us) * 1e-6
-    _motor_b_send_reversed = os.environ.get("A1Z_MOTORB_SEND_ORDER", "").lower() == "reversed"
     motor_chain = MixedMotorChain(
         motor_a_list=motor_a_list,
         motor_b_list=motor_b_list,
@@ -177,7 +173,6 @@ def get_a1z_robot(
         motor_b_joint_indices=_MOTOR_B_JOINT_INDICES,
         motor_a_kt=_MOTOR_A_KT,
         inter_cmd_gap_s=_inter_cmd_gap_s,
-        motor_b_send_reversed=_motor_b_send_reversed,
     )
 
     # Load gravity model

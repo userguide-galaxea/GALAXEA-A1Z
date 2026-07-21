@@ -269,7 +269,6 @@ class MixedMotorChain:
         motor_b_joint_indices: List[int],
         motor_a_kt: float = 2.8,
         inter_cmd_gap_s: float = 0.0,
-        motor_b_send_reversed: bool = False,
     ):
         """
         Args:
@@ -284,9 +283,6 @@ class MixedMotorChain:
                 to the pre-experiment back-to-back burst. See SOP-05: pacing the
                 burst gives the last-commanded motor's answer a clear bus slot,
                 fixing the J6 feedback/target-latch starvation.
-            motor_b_send_reversed: If True, iterate the MotorB group in reverse
-                order in ``send_commands`` (e.g. J6->J5->J4 instead of J4->J5->J6).
-                Default False. Used by SOP-05's P2 order-falsification experiment.
         """
         self._motor_a_list = motor_a_list
         self._motor_b_list = motor_b_list
@@ -294,7 +290,6 @@ class MixedMotorChain:
         self._motor_b_joint_indices = motor_b_joint_indices
         self._motor_a_kt = motor_a_kt
         self._inter_cmd_gap_s = inter_cmd_gap_s
-        self._motor_b_send_reversed = motor_b_send_reversed
         self._n = len(motor_a_list) + len(motor_b_list)
 
         # Build motor_id -> (type, motor, joint_idx) lookup
@@ -493,10 +488,7 @@ class MixedMotorChain:
                 mode=motor_a_mode,
             )
 
-        motor_b_order = range(len(self._motor_b_list))
-        if self._motor_b_send_reversed:
-            motor_b_order = reversed(motor_b_order)
-        for i in motor_b_order:
+        for i in range(len(self._motor_b_list)):
             if not first and gap > 0:
                 time.sleep(gap)
             first = False
