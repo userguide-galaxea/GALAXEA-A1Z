@@ -403,6 +403,17 @@ class MixedMotorChain:
     def get_efforts(self) -> np.ndarray:
         return self._efforts.copy()
 
+    @property
+    def inter_cmd_gap_s(self) -> float:
+        """Pacing gap (s) inserted before each per-tick command frame after the first.
+
+        Read-only view of the gap ``send_commands`` applies between MotorA->MotorB
+        and MotorB->MotorB boundaries. Exposed so callers pacing an extra per-tick
+        frame outside this chain (e.g. the gripper's 0x07 frame in ArmRobot) can
+        use the same gap from a single source of truth (SOP-06 §1.5).
+        """
+        return self._inter_cmd_gap_s
+
     def get_error_codes(self) -> np.ndarray:
         """Return per-joint motor error codes (int array, length n).
 

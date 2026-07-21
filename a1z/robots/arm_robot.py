@@ -852,8 +852,13 @@ class ArmRobot:
             torque=motor_torques,
         )
 
-        # 7) Send gripper command (independent of arm gravity comp)
+        # 7) Send gripper command (independent of arm gravity comp). The gripper
+        # frame (0x07) is the last command of the tick — pace it like the chain
+        # paces J4→J5→J6, or its answer slot collides with J6's answer (SOP-06 §1.5).
         if self.gripper is not None:
+            gap = self._motor_chain.inter_cmd_gap_s
+            if gap > 0:
+                time.sleep(gap)
             if self._gripper_free_drive:
                 self.gripper.free_drive_step()
             else:
