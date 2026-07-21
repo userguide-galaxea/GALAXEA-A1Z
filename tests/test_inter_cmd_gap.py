@@ -1,13 +1,13 @@
 """Offline L0 unit tests for SOP-06 CAN command pacing resolution.
 
-Covers the SOP-06 §5 L0 assertion list for ``_resolve_inter_cmd_gap_us`` and the
-``MixedMotorChain`` neutral default — all runnable without a CAN bus or hardware
-(no ``can.interface.Bus`` is opened; motor drivers only store attributes at
-construction). Run with ``pytest tests/test_inter_cmd_gap.py -v`` or directly with
-``python tests/test_inter_cmd_gap.py``.
+Covers the ``_resolve_inter_cmd_gap_us`` parameter/default precedence and range
+check, plus the ``MixedMotorChain`` neutral default — all runnable without a CAN
+bus or hardware (no ``can.interface.Bus`` is opened; motor drivers only store
+attributes at construction). The gap is hard-coded/parameter-only: the SDK reads
+no environment variable, and one test pins that ``A1Z_INTER_CMD_GAP_US`` is
+ignored even when set. Run with ``pytest tests/test_inter_cmd_gap.py -v`` or
+directly with ``python tests/test_inter_cmd_gap.py``.
 """
-
-import os
 
 import pytest
 
@@ -22,32 +22,22 @@ from a1z.robots.get_robot import (
 _ENV = "A1Z_INTER_CMD_GAP_US"
 
 
-@pytest.fixture(autouse=True)
-def _clear_env(monkeypatch):
-    """Ensure a hermetic env: the pacing env var is unset unless a test sets it."""
-    monkeypatch.delenv(_ENV, raising=False)
-
-
-def test_default_when_no_env_no_param():
+def test_default_when_no_param():
     assert _resolve_inter_cmd_gap_us(None) == _DEFAULT_INTER_CMD_GAP_US == 250.0
 
 
-def test_env_zero_is_kill_switch(monkeypatch):
-    monkeypatch.setenv(_ENV, "0")
-    assert _resolve_inter_cmd_gap_us(None) == 0.0
+def test_param_overrides_default():
+    assert _resolve_inter_cmd_gap_us(310) == 310.0
 
 
-def test_env_overrides_default(monkeypatch):
-    monkeypatch.setenv(_ENV, "310")
-    assert _resolve_inter_cmd_gap_us(None) == 310.0
+def test_param_zero_disables_pacing():
+    assert _resolve_inter_cmd_gap_us(0) == 0.0
 
 
-def test_env_wins_over_param(monkeypatch):
-    monkeypatch.setenv(_ENV, "100")
-    assert _resolve_inter_cmd_gap_us(310) == 100.0
-
-
-def test_param_when_no_env():
+def test_env_is_ignored(monkeypatch):
+    """The SDK reads no environment variable — A1Z_INTER_CMD_GAP_US has no effect."""
+    monkeypatch.setenv(_ENV, "42")
+    assert _resolve_inter_cmd_gap_us(None) == 250.0
     assert _resolve_inter_cmd_gap_us(310) == 310.0
 
 
@@ -59,12 +49,6 @@ def test_negative_raises():
 def test_above_max_raises():
     with pytest.raises(ValueError):
         _resolve_inter_cmd_gap_us(600)
-
-
-def test_env_out_of_range_raises(monkeypatch):
-    monkeypatch.setenv(_ENV, "600")
-    with pytest.raises(ValueError):
-        _resolve_inter_cmd_gap_us(None)
 
 
 def test_boundaries_inclusive():

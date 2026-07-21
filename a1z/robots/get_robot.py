@@ -78,16 +78,14 @@ _MAX_INTER_CMD_GAP_US = 500.0       # 6 paced boundaries × worst-case sleep mus
 def _resolve_inter_cmd_gap_us(param: Optional[float]) -> float:
     """Resolve the inter-command pacing gap in µs.
 
-    Precedence: env var (operator kill-switch/override) > parameter > default.
-    The env var ``A1Z_INTER_CMD_GAP_US`` is the deployed-system operator channel
-    and must be able to override a hard-coded parameter; ``=0`` is the documented
-    kill-switch back to the legacy back-to-back burst. Range-checked at
-    construction (fail-fast) so a misconfigured gap refuses to build the robot
-    rather than degrading mid-run.
+    ``param`` (the ``inter_cmd_gap_us`` argument) when not None, else the
+    hard-coded 250 µs product default. Range-checked at construction (fail-fast)
+    so a misconfigured gap refuses to build the robot rather than degrading
+    mid-run. The gap is hard-coded/parameter-only — the SDK reads no environment
+    variable; to retune or disable pacing, pass ``inter_cmd_gap_us`` (``0`` =
+    legacy back-to-back burst).
     """
-    env = os.environ.get("A1Z_INTER_CMD_GAP_US")
-    gap = float(env) if env is not None else (
-        param if param is not None else _DEFAULT_INTER_CMD_GAP_US)
+    gap = param if param is not None else _DEFAULT_INTER_CMD_GAP_US
     if not (0.0 <= gap <= _MAX_INTER_CMD_GAP_US):
         raise ValueError(
             f"inter_cmd_gap_us={gap} outside [0, {_MAX_INTER_CMD_GAP_US}] µs "
@@ -126,14 +124,13 @@ def get_a1z_robot(
                             Passed to Gripper as i_des = max_torque / 11.0.
         inter_cmd_gap_us: Inter-command CAN pacing gap in microseconds, inserted
                           before each per-tick command frame after the first
-                          (SOP-05/SOP-06). None (default) uses the product default
-                          250 µs, which frees the last-commanded motor's answer
-                          slot and fixes the J6 feedback/target-latch starvation.
-                          Precedence: the ``A1Z_INTER_CMD_GAP_US`` env var (operator
-                          override) wins over this parameter, which wins over the
-                          250 µs default. ``A1Z_INTER_CMD_GAP_US=0`` is the kill-switch
-                          back to the legacy back-to-back burst. Range-checked to
-                          [0, 500] µs at construction (ValueError otherwise).
+                          (SOP-05/SOP-06). None (default) uses the hard-coded
+                          product default 250 µs, which frees the last-commanded
+                          motor's answer slot and fixes the J6 feedback/target-latch
+                          starvation. Pass an explicit value to retune, or ``0`` to
+                          disable pacing (legacy back-to-back burst). Range-checked
+                          to [0, 500] µs at construction (ValueError otherwise). The
+                          SDK reads no environment variable for this.
 
     Returns:
         Configured ArmRobot instance (call .start() to begin control).
@@ -163,13 +160,12 @@ def get_a1z_robot(
 
     # Build motor chain
     #
-    # SOP-05/SOP-06 CAN command pacing (default-on, configurable).
-    #   inter_cmd_gap_us param / A1Z_INTER_CMD_GAP_US env : microseconds slept
-    #     before each per-tick command frame after the first. Resolved with
-    #     precedence env > param > 250 µs default (see _resolve_inter_cmd_gap_us).
-    #     A gap >= ~150 us frees the last-commanded motor's answer slot, fixing
-    #     the J6 feedback/target-latch starvation (see SOP-05 / devlog 2026-07-21).
-    #     A1Z_INTER_CMD_GAP_US=0 is the kill-switch back to the legacy burst.
+    # SOP-05/SOP-06 CAN command pacing (default-on, hard-coded default 250 µs).
+    #   inter_cmd_gap_us param : microseconds slept before each per-tick command
+    #     frame after the first (see _resolve_inter_cmd_gap_us). None uses the
+    #     250 µs default; a gap >= ~150 us frees the last-commanded motor's answer
+    #     slot, fixing the J6 feedback/target-latch starvation (SOP-05 / devlog
+    #     2026-07-21). Pass 0 to disable (legacy burst). No env var is read.
     #   A1Z_MOTORB_SEND_ORDER=reversed : send the MotorB group J6->J5->J4 instead
     #     of J4->J5->J6. Used only by SOP-05's P2 order-falsification experiment.
     _inter_cmd_gap_s = _resolve_inter_cmd_gap_us(inter_cmd_gap_us) * 1e-6

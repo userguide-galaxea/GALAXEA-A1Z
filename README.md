@@ -270,10 +270,9 @@ get_a1z_robot(
 
 **CAN 命令间隔（command pacing）**：每个控制周期内的命令帧突发之间插入间隔，
 让最后发送的电机的应答槽不被前一个电机的应答占据，消除 J6 反馈/目标锁存饥饿
-（阶梯抖动，见 SOP-05/SOP-06）。默认 **250 µs**，优先级为
-`A1Z_INTER_CMD_GAP_US` 环境变量 > `inter_cmd_gap_us` 参数 > 250 µs 默认值。
-`A1Z_INTER_CMD_GAP_US=0` 是回退到旧版背靠背突发的 kill-switch。取值范围
-[0, 500] µs，超出在构造时抛 `ValueError`。
+（阶梯抖动，见 SOP-05/SOP-06）。默认 **250 µs**（硬编码），通过
+`inter_cmd_gap_us` 参数调整：传 `0` 关闭节流（退回旧版背靠背突发）。
+取值范围 [0, 500] µs，超出在构造时抛 `ValueError`。SDK 不读取任何环境变量。
 
 ### `ArmRobot` 主要方法
 
@@ -773,10 +772,10 @@ get_a1z_robot(
 **CAN command pacing**: a gap is inserted between the per-tick command frames so
 the last-commanded motor's answer slot is never occupied by its predecessor's
 answer, eliminating the J6 feedback/target-latch starvation (staircase fault, see
-SOP-05/SOP-06). Default **250 µs**, with precedence `A1Z_INTER_CMD_GAP_US` env var >
-`inter_cmd_gap_us` parameter > 250 µs default. `A1Z_INTER_CMD_GAP_US=0` is the
-kill-switch back to the legacy back-to-back burst. Valid range [0, 500] µs;
-out-of-range raises `ValueError` at construction.
+SOP-05/SOP-06). Default **250 µs** (hard-coded), adjustable via the
+`inter_cmd_gap_us` parameter; pass `0` to disable pacing (legacy back-to-back
+burst). Valid range [0, 500] µs; out-of-range raises `ValueError` at
+construction. The SDK reads no environment variable for this.
 
 ### `ArmRobot` Key Methods
 
