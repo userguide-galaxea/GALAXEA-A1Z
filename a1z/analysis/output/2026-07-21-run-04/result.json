@@ -1,0 +1,65 @@
+{
+  "unit_tests": {
+    "J6": {
+      "square": {
+        "n_steps": 6,
+        "overshoot_max_pct": 0.0,
+        "ess_max_deg": 0.36677943693875464,
+        "ts_max_ms": 1066.332723996311,
+        "per_step": [
+          {
+            "dir": "up",
+            "delta_deg": 29.999999999999996,
+            "overshoot_pct": 0.0,
+            "ts_ms": 895.4741890047444,
+            "ess_deg": 0.36677943693875464
+          },
+          {
+            "dir": "down",
+            "delta_deg": -29.999999999999996,
+            "overshoot_pct": -0.0,
+            "ts_ms": 523.381929997413,
+            "ess_deg": 0.21378086495753282
+          },
+          {
+            "dir": "up",
+            "delta_deg": 29.999999999999996,
+            "overshoot_pct": 0.0,
+            "ts_ms": 744.594636002148,
+            "ess_deg": 0.36677943693875464
+          },
+          {
+            "dir": "down",
+            "delta_deg": -29.999999999999996,
+            "overshoot_pct": -0.0,
+            "ts_ms": 623.8939309987472,
+            "ess_deg": 0.21378086495753282
+          },
+          {
+            "dir": "up",
+            "delta_deg": 29.999999999999996,
+            "overshoot_pct": 0.0,
+            "ts_ms": 1066.332723996311,
+            "ess_deg": 0.36677943693875464
+          },
+          {
+            "dir": "down",
+            "delta_deg": -29.999999999999996,
+            "overshoot_pct": -0.0,
+            "ts_ms": 533.2699380014674,
+            "ess_deg": 0.21378086495753282
+          }
+        ]
+      },
+      "triangle": {
+        "err_range_deg": 25.786808479844197,
+        "err_std_deg": 6.006387538046257,
+        "jump_count": 57,
+        "jump_rate_hz": 4.75596002404467,
+        "jump_mean_deg": 2.6660157236359203,
+        "jump_max_deg": 19.083219104426735,
+        "jump_eps_deg": 0.1
+      }
+    }
+  }
+}

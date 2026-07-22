@@ -1,0 +1,38 @@
+(teleop) czd@xiexuanxuan-System-Product-Name:~/Projects/fix-ee-response-problem/open-a1z-t/GALAXEA-A1Z/a1z/analysis$ ./test.sh --mode joint --joint 6 --run B0
+[run] /home/czd/Projects/fix-ee-response-problem/open-a1z-t/GALAXEA-A1Z/a1z/analysis/output/2026-07-21-run-B0  mode=joint dry_run=False
+[J6] Stage A: preconditions {2: 20.0, 3: -20.0, 4: 0.0}
+[J6] Stage B: to waveform start [  0.  20. -20.   0.   0. -15.]
+[J6] excite square (14.5s, gains kp[5]=25.0 kd[5]=4.00)
+[J6] excite triangle (14.5s, gains kp[5]=25.0 kd[5]=4.00)
+[J6] retract + return to zero
+[run] wrote meta.json + result.json → /home/czd/Projects/fix-ee-response-problem/open-a1z-t/GALAXEA-A1Z/a1z/analysis/output/2026-07-21-run-B0
+
+(teleop) czd@xiexuanxuan-System-Product-Name:~/Projects/fix-ee-response-problem/open-a1z-t/GALAXEA-A1Z/a1z/analysis$ python tools/can_capture.py --can can0 --out 2026-07-21-run-B0/
+can-capture-J6.csv --duration 20
+[can_capture] 抓取 can0 → 2026-07-21-run-B0/can-capture-J6.csv  duration=20.0s  ids=全部  (Ctrl+C 停止)
+
+[can_capture] 小结（实际抓取时长 20.01s）:
+  0x01(J1)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x02(J2)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x03(J3)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x04(J4)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x05(J5)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x06(J6)         帧数=  5055  平均帧率≈ 252.6 Hz
+
+  详细统计 / 分岔判读请运行:
+    python -m a1z.analysis.tools.can_analyze <上面的 --out CSV 路径>
+
+(teleop) czd@xiexuanxuan-System-Product-Name:~/Projects/fix-ee-response-problem/open-a1z-t/GALAXEA-A1Z/a1z/analysis$ python tools/can_capture.py --can can0 --out 2026-07-21-run-B0/
+can-capture-J6.csv --duration 20
+[can_capture] 抓取 can0 → 2026-07-21-run-B0/can-capture-J6.csv  duration=20.0s  ids=全部  (Ctrl+C 停止)
+
+[can_capture] 小结（实际抓取时长 20.01s）:
+  0x01(J1)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x02(J2)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x03(J3)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x04(J4)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x05(J5)         帧数=  9866  平均帧率≈ 493.0 Hz
+  0x06(J6)         帧数=  5055  平均帧率≈ 252.6 Hz
+
+  详细统计 / 分岔判读请运行:
+    python -m a1z.analysis.tools.can_analyze <上面的 --out CSV 路径>

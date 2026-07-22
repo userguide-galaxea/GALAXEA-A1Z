@@ -1,0 +1,10 @@
+{
+  "unit_tests": {
+    "J6": {
+      "error": "RuntimeError: transit arrival check failed (>3°): J6=4.7°  [J6 meas=-10.3° cmd=-15.0° kp=25 kd=0.50 tgt=-15.0° eff=-0.11 mos=32C err=0x1 estop=False]"
+    }
+  },
+  "joint_failures": [
+    6
+  ]
+}

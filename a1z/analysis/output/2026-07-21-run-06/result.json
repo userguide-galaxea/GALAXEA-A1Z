@@ -1,0 +1,65 @@
+{
+  "unit_tests": {
+    "J6": {
+      "square": {
+        "n_steps": 6,
+        "overshoot_max_pct": 0.1529985719812218,
+        "ess_max_deg": 2.0410209531905115,
+        "ts_max_ms": null,
+        "per_step": [
+          {
+            "dir": "up",
+            "delta_deg": 29.999999999999996,
+            "overshoot_pct": 0.04371387770892052,
+            "ts_ms": null,
+            "ess_deg": 2.0410209531905115
+          },
+          {
+            "dir": "down",
+            "delta_deg": -29.999999999999996,
+            "overshoot_pct": 0.03157113390088704,
+            "ts_ms": null,
+            "ess_deg": 1.8625226192124191
+          },
+          {
+            "dir": "up",
+            "delta_deg": 29.999999999999996,
+            "overshoot_pct": 0.04371387770892052,
+            "ts_ms": null,
+            "ess_deg": 2.019164014336051
+          },
+          {
+            "dir": "down",
+            "delta_deg": -29.999999999999996,
+            "overshoot_pct": 0.1529985719812218,
+            "ts_ms": null,
+            "ess_deg": 1.7678092175097584
+          },
+          {
+            "dir": "up",
+            "delta_deg": 29.999999999999996,
+            "overshoot_pct": 0.04371387770892052,
+            "ts_ms": null,
+            "ess_deg": 2.019164014336051
+          },
+          {
+            "dir": "down",
+            "delta_deg": -29.999999999999996,
+            "overshoot_pct": -0.0,
+            "ts_ms": null,
+            "ess_deg": 1.7000527070609315
+          }
+        ]
+      },
+      "triangle": {
+        "err_range_deg": 42.62726709867629,
+        "err_std_deg": 10.16094332235966,
+        "jump_count": 36,
+        "jump_rate_hz": 3.004017042433482,
+        "jump_mean_deg": 3.319108612749071,
+        "jump_max_deg": 20.829646469974243,
+        "jump_eps_deg": 0.1
+      }
+    }
+  }
+}
