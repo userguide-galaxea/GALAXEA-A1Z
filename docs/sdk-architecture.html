@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>A1Z SDK 结构说明</title>
+  <style>
+    /* ── Reset & Base ─────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0d1117;
+      --surface:    #161b22;
+      --border:     #30363d;
+      --border-dim: #21262d;
+      --text:       #e6edf3;
+      --muted:      #8b949e;
+      --accent:     #58a6ff;
+      --accent2:    #79c0ff;
+      --green:      #3fb950;
+      --orange:     #d29922;
+      --red:        #f85149;
+      --purple:     #bc8cff;
+      --teal:       #39d353;
+      --yellow:     #e3b341;
+
+      --layer-driver:  #1a2332;
+      --layer-dyn:     #1a2b1a;
+      --layer-robot:   #2b1a2b;
+
+      --font-mono: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      --radius: 8px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 15px;
+      line-height: 1.65;
+    }
+
+    /* ── Layout ───────────────────────────────────── */
+    .page-wrap {
+      max-width: 1060px;
+      margin: 0 auto;
+      padding: 0 24px 80px;
+    }
+
+    /* ── Header ───────────────────────────────────── */
+    header {
+      background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 48px 24px 40px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    header::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse 60% 80% at 50% -10%, rgba(88,166,255,.12) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(88,166,255,.15);
+      border: 1px solid rgba(88,166,255,.35);
+      color: var(--accent2);
+      border-radius: 20px;
+      padding: 3px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 2.4rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -.02em;
+      margin-bottom: 10px;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 1rem;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    /* ── Nav ──────────────────────────────────────── */
+    nav {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    nav ul {
+      max-width: 1060px;
+      margin: 0 auto;
+      padding: 0 24px;
+      list-style: none;
+      display: flex;
+      gap: 2px;
+      overflow-x: auto;
+    }
+    nav ul::-webkit-scrollbar { height: 0; }
+    nav a {
+      display: block;
+      padding: 12px 14px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+    nav a:hover { color: var(--text); border-bottom-color: var(--border); }
+
+    /* ── Sections ─────────────────────────────────── */
+    section { padding: 56px 0 0; }
+
+    h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    h2 .icon { font-size: 1.2rem; }
+
+    .section-lead {
+      color: var(--muted);
+      margin-bottom: 28px;
+      font-size: .95rem;
+    }
+
+    h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text);
+      margin: 28px 0 10px;
+    }
+
+    p { color: var(--muted); margin-bottom: 14px; }
+
+    /* ── Card ─────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px 24px;
+      margin-bottom: 16px;
+    }
+    .card-title {
+      font-size: .85rem;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    /* ── Code ─────────────────────────────────────── */
+    code {
+      font-family: var(--font-mono);
+      font-size: .85em;
+      background: rgba(110,118,129,.1);
+      border: 1px solid var(--border-dim);
+      border-radius: 4px;
+      padding: 1px 6px;
+      color: var(--accent2);
+    }
+    pre {
+      background: #010409;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      overflow-x: auto;
+      margin: 16px 0;
+      font-family: var(--font-mono);
+      font-size: .83rem;
+      line-height: 1.7;
+    }
+    pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      color: #e6edf3;
+    }
+    .c  { color: #8b949e; }   /* comment */
+    .kw { color: #ff7b72; }   /* keyword */
+    .fn { color: #d2a8ff; }   /* function */
+    .st { color: #a5d6ff; }   /* string */
+    .nm { color: #79c0ff; }   /* name/type */
+    .nu { color: #f8c965; }   /* number */
+
+    /* ── Hardware table ───────────────────────────── */
+    .hw-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 10px;
+      margin: 24px 0;
+    }
+    @media (max-width: 700px) {
+      .hw-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+    .joint-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 12px;
+      text-align: center;
+    }
+    .joint-card .jnum {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+    .joint-card .jname {
+      font-size: .75rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .joint-card .mtype {
+      display: inline-block;
+      font-size: .7rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 12px;
+    }
+    .motor-a { background: rgba(88,166,255,.15); color: #79c0ff; }
+    .motor-b { background: rgba(63,185,80,.15);  color: #56d364; }
+    .joint-card .jlimit {
+      font-size: .72rem;
+      color: var(--muted);
+      margin-top: 6px;
+      font-family: var(--font-mono);
+    }
+
+    /* ── Architecture diagram ─────────────────────── */
+    .arch {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin: 24px 0;
+    }
+
+    .arch-layer {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+    }
+    .arch-layer:last-child { border-bottom: none; }
+
+    .layer-driver { background: var(--layer-driver); }
+    .layer-dyn    { background: var(--layer-dyn); }
+    .layer-robot  { background: var(--layer-robot); }
+    .layer-can    { background: #1a1a0d; }
+
+    .layer-label {
+      font-size: .72rem;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border-radius: 12px;
+      display: inline-block;
+      margin-bottom: 12px;
+    }
+    .ll-robot  { background: rgba(188,140,255,.2); color: #bc8cff; }
+    .ll-dyn    { background: rgba(63,185,80,.2);   color: #56d364; }
+    .ll-driver { background: rgba(88,166,255,.2);  color: #79c0ff; }
+    .ll-can    { background: rgba(210,153,34,.2);  color: #d29922; }
+
+    .module-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .module {
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: .82rem;
+    }
+    .module strong {
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: .8rem;
+    }
+    .module .mdesc {
+      color: var(--muted);
+      font-size: .75rem;
+      margin-top: 2px;
+    }
+
+    .arrow-down {
+      text-align: center;
+      color: var(--border);
+      font-size: 1.4rem;
+      line-height: 1;
+      padding: 0;
+      margin: -1px 0;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ── Data flow ────────────────────────────────── */
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin: 24px 0;
+    }
+    .flow-step {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border-dim);
+      position: relative;
+    }
+    .flow-step:last-child { border-bottom: none; }
+    .step-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(88,166,255,.2);
+      border: 1px solid rgba(88,166,255,.4);
+      color: var(--accent);
+      font-size: .8rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .step-body {}
+    .step-title { color: var(--text); font-weight: 600; font-size: .9rem; margin-bottom: 4px; }
+    .step-desc  { color: var(--muted); font-size: .84rem; }
+
+    /* ── Safety grid ──────────────────────────────── */
+    .safety-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 20px 0;
+    }
+    @media (max-width: 640px) {
+      .safety-grid { grid-template-columns: 1fr; }
+    }
+    .safety-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid;
+      border-radius: var(--radius);
+      padding: 16px;
+    }
+    .sc-warn  { border-left-color: var(--orange); }
+    .sc-err   { border-left-color: var(--red); }
+    .sc-ok    { border-left-color: var(--green); }
+    .sc-info  { border-left-color: var(--accent); }
+    .safety-card h4 {
+      font-size: .85rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+    .safety-card p { font-size: .8rem; color: var(--muted); margin: 0; }
+
+    /* ── Table ────────────────────────────────────── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: .86rem;
+    }
+    th {
+      background: var(--surface);
+      color: var(--muted);
+      font-size: .75rem;
+      font-weight: 600;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-dim);
+      color: var(--muted);
+      vertical-align: top;
+    }
+    td:first-child { color: var(--text); font-family: var(--font-mono); font-size: .8rem; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,.02); }
+
+    /* ── Divider ──────────────────────────────────── */
+    hr { border: none; border-top: 1px solid var(--border); margin: 48px 0 0; }
+
+    /* ── Tag pills ────────────────────────────────── */
+    .tag {
+      display: inline-block;
+      font-size: .72rem;
+      font-weight: 600;
+      padding: 1px 8px;
+      border-radius: 10px;
+      vertical-align: middle;
+      margin-left: 6px;
+    }
+    .tag-green  { background: rgba(63,185,80,.15);   color: var(--green); }
+    .tag-orange { background: rgba(210,153,34,.15);  color: var(--orange); }
+    .tag-red    { background: rgba(248,81,73,.15);   color: var(--red); }
+    .tag-blue   { background: rgba(88,166,255,.15);  color: var(--accent); }
+    .tag-purple { background: rgba(188,140,255,.15); color: var(--purple); }
+
+    /* ── Callout ──────────────────────────────────── */
+    .callout {
+      display: flex;
+      gap: 12px;
+      background: rgba(210,153,34,.08);
+      border: 1px solid rgba(210,153,34,.3);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin: 16px 0;
+      font-size: .86rem;
+      color: #e3b341;
+      align-items: flex-start;
+    }
+    .callout .ci { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+    .callout.info {
+      background: rgba(88,166,255,.08);
+      border-color: rgba(88,166,255,.3);
+      color: var(--accent2);
+    }
+
+    /* ── Footer ───────────────────────────────────── */
+    footer {
+      margin-top: 72px;
+      padding: 28px 0;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      color: var(--muted);
+      font-size: .8rem;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="badge">SDK 结构文档</div>
+  <h1>A1Z Python SDK</h1>
+  <p class="subtitle">6-DOF 机械臂控制 SDK 架构说明 — CAN 总线驱动 · Pinocchio 重力补偿 · MIT 力位混控</p>
+</header>
+
+<nav>
+  <ul>
+    <li><a href="#hardware">硬件概览</a></li>
+    <li><a href="#architecture">三层架构</a></li>
+    <li><a href="#layer-driver">电机驱动层</a></li>
+    <li><a href="#layer-dynamics">动力学层</a></li>
+    <li><a href="#layer-robot">机器人层</a></li>
+    <li><a href="#control-loop">控制回路</a></li>
+    <li><a href="#safety">安全机制</a></li>
+    <li><a href="#usage">使用方式</a></li>
+  </ul>
+</nav>
+
+<div class="page-wrap">
+
+<!-- ── Hardware ─────────────────────────────────────── -->
+<section id="hardware">
+  <h2><span class="icon">🦾</span> 硬件概览</h2>
+  <p class="section-lead">A1Z 为 6 自由度串联机械臂，全部关节共享一条 CAN 总线（<code>can0</code>，波特率 1 Mbps，MIT 力位混控协议）。前三关节使用 MotorA，后三关节使用 MotorB，两类电机协议不同。</p>
+
+  <div class="hw-grid">
+    <div class="joint-card">
+      <div class="jnum">J0</div>
+      <div class="jname">arm_joint1</div>
+      <span class="mtype motor-a">MotorA</span>
+      <div class="jlimit">0x01</div>
+      <div class="jlimit">±2.09 rad</div>
+    </div>
+    <div class="joint-card">
+      <div class="jnum">J1</div>
+      <div class="jname">arm_joint2</div>
+      <span class="mtype motor-a">MotorA</span>
+      <div class="jlimit">0x02</div>
+      <div class="jlimit">0~π rad</div>
+    </div>
+    <div class="joint-card">
+      <div class="jnum">J2</div>
+      <div class="jname">arm_joint3</div>
+      <span class="mtype motor-a">MotorA</span>
+      <div class="jlimit">0x03</div>
+      <div class="jlimit">−π~0 rad</div>
+    </div>
+    <div class="joint-card">
+      <div class="jnum">J3</div>
+      <div class="jname">arm_joint4</div>
+      <span class="mtype motor-b">MotorB</span>
+      <div class="jlimit">0x04</div>
+      <div class="jlimit">±1.48 rad</div>
+    </div>
+    <div class="joint-card">
+      <div class="jnum">J4</div>
+      <div class="jname">arm_joint5</div>
+      <span class="mtype motor-b">MotorB</span>
+      <div class="jlimit">0x05</div>
+      <div class="jlimit">±1.48 rad</div>
+    </div>
+    <div class="joint-card">
+      <div class="jnum">J5</div>
+      <div class="jname">arm_joint6</div>
+      <span class="mtype motor-b">MotorB</span>
+      <div class="jlimit">0x06</div>
+      <div class="jlimit">±2.01 rad</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">关节符号约定（<code>_JOINT_SIGN</code>）</div>
+    <p style="margin:0;font-size:.86rem;">关节 2（J2）和关节 4（J4）的电机安装方向与 URDF 坐标系相反，需要取反：</p>
+    <pre><code><span class="nm">_JOINT_SIGN</span> = np.array([<span class="nu">1.0</span>, <span class="nu">1.0</span>, <span class="nu">-1.0</span>, <span class="nu">1.0</span>, <span class="nu">-1.0</span>, <span class="nu">1.0</span>])
+
+<span class="c"># URDF 帧 → 电机帧（发送命令时乘以 sign）</span>
+motor_pos = cmd.pos * self._joint_sign
+<span class="c"># 电机帧 → URDF 帧（读取反馈时乘以 sign）</span>
+state.pos = motor_feedback_pos * self._joint_sign</code></pre>
+  </div>
+</section>
+
+<!-- ── Architecture ──────────────────────────────────── -->
+<section id="architecture">
+  <h2><span class="icon">🏗️</span> 三层架构</h2>
+  <p class="section-lead">SDK 从上到下分为三层，每层只向下依赖，对外暴露干净的接口。</p>
+
+  <div class="arch">
+    <div class="arch-layer layer-robot">
+      <span class="layer-label ll-robot">Robot Layer — 机器人层</span>
+      <div class="module-row">
+        <div class="module">
+          <strong>robot.py</strong>
+          <div class="mdesc">Robot Protocol（抽象接口）</div>
+        </div>
+        <div class="module">
+          <strong>arm_robot.py</strong>
+          <div class="mdesc">ArmRobot · 250 Hz 控制回路</div>
+        </div>
+        <div class="module">
+          <strong>get_robot.py</strong>
+          <div class="mdesc">get_a1z_robot() 工厂函数</div>
+        </div>
+        <div class="module">
+          <strong>kinematics.py</strong>
+          <div class="mdesc">FK / IK（Pinocchio）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-layer layer-dyn">
+      <span class="layer-label ll-dyn">Dynamics Layer — 动力学层</span>
+      <div class="module-row">
+        <div class="module">
+          <strong>gravity_model.py</strong>
+          <div class="mdesc">GravityModel · Pinocchio RNEA</div>
+        </div>
+        <div class="module">
+          <strong>A1Z_Flange.urdf</strong>
+          <div class="mdesc">机器人几何 / 惯量模型</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-layer layer-driver">
+      <span class="layer-label ll-driver">Motor Driver Layer — 电机驱动层</span>
+      <div class="module-row">
+        <div class="module">
+          <strong>motor_a_driver.py</strong>
+          <div class="mdesc">MotorA MIT 帧打包/解析</div>
+        </div>
+        <div class="module">
+          <strong>motor_b_driver.py</strong>
+          <div class="mdesc">MotorB MIT 帧 + MixedMotorChain</div>
+        </div>
+        <div class="module">
+          <strong>utils.py</strong>
+          <div class="mdesc">float↔uint 转换 · 错误码</div>
+        </div>
+        <div class="module">
+          <strong>can_interface.py</strong>
+          <div class="mdesc">CAN 收发封装（遗留）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-layer layer-can">
+      <span class="layer-label ll-can">Hardware — CAN Bus</span>
+      <div class="module-row">
+        <div class="module"><strong>SocketCAN / gs_usb</strong><div class="mdesc">python-can BusABC</div></div>
+        <div class="module"><strong>6× Motor</strong><div class="mdesc">CAN ID 0x01–0x06 · 1 Mbps</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Driver Layer ──────────────────────────────────── -->
+<section id="layer-driver">
+  <h2><span class="icon">⚡</span> 电机驱动层</h2>
+  <p class="section-lead">最底层，负责将 Python 浮点数编码为 MIT 协议的 64-bit CAN 帧，并将收到的帧解码回物理量。两种电机帧格式不同。</p>
+
+  <h3>MIT 帧格式对比</h3>
+  <div class="card">
+    <div class="card-title">MotorA（EC-A4315-P2-36）— 发送帧（64 bits，big-endian）</div>
+    <pre><code><span class="c">│ mode(3) │ kp(12) │ kd(9) │ pos(16) │ vel(12) │ torque(12) │</span>
+
+<span class="c"># 反馈帧：</span>
+<span class="c">│ report_type(3) │ error(5) │ pos(16) │ vel(12) │ current(12) │ temp_coil(8) │ temp_mos(8) │</span>
+<span class="c"># 注意：MotorA 反馈 current（电流），需乘 KT=2.8 换算为 Nm</span></code></pre>
+    <div class="card-title" style="margin-top:16px">MotorB（4310 / 4340）— 发送帧（64 bits）</div>
+    <pre><code><span class="c">│ pos(16) │ vel(12) │ kp(12) │ kd(12) │ torque(12) │</span>
+
+<span class="c"># 反馈帧：</span>
+<span class="c">│ error(4,高nibble) │ pos(16) │ vel(12) │ torque(12) │ temp_mos(8) │ temp_rotor(8) │</span>
+<span class="c"># 注意：MotorB 直接反馈 torque（Nm），不需要 KT 换算</span></code></pre>
+  </div>
+
+  <div class="callout">
+    <span class="ci">⚠️</span>
+    <div><strong>MotorA 需要 MIT 探测帧才会返回反馈。</strong>发 enable 帧（0xFC）后 MotorA 不主动响应，必须再发一条零增益 MIT 指令（kp=0，kd=0.05，torque=0）才能收到位置反馈。MotorB 收到 enable 即回包。</div>
+  </div>
+
+  <h3>MixedMotorChain — 统一电机链接口</h3>
+  <p><code>MixedMotorChain</code> 是驱动层的核心。它将 3 个 MotorA + 3 个 MotorB 合并为一个统一的 6 关节接口，<code>ArmRobot</code> 只与它交互，从不直接访问单个电机对象。</p>
+  <pre><code><span class="c"># 构造：传入两组电机列表 + 关节下标映射</span>
+chain = MixedMotorChain(
+    motor_a_list=[MotorA(0x01), MotorA(0x02), MotorA(0x03)],
+    motor_b_list=[MotorB(0x04), MotorB(0x05), MotorB(0x06)],
+    motor_a_joint_indices=[<span class="nu">0</span>, <span class="nu">1</span>, <span class="nu">2</span>],
+    motor_b_joint_indices=[<span class="nu">3</span>, <span class="nu">4</span>, <span class="nu">5</span>],
+)
+
+<span class="c"># 每个控制周期调用顺序：</span>
+count = chain.drain_and_update(bus)   <span class="c"># 1. 排空 CAN 接收队列，分发给各电机解析</span>
+pos   = chain.get_positions()          <span class="c"># 2. 读取合并后的状态数组（长度 6）</span>
+chain.send_commands(pos, vel, kp, kd, torque)  <span class="c"># 3. 广播指令帧</span></code></pre>
+
+  <h3>float ↔ uint 定点转换</h3>
+  <pre><code><span class="c"># utils.py</span>
+<span class="kw">def</span> <span class="fn">float_to_uint</span>(x, x_min, x_max, bits) -> <span class="nm">int</span>:
+    <span class="kw">return</span> int((x - x_min) * ((1 << bits) - 1) / (x_max - x_min))
+
+<span class="kw">def</span> <span class="fn">uint_to_float</span>(u, x_min, x_max, bits) -> <span class="nm">float</span>:
+    <span class="kw">return</span> u * (x_max - x_min) / ((1 << bits) - 1) + x_min</code></pre>
+</section>
+
+<!-- ── Dynamics Layer ─────────────────────────────────── -->
+<section id="layer-dynamics">
+  <h2><span class="icon">🧮</span> 动力学层</h2>
+  <p class="section-lead">基于 Pinocchio 的 RNEA（递推牛顿-欧拉算法），每个控制周期计算全逆动力学扭矩作为前馈。</p>
+
+  <div class="card">
+    <div class="card-title">逆动力学公式</div>
+    <pre><code><span class="c">τ = M(q)·q̈ + C(q,q̇)·q̇ + g(q)</span>
+
+<span class="c"># 当 q̇=0, q̈=0 时退化为纯重力补偿：τ = g(q)</span>
+
+tau = gravity_model.compute_inverse_dynamics(q, cmd_vel, cmd_acc)
+<span class="c"># move_joints() 插值时 cmd_vel/cmd_acc 非零 → 完整逆动力学</span>
+<span class="c"># 零力漂浮时 cmd_vel=0, cmd_acc=0 → 纯重力补偿</span></code></pre>
+  </div>
+
+  <h3>URDF 选择</h3>
+  <p>动力学模型对 URDF 敏感——末端质量不同，补偿扭矩不同。默认使用 <code>A1Z_Flange.urdf</code>（裸法兰，无末端负载）。</p>
+
+  <table>
+    <thead><tr><th>URDF 文件</th><th>适用场景</th></tr></thead>
+    <tbody>
+      <tr><td>A1Z_Flange.urdf</td><td>默认，裸法兰无末端负载</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <span class="ci">ℹ️</span>
+    <div>Pinocchio 在初始化时断言重力向量为 <code>[0, 0, -9.81]</code>，即 base_link Z 轴朝上。若机械臂挂装或倾斜安装，需调用 <code>GravityModel.set_gravity()</code> 修改重力方向。</div>
+  </div>
+</section>
+
+<!-- ── Robot Layer ────────────────────────────────────── -->
+<section id="layer-robot">
+  <h2><span class="icon">🤖</span> 机器人层</h2>
+  <p class="section-lead">最高层，封装完整的机器人控制逻辑：后台控制线程、安全检查、轨迹插值、示教录制。</p>
+
+  <h3>Robot Protocol — 公共接口契约</h3>
+  <pre><code><span class="c"># robot.py — 任何机器人实现都应满足此 Protocol</span>
+<span class="kw">class</span> <span class="nm">Robot</span>(Protocol):
+    <span class="kw">def</span> <span class="fn">num_dofs</span>(self) -> <span class="nm">int</span>: ...
+    <span class="kw">def</span> <span class="fn">get_joint_pos</span>(self) -> np.ndarray: ...
+    <span class="kw">def</span> <span class="fn">get_joint_state</span>(self) -> Dict[str, np.ndarray]: ...
+    <span class="kw">def</span> <span class="fn">command_joint_pos</span>(self, pos: np.ndarray) -> None: ...
+    <span class="kw">def</span> <span class="fn">command_joint_state</span>(self, state: Dict) -> None: ...
+    <span class="kw">def</span> <span class="fn">get_observations</span>(self) -> Dict[str, np.ndarray]: ...</code></pre>
+
+  <h3>ArmRobot 主要组件</h3>
+
+  <div class="card">
+    <div class="card-title">线程模型</div>
+    <p style="font-size:.86rem;margin-bottom:12px;">控制回路在独立后台线程中以 250 Hz 运行，与主线程通过两把锁通信：</p>
+    <pre><code><span class="c"># 两把锁分别保护状态和指令，最小化争用</span>
+self._state_lock   = threading.Lock()   <span class="c"># 保护 JointState（读反馈写入）</span>
+self._command_lock = threading.Lock()   <span class="c"># 保护 JointCommand（用户写入）</span>
+self._estop_latch  = threading.Event()  <span class="c"># 急停信号（set/clear 原子操作）</span></code></pre>
+  </div>
+
+  <div class="card">
+    <div class="card-title">位置指令的两条入口路径</div>
+    <table style="margin:0">
+      <thead><tr><th>入口</th><th>验证策略</th><th>适用场景</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>command_joint_pos / command_joint_state</td>
+          <td><code>_clip_joint_pos()</code><br>±0.05 rad 内裁剪，超出拒绝帧；连续拒绝 5 帧触发急停</td>
+          <td>流式遥控 / 轨迹回放（不能因单帧异常中断整个会话）</td>
+        </tr>
+        <tr>
+          <td>move_joints()</td>
+          <td><code>_validate_joint_pos()</code><br>±0.05 rad 内裁剪，超出直接抛 ValueError</td>
+          <td>单次阻塞移动（调用者可捕获异常，IK 解不合理时必须报错）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>get_a1z_robot() — 工厂函数</h3>
+  <p>所有 A1Z 特定的硬件参数集中在 <code>get_robot.py</code> 中，<code>ArmRobot</code> 本身不包含任何 A1Z 特定常数。这使得同一套控制逻辑可支持不同机型。</p>
+  <pre><code>robot = <span class="fn">get_a1z_robot</span>(
+    can_channel=<span class="st">"can0"</span>,
+    gravity_comp_factor=<span class="nu">1.0</span>,   <span class="c"># 0=关闭重力补偿, 1=全补偿</span>
+    zero_gravity_mode=<span class="kw">True</span>,    <span class="c"># True=零力漂浮, False=位置保持</span>
+    control_freq_hz=<span class="nu">250</span>,
+)
+robot.start()   <span class="c"># 使能电机，启动后台线程</span>
+<span class="c"># ... 控制 ...</span>
+robot.stop()    <span class="c"># 零扭矩，失能，线程退出</span></code></pre>
+
+  <h3>示教 & 回放</h3>
+  <pre><code><span class="c"># 录制（在零力漂浮模式下手动移动机械臂）</span>
+robot.start_recording(sample_hz=<span class="nu">50</span>)
+<span class="c"># ... 手动移动 ...</span>
+traj = robot.stop_recording()        <span class="c"># → List[(timestamp_s, pos_rad)]</span>
+ArmRobot.save_recording(traj, <span class="st">"teach.json"</span>)
+
+<span class="c"># 回放</span>
+traj = ArmRobot.load_recording(<span class="st">"teach.json"</span>)
+robot.play_trajectory(traj, speed_factor=<span class="nu">1.0</span>)</code></pre>
+
+  <h3>运动学模块（Kinematics）</h3>
+  <pre><code>kin = <span class="nm">Kinematics</span>(urdf_path, end_effector_frame=<span class="st">"flange"</span>)
+
+<span class="c"># 正运动学 → 4×4 SE3 矩阵</span>
+T = kin.<span class="fn">fk</span>(q)
+
+<span class="c"># 逆运动学（阻尼最小二乘，关节限位投影）</span>
+converged, q_sol = kin.<span class="fn">ik</span>(
+    target_pose=T_target,
+    init_q=q_current,
+    damping=<span class="nu">1e-6</span>,
+    max_iters=<span class="nu">200</span>,
+)
+<span class="kw">if</span> converged:
+    robot.move_joints(q_sol, max_jump_rad=<span class="nu">0.3</span>)  <span class="c"># max_jump_rad 拒绝远离解</span></code></pre>
+</section>
+
+<!-- ── Control Loop ──────────────────────────────────── -->
+<section id="control-loop">
+  <h2><span class="icon">🔄</span> 控制回路（250 Hz）</h2>
+  <p class="section-lead">每个 4 ms 周期执行的步骤，按固定顺序：</p>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <div class="step-title">读取 CAN 反馈 <code>_read_state()</code></div>
+        <div class="step-desc">调用 <code>MixedMotorChain.drain_and_update(bus)</code>，排空接收队列，将最新的位置/速度/电流/温度/错误码写入 <code>JointState</code>（加锁）。更新 <code>_last_feedback_t</code> 时间戳。</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <div class="step-title">运行时安全检查 <code>_check_runtime_safety()</code></div>
+        <div class="step-desc">按顺序：CAN 反馈超时 → 电机错误码 → 温度（MOS + 转子）→ 关节位置限位 → 关节速度限位。任何硬故障抛 <code>RuntimeError</code>，控制回路捕获后调用 <code>disable_all()</code> 并退出。</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <div class="step-title">采样示教录制缓冲区</div>
+        <div class="step-desc">若 <code>_recording=True</code> 且距上次采样已超过采样周期，将当前关节位置追加到 <code>_record_buffer</code>（加锁）。</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <div class="step-title">读取当前指令 <code>JointCommand</code></div>
+        <div class="step-desc">加 <code>_command_lock</code> 后深拷贝 pos / vel / acc / kp / kd / torque_ff，避免在后续计算过程中被主线程修改。</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <div class="step-title">全逆动力学 <code>GravityModel.compute_inverse_dynamics(q, cmd_vel, cmd_acc)</code></div>
+        <div class="step-desc">计算 τ = M·q̈ + C·q̇ + g。cmd_vel / cmd_acc 超过硬性上限（±4 rad/s、±20 rad/s²）时直接 raise，不做静默裁剪——因为上游校验已经保证了合规，到这里还超限说明有 bug。</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">6</div>
+      <div class="step-body">
+        <div class="step-title">合并扭矩 + 帧转换 → 发送</div>
+        <div class="step-desc">
+          <code>τ_motor = clip((τ_ff + τ_id × scale) × gravity_comp_factor × joint_sign, ±torque_clip)</code><br>
+          再调用 <code>MixedMotorChain.send_commands(pos×sign, vel×sign, kp, kd, τ_motor)</code>，将所有 6 个 MIT 帧发送到 CAN 总线。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3>move_joints() 最小急动度轨迹</h3>
+  <pre><code><span class="c"># 5 阶多项式（minimum-jerk），在 t=0 和 t=1 处速度、加速度均为零</span>
+alpha     = <span class="nu">10</span>*t**<span class="nu">3</span> - <span class="nu">15</span>*t**<span class="nu">4</span> + <span class="nu">6</span>*t**<span class="nu">5</span>
+alpha_dot = (<span class="nu">30</span>*t**<span class="nu">2</span> - <span class="nu">60</span>*t**<span class="nu">3</span> + <span class="nu">30</span>*t**<span class="nu">4</span>) / duration
+alpha_ddot= (<span class="nu">60</span>*t   - <span class="nu">180</span>*t**<span class="nu">2</span> + <span class="nu">120</span>*t**<span class="nu">3</span>) / duration**<span class="nu">2</span>
+
+cmd.pos = current_pos + alpha * delta        <span class="c"># 位置插值</span>
+cmd.vel = alpha_dot  * delta                 <span class="c"># 速度前馈（逆动力学用）</span>
+cmd.acc = alpha_ddot * delta                 <span class="c"># 加速度前馈（逆动力学用）</span></code></pre>
+
+  <div class="callout info">
+    <span class="ci">ℹ️</span>
+    <div>轨迹起点使用<strong>上一次发送的指令位置</strong>（而非实测位置），避免连续调用 <code>move_joints()</code> 时把 PD 跟踪误差注入为起始跳变。</div>
+  </div>
+</section>
+
+<!-- ── Safety ─────────────────────────────────────────── -->
+<section id="safety">
+  <h2><span class="icon">🛡️</span> 安全机制</h2>
+  <p class="section-lead">SDK 设计了多层防护，从指令入口到控制周期内均有独立的拦截逻辑。</p>
+
+  <div class="safety-grid">
+    <div class="safety-card sc-err">
+      <h4>🔴 急停（ESTOP）</h4>
+      <p>触发条件：连续 5 帧流式指令被拒绝、CAN 反馈超时 0.2 s、电机错误码、MOS 超 85°C / 转子超 90°C、速度超限、关节位置超限（运行时）。急停后 kp→0，kd 减半，重力补偿持续，机械臂不会塌落。调用 <code>robot.release()</code> 恢复。</p>
+    </div>
+    <div class="safety-card sc-warn">
+      <h4>🟡 警告限速</h4>
+      <p>feedforward vel 上限 ±4 rad/s，acc 上限 ±20 rad/s²（在 <code>_update()</code> 用 assert 而不是 clip）。kp 上限 200，kd 上限 5（在 <code>command_joint_state</code> 入口处拒绝帧）。</p>
+    </div>
+    <div class="safety-card sc-ok">
+      <h4>🟢 流式指令容错</h4>
+      <p><code>_clip_joint_pos()</code> 对 ±0.05 rad 以内的轻微越界静默裁剪（1 Hz 频率限制日志）；超出则拒绝当前帧，保持上一条有效指令，不会驱动到几何无关的裁剪位置。</p>
+    </div>
+    <div class="safety-card sc-info">
+      <h4>🔵 控制频率监控</h4>
+      <p>每 2 秒统计实际频率，连续 3 次低于 80 Hz（默认）则紧急失能退出。防止系统负载导致控制回路退化到不安全的低频率。</p>
+    </div>
+    <div class="safety-card sc-ok">
+      <h4>🟢 disable_all() 双发</h4>
+      <p><code>MixedMotorChain.disable_all()</code> 对所有电机发送两次失能帧（含 10 ms 间隔），应对 gs_usb 总线繁忙时单帧丢包问题，确保电机可靠下电。</p>
+    </div>
+    <div class="safety-card sc-info">
+      <h4>🔵 IK 解合理性校验</h4>
+      <p><code>move_joints(max_jump_rad=)</code> 参数对比当前<strong>实测位置</strong>与目标之间的距离，拒绝肘部翻转等远离当前形态的 IK 解，防止机械臂扫过整个工作空间。</p>
+    </div>
+  </div>
+
+  <h3>温度阈值</h3>
+  <table>
+    <thead><tr><th>传感器</th><th>警告阈值</th><th>急停阈值</th></tr></thead>
+    <tbody>
+      <tr><td>temp_mos（MOS 管）</td><td>70°C</td><td>85°C</td></tr>
+      <tr><td>temp_rotor（电机线圈）</td><td>75°C</td><td>90°C</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ── Usage ──────────────────────────────────────────── -->
+<section id="usage">
+  <h2><span class="icon">🚀</span> 快速使用</h2>
+  <p class="section-lead">SDK 的典型使用模式：一切从 <code>get_a1z_robot()</code> 开始，<code>start()</code> 后进入控制，<code>stop()</code> 结束。</p>
+
+  <h3>零力漂浮（示教 / 遥控）</h3>
+  <pre><code><span class="kw">from</span> <span class="nm">a1z.robots.get_robot</span> <span class="kw">import</span> get_a1z_robot
+<span class="kw">import</span> numpy <span class="kw">as</span> np
+
+robot = get_a1z_robot(zero_gravity_mode=<span class="kw">True</span>, gravity_comp_factor=<span class="nu">1.0</span>)
+robot.start()
+
+<span class="c"># 读取状态</span>
+state = robot.get_joint_state()   <span class="c"># {pos, vel, eff, temp_mos, temp_rotor, error_codes}</span>
+
+<span class="c"># 流式指令（遥控用，单帧失败不中断）</span>
+robot.command_joint_pos(target_pos)
+
+robot.stop()</code></pre>
+
+  <h3>位置保持 + 点到点移动</h3>
+  <pre><code>robot = get_a1z_robot(zero_gravity_mode=<span class="kw">False</span>, gravity_comp_factor=<span class="nu">1.0</span>)
+robot.start()
+
+<span class="c"># 阻塞式平滑移动，内部 5 阶多项式插值，到达后返回</span>
+robot.move_joints(
+    np.array([<span class="nu">0.0</span>, <span class="nu">0.5</span>, <span class="nu">-0.3</span>, <span class="nu">0.0</span>, <span class="nu">0.0</span>, <span class="nu">0.0</span>]),
+    speed=<span class="nu">0.5</span>,        <span class="c"># rad/s（最大关节速度）</span>
+    max_jump_rad=<span class="nu">0.5</span>, <span class="c"># 拒绝离当前位置过远的目标（防 IK 翻转）</span>
+)
+
+robot.stop()</code></pre>
+
+  <h3>FK / IK 示例</h3>
+  <pre><code><span class="kw">from</span> <span class="nm">a1z.robots.kinematics</span> <span class="kw">import</span> Kinematics
+
+kin = <span class="nm">Kinematics</span>(<span class="st">"a1z/robot_models/a1z/A1Z_Flange.urdf"</span>)
+
+q = robot.get_joint_pos()
+T = kin.<span class="fn">fk</span>(q)              <span class="c"># → 4×4 numpy 变换矩阵</span>
+
+<span class="c"># 修改末端位置后求逆解</span>
+T_target = T.copy()
+T_target[<span class="nu">0</span>, <span class="nu">3</span>] += <span class="nu">0.05</span>    <span class="c"># X 方向前移 5 cm</span>
+
+converged, q_sol = kin.<span class="fn">ik</span>(T_target, init_q=q)
+<span class="kw">if</span> converged:
+    robot.move_joints(q_sol, max_jump_rad=<span class="nu">0.3</span>)</code></pre>
+
+  <h3>诊断工具</h3>
+  <pre><code><span class="c"># 检查 CAN 接口</span>
+python tools/motor_diag.py --check-can
+
+<span class="c"># 扫描所有 6 个电机（使能 → 探测 → 失能）</span>
+python tools/motor_diag.py --scan
+
+<span class="c"># 持续监控位置/速度/温度/错误码</span>
+python tools/motor_diag.py --monitor
+
+<span class="c"># 清除 MotorB 错误码（发 0xFF*7+0xFB）</span>
+python tools/motor_diag.py --clear-error --joints 3 4 5
+
+<span class="c"># 零点标定（将当前位置设为零点）</span>
+sudo python3 tools/set_zero.py --all</code></pre>
+</section>
+
+</div><!-- /page-wrap -->
+
+<footer>
+  A1Z Python SDK — 结构说明文档 &nbsp;·&nbsp; 依赖：python-can ≥ 4.0 · numpy · pinocchio
+</footer>
+
+</body>
+</html>
