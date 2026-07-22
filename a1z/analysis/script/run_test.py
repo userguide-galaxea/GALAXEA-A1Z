@@ -9,12 +9,17 @@ Modes:
 
 --dry-run: no hardware. For ee, runs the offline IK pipeline + gate and writes
 joints-traj-ref.csv + IK preview PNG. For joint(s), prints the safe windows.
+
+Output root is overridable via the TEST_LOG_ROOT env var (see
+01-docs/04-sops/07-测试数据管理-SOP.md): if set, run dirs go to
+$TEST_LOG_ROOT/02-a1z/01-output/ instead of the local a1z/analysis/output/.
 """
 from __future__ import annotations
 
 import argparse
 import datetime
 import math
+import os
 import subprocess
 from pathlib import Path
 
@@ -26,7 +31,9 @@ from a1z.analysis import report as R
 from a1z.analysis import safety
 
 DEG = 180.0 / math.pi
-_OUTPUT_ROOT = Path(__file__).resolve().parent.parent / "output"
+_OUTPUT_ROOT = (Path(os.environ["TEST_LOG_ROOT"]) / "02-a1z" / "01-output"
+                if os.environ.get("TEST_LOG_ROOT")
+                else Path(__file__).resolve().parent.parent / "output")
 
 
 def _parse_gains(s: str | None):
@@ -96,6 +103,12 @@ def build_args():
     ap.add_argument("--q-nom-deg", default="-20,35,-25,-25,0,0")
     ap.add_argument("--transit-speed", type=float, default=15.0)
     ap.add_argument("--jump-eps", type=float, default=0.1)
+    ap.add_argument("--gap-us", type=float, default=None,
+                    help="inter-command CAN pacing gap (µs), forwarded to "
+                         "get_a1z_robot(inter_cmd_gap_us=…); default None = SDK "
+                         "default 250 (SOP-06), 0 = unpaced/B0 fault regime. "
+                         "The resolved value is machine-recorded in meta.json "
+                         "(SOP-08 K1) — the SDK reads no env var since 0584cf4.")
     ap.add_argument("--sample-hz", type=int, default=100)
     ap.add_argument("--dry-run", action="store_true")
     return ap.parse_args()
@@ -117,10 +130,19 @@ def _waves(args):
 
 
 def _stamp_pd_defaults(meta, robot):
-    """Record the robot's live default PD gains into meta once it's started."""
+    """Record the robot's live default PD gains into meta once it's started.
+
+    Also reads back the live inter-command CAN gap from the motor chain
+    (`inter_cmd_gap_us_live`) so meta carries the *applied* pacing truth, not
+    just the harness-side resolved value — divergence between the two flags a
+    harness/SDK mismatch (SOP-08 K1/R8).
+    """
     info = robot.get_robot_info()
     meta["pd"]["default_kp"] = info["default_kp"].tolist()
     meta["pd"]["default_kd"] = info["default_kd"].tolist()
+    chain = getattr(robot, "_motor_chain", None)
+    if chain is not None and hasattr(chain, "inter_cmd_gap_s"):
+        meta["hardware"]["inter_cmd_gap_us_live"] = chain.inter_cmd_gap_s * 1e6
 
 
 def _record_applied(meta, key, kp, kd):
@@ -140,7 +162,8 @@ def run_joint_units(args, rundir, meta, result):
         period=args.period, period_triangle=args.period_triangle,
         cycles=args.cycles, waves=waves,
         edge_rate_deg_s=args.edge_rate,
-        sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed)
+        sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed,
+        inter_cmd_gap_us=args.gap_us)
     unit = {}
     failed = []
     try:
@@ -221,7 +244,7 @@ def run_ee(args, rundir, meta, result, *, dry_run: bool):
         args.can, q_nom_deg=q_nom_deg, ee_kind=args.ee_kind, plane=args.plane,
         radius=args.radius, period=args.period_ee, cycles=args.cycles_ee,
         sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed,
-        kp=ee_kp, kd=ee_kd)
+        kp=ee_kp, kd=ee_kd, inter_cmd_gap_us=args.gap_us)
     off = runner.solve_offline()
     g = off["gate"]
     lim = safety.effective_limits(safety.LIMIT_BUFFER_RAD, ee.urdf_limits(runner.kin))
@@ -279,6 +302,12 @@ def run_ee(args, rundir, meta, result, *, dry_run: bool):
 
 
 def build_meta(args) -> dict:
+    # Machine-record the CAN pacing gap per run (SOP-08 K1): resolve --gap-us
+    # through the same helper the robot factory uses, so meta carries the value
+    # the run actually constructs with (None → SDK default 250 µs). A live
+    # readback (`inter_cmd_gap_us_live`) is added at robot start by
+    # _stamp_pd_defaults; dry runs carry only the resolved value.
+    from a1z.robots.get_robot import _resolve_inter_cmd_gap_us
     lim = safety.effective_limits()
     eff = {}
     for j1 in safety.SAFE_RANGES_DEG:
@@ -289,7 +318,8 @@ def build_meta(args) -> dict:
         "dry_run": args.dry_run,
         "git": _git_info(),
         "hardware": {"can_channel": args.can, "sample_hz": args.sample_hz,
-                     "sdk_loop_hz": 250},
+                     "sdk_loop_hz": 250,
+                     "inter_cmd_gap_us": _resolve_inter_cmd_gap_us(args.gap_us)},
         "pd": {
             # default_kp/kd read back from the robot at start() (§2.2);
             # applied[...] = the exact per-joint / per-phase gains commanded.

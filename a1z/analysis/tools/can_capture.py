@@ -25,7 +25,7 @@
 输出路径（--out）解析规则（见 01-docs/04-sops/07-测试数据管理-SOP.md）：
     - 绝对路径：原样使用。
     - 相对路径 + 设置了 TEST_LOG_ROOT 环境变量：落到
-      $TEST_LOG_ROOT/02-a1z/output/<相对路径>（与 run_test.py 的 output 根一致，
+      $TEST_LOG_ROOT/02-a1z/01-output/<相对路径>（与 run_test.py 的 output 根一致，
       抓包 CSV 因此可以直接放进对应 run 目录，如 --out <date>-run-<id>/can-capture-J6.csv）。
     - 相对路径 + 未设置 TEST_LOG_ROOT：相对当前工作目录（保持旧行为不变）。
 
@@ -55,14 +55,14 @@ def resolve_output_path(path: Path) -> Path:
     """把用户给的输出路径按 TEST_LOG_ROOT 规则解析（见模块 docstring / SOP-07）。
 
     绝对路径原样返回；相对路径在 TEST_LOG_ROOT 设置时挂到
-    $TEST_LOG_ROOT/02-a1z/output/ 下，否则保持相对当前工作目录（旧行为）。
+    $TEST_LOG_ROOT/02-a1z/01-output/ 下，否则保持相对当前工作目录（旧行为）。
     """
     path = Path(path)
     if path.is_absolute():
         return path
     root = os.environ.get("TEST_LOG_ROOT")
     if root:
-        return Path(root) / "02-a1z" / "output" / path
+        return Path(root) / "02-a1z" / "01-output" / path
     return path
 
 
