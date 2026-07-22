@@ -62,14 +62,18 @@ def write_joint_csv(path: Path, t: np.ndarray, q: np.ndarray) -> None:
             w.writerow([f"{t[k]:.6f}"] + [f"{v:.6f}" for v in q[k]])
 
 
-def write_unit_csv(path: Path, t: np.ndarray, ref: np.ndarray, resp: np.ndarray) -> None:
-    """(t, ref, resp, err) rad, single joint."""
+def write_unit_csv(path: Path, t: np.ndarray, ref: np.ndarray, resp: np.ndarray,
+                   eff: Optional[np.ndarray] = None) -> None:
+    """(t, ref, resp, err[, eff]) — angles rad, effort Nm, single joint."""
     with open(path, "w", newline="") as fp:
         w = csv.writer(fp)
-        w.writerow(["t", "ref", "resp", "err"])
+        w.writerow(["t", "ref", "resp", "err"] + (["eff"] if eff is not None else []))
         for k in range(len(t)):
-            w.writerow([f"{t[k]:.6f}", f"{ref[k]:.6f}", f"{resp[k]:.6f}",
-                        f"{resp[k] - ref[k]:.6f}"])
+            row = [f"{t[k]:.6f}", f"{ref[k]:.6f}", f"{resp[k]:.6f}",
+                   f"{resp[k] - ref[k]:.6f}"]
+            if eff is not None:
+                row.append(f"{eff[k]:.6f}")
+            w.writerow(row)
 
 
 def _pose_row(T: np.ndarray):
@@ -134,7 +138,9 @@ def plot_unit(path: Path, joint1: int,
     """Two stacked panels (square / triangle): ref+resp+err, with metric text.
 
     ``sq`` / ``tri`` are dicts {t, ref, resp, metrics} or None if that waveform
-    wasn't run.
+    wasn't run. If the dict carries ``eff`` (Nm), it is drawn on a right-hand
+    axis — during a stall, eff ramping = fighting friction/contact, eff≈0 =
+    command path (SOP-03 §5.4).
     """
     panels = [(("square", sq)), (("triangle", tri))]
     panels = [(name, d) for name, d in panels if d is not None]
@@ -145,11 +151,21 @@ def plot_unit(path: Path, joint1: int,
         ax.plot(t, d["ref"] * DEG, label="ref", lw=1.4)
         ax.plot(t, d["resp"] * DEG, label="resp", lw=1.0)
         ax.plot(t, (d["resp"] - d["ref"]) * DEG, label="err", lw=0.9, alpha=0.7)
+        handles, labels = ax.get_legend_handles_labels()
+        if d.get("eff") is not None:
+            ax_eff = ax.twinx()
+            ax_eff.plot(t, d["eff"], label="eff", lw=0.8, color="tab:purple",
+                        alpha=0.55)
+            ax_eff.set_ylabel("eff (Nm)", color="tab:purple", fontsize=8)
+            ax_eff.tick_params(axis="y", labelcolor="tab:purple", labelsize=8)
+            h2, l2 = ax_eff.get_legend_handles_labels()
+            handles += h2
+            labels += l2
         ax.set_title(f"J{joint1} {name}")
         ax.set_xlabel("t (s)")
         ax.set_ylabel("deg")
         ax.grid(alpha=0.3)
-        ax.legend(loc="upper right", fontsize=8)
+        ax.legend(handles, labels, loc="upper right", fontsize=8)
         m = d.get("metrics", {})
         ax.text(0.01, 0.98, _fmt_metrics(name, m), transform=ax.transAxes,
                 va="top", ha="left", fontsize=8, family="monospace",

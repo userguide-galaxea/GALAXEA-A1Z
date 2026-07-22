@@ -121,20 +121,33 @@ class _Base:
         Always uses DEFAULT gains (test gains apply only to excitation). Raises
         on limit / far-jump violation so callers abort into safe shutdown.
         """
-        self.robot.move_joints(np.asarray(q_target, dtype=float)[:6],
-                               speed=self.transit_speed, max_jump_rad=max_jump_rad)
-        # Verify arrival (SOP-01 §4.1 fail-safe: > 3° off → abort).
-        time.sleep(0.05)
-        meas = self.robot.get_joint_pos()[:6]
-        off = np.abs(meas - np.asarray(q_target, dtype=float)[:6]) * DEG
-        if np.any(off > 3.0):
-            offenders = np.flatnonzero(off > 3.0)
-            bad = "; ".join(f"J{i+1}={off[i]:.1f}°" for i in offenders)
-            diag = self._joint_diag(offenders, target=np.asarray(q_target, dtype=float)[:6])
-            msg = f"transit arrival check failed (>3°): {bad}"
-            if diag:
-                msg += f"  [{diag}]"
-            raise RuntimeError(msg)
+        q_target = np.asarray(q_target, dtype=float)
+        self.robot.move_joints(q_target[:6], speed=self.transit_speed,
+                               max_jump_rad=max_jump_rad)
+        # Verify arrival (SOP-01 §4.1 fail-safe: > 3° off → abort). One recheck
+        # after a short extra wait before failing: J6 (CAN id 0x06, lowest bus
+        # priority) has shown single-sample "stuck" reads with near-zero
+        # effort (2026-07-20 run-66) — consistent with a stale/dropped
+        # feedback frame rather than an actual stall, since a real stall
+        # would still show the PD fighting the error (high eff). A recheck
+        # that clears is logged, not silently swallowed, so it stays visible
+        # for the CAN-delivery investigation (devlog §3.3/§3.4).
+        for attempt in range(2):
+            time.sleep(0.05 if attempt == 0 else 0.15)
+            meas = self.robot.get_joint_pos()[:6]
+            off = np.abs(meas - q_target[:6]) * DEG
+            if not np.any(off > 3.0):
+                if attempt > 0:
+                    print(f"[runner] transit arrival recheck cleared after retry "
+                          f"(initial read was stale/glitched)")
+                return
+        offenders = np.flatnonzero(off > 3.0)
+        bad = "; ".join(f"J{i+1}={off[i]:.1f}°" for i in offenders)
+        diag = self._joint_diag(offenders, target=q_target[:6])
+        msg = f"transit arrival check failed (>3°) after recheck: {bad}"
+        if diag:
+            msg += f"  [{diag}]"
+        raise RuntimeError(msg)
 
     def return_to_zero(self) -> None:
         """Slow move back to the zero configuration (best-effort, no raise)."""
@@ -148,15 +161,22 @@ class _Base:
 
     # --- streaming excitation/tracking (records only this segment) ---
     def stream(self, sample_fn, duration: float, kp: np.ndarray, kd: np.ndarray
-               ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+               ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Stream ``sample_fn(t)->(6,)`` at sample_hz for ``duration`` seconds.
 
-        Returns (t (M,), ref (M,6), resp (M,6)). RAM-buffered; no disk IO in loop.
-        Aborts (returns partial) if estop latches mid-stream.
+        Returns (t (M,), ref (M,6), resp (M,6), eff (M,6)). RAM-buffered; no
+        disk IO in loop. Aborts (returns partial) if estop latches mid-stream.
+
+        Position and effort come from one ``get_joint_state()`` call so both are
+        the same lock-held state snapshot. Effort is the stick-slip vs
+        command-path discriminator (SOP-03 §5.4): during a stall, eff ramping
+        up means the motor is fighting friction/contact; eff≈0 means the
+        command never produced torque (CAN delivery / gain latch).
         """
         t_buf: List[float] = []
         ref_buf: List[np.ndarray] = []
         resp_buf: List[np.ndarray] = []
+        eff_buf: List[np.ndarray] = []
         js: Dict[str, np.ndarray] = {"vel": _ZERO6.copy(), "kp": kp, "kd": kd}
         t0 = time.monotonic()
         while True:
@@ -170,19 +190,22 @@ class _Base:
             q_ref = np.asarray(sample_fn(t), dtype=float)[:6]
             js["pos"] = q_ref
             self.robot.command_joint_state(js)
-            q_resp = self.robot.get_joint_pos()[:6]
+            st = self.robot.get_joint_state()  # copies under one state lock
             t_buf.append(t)
             ref_buf.append(q_ref)
-            resp_buf.append(q_resp.copy())
+            resp_buf.append(st["pos"][:6])
+            eff_buf.append(st["eff"][:6])
             time.sleep(max(0.0, self.dt - (time.monotonic() - tick)))
-        return (np.array(t_buf), np.array(ref_buf), np.array(resp_buf))
+        return (np.array(t_buf), np.array(ref_buf), np.array(resp_buf),
+                np.array(eff_buf))
 
 
 class JointUnitTestRunner(_Base):
     """Per-joint square + triangle excitation with full transit discipline."""
 
     def __init__(self, can_channel: str, *, amp_deg: float = 15.0,
-                 margin_deg: float = 5.0, period: float = 4.0, cycles: int = 3,
+                 margin_deg: float = 5.0, period: float = 4.0,
+                 period_triangle: float | None = None, cycles: int = 3,
                  hold_pre: float = 1.0, hold_post: float = 1.5,
                  edge_rate_deg_s: float = 240.0, waves=("square", "triangle"),
                  **base_kw):
@@ -190,6 +213,12 @@ class JointUnitTestRunner(_Base):
         self.amp_deg = amp_deg
         self.margin_deg = margin_deg
         self.period = period
+        # None => triangle shares --period with square (old behavior). Set to
+        # decouple triangle's sweep rate for the scan-rate diagnostic (SOP-03
+        # §10.16 / devlog 2026-07-20 §3.x): halving triangle period tests
+        # whether jump amplitude scales with slope (sparse-update artifact)
+        # vs stays put (friction/PD stick-slip).
+        self.period_triangle = period_triangle
         self.cycles = cycles
         self.hold_pre = hold_pre
         self.hold_post = hold_post
@@ -205,8 +234,14 @@ class JointUnitTestRunner(_Base):
         j = joint1 - 1
         kp, kd = self.effective_gains()
         # Build both wave trajectories up front (shared q_start / preconditions).
+        # triangle may run at its own sweep period (self.period_triangle) while
+        # square keeps self.period — see __init__ docstring note.
+        def _period_for(name):
+            if name == "triangle" and self.period_triangle is not None:
+                return self.period_triangle
+            return self.period
         trajs = {name: WaveTrajectory(_ZERO6, j, name, amp_deg=self.amp_deg,
-                                      margin_deg=self.margin_deg, period=self.period,
+                                      margin_deg=self.margin_deg, period=_period_for(name),
                                       cycles=self.cycles, hold_pre=self.hold_pre,
                                       hold_post=self.hold_post,
                                       edge_rate_deg_s=self.edge_rate_deg_s)
@@ -232,8 +267,8 @@ class JointUnitTestRunner(_Base):
                 tr = trajs[name]
                 print(f"[J{joint1}] excite {name} ({tr.duration:.1f}s, gains "
                       f"kp[{j}]={kp[j]:.1f} kd[{j}]={kd[j]:.2f})")
-                t, ref, resp = self.stream(tr.sample, tr.duration, kp, kd)
-                out[name] = dict(t=t, ref=ref, resp=resp, traj=tr)
+                t, ref, resp, eff = self.stream(tr.sample, tr.duration, kp, kd)
+                out[name] = dict(t=t, ref=ref, resp=resp, eff=eff, traj=tr)
                 # brief settle between waves at low point
                 if len(self.waves) > 1:
                     self.transit_to(q_start)
@@ -300,7 +335,7 @@ class EETrackingRunner(_Base):
             self.transit_to(self.q_nom)
             time.sleep(self.settle_s)
             print(f"[ee] track {t_ref[-1]:.1f}s ({self.ee_kind} r={self.radius*1000:.0f}mm)")
-            t, ref_q, resp_q = self.stream(sample_fn, float(t_ref[-1]), kp, kd)
+            t, ref_q, resp_q, eff_q = self.stream(sample_fn, float(t_ref[-1]), kp, kd)
             time.sleep(self.settle_s)
         finally:
             print("[ee] return to zero")
@@ -308,4 +343,5 @@ class EETrackingRunner(_Base):
         # FK both reference (from IK'd q) and response for the recorded window.
         T_resp = ee.fk_path(self.kin, resp_q)
         T_ref_meas = ee.fk_path(self.kin, ref_q)
-        return dict(t=t, q_ref=ref_q, q_resp=resp_q, T_ref=T_ref_meas, T_resp=T_resp)
+        return dict(t=t, q_ref=ref_q, q_resp=resp_q, q_eff=eff_q,
+                    T_ref=T_ref_meas, T_resp=T_resp)

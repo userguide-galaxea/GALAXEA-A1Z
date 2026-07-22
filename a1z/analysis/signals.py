@@ -55,6 +55,7 @@ class WaveTrajectory:
         *,
         amp_deg: float = 15.0,
         margin_deg: float = 5.0,
+        # period: float = 4.0,
         period: float = 4.0,
         cycles: int = 3,
         hold_pre: float = 1.0,

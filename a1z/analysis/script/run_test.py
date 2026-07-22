@@ -80,6 +80,9 @@ def build_args():
     ap.add_argument("--wave", default="both", choices=["square", "triangle", "both"])
     ap.add_argument("--amp-deg", type=float, default=15.0)
     ap.add_argument("--period", type=float, default=4.0)
+    ap.add_argument("--period-triangle", type=float, default=None,
+                    help="triangle-only sweep period (s); default = --period "
+                         "(scan-rate diagnostic, SOP-03 §10.16)")
     ap.add_argument("--cycles", type=int, default=3)
     ap.add_argument("--margin-deg", type=float, default=5.0)
     ap.add_argument("--edge-rate", type=float, default=240.0)  # reserved (square slew)
@@ -134,7 +137,8 @@ def run_joint_units(args, rundir, meta, result):
     waves = _waves(args)
     runner = JointUnitTestRunner(
         args.can, amp_deg=args.amp_deg, margin_deg=args.margin_deg,
-        period=args.period, cycles=args.cycles, waves=waves,
+        period=args.period, period_triangle=args.period_triangle,
+        cycles=args.cycles, waves=waves,
         edge_rate_deg_s=args.edge_rate,
         sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed)
     unit = {}
@@ -181,7 +185,10 @@ def _process_joint(args, rundir, j1, out) -> dict:
         t, ref, resp, tr = cap["t"], cap["ref"], cap["resp"], cap["traj"]
         j = j1 - 1
         ref_j, resp_j = ref[:, j], resp[:, j]
-        R.write_unit_csv(rundir.path(f"unit-J{j1}-{name}.csv"), t, ref_j, resp_j)
+        # Same-tick effort of the excited joint (Nm) — the stick-slip vs
+        # command-path discriminator (SOP-03 §5.4); recorded, not metricized.
+        eff_j = cap["eff"][:, j] if cap.get("eff") is not None else None
+        R.write_unit_csv(rundir.path(f"unit-J{j1}-{name}.csv"), t, ref_j, resp_j, eff_j)
         if name == "square":
             # Full trace: the leading hold is flat (no false edge) but keeping it
             # lets the rising edge at hold_pre be detected, and the trailing hold
@@ -195,7 +202,7 @@ def _process_joint(args, rundir, j1, out) -> dict:
             m = M.triangle_metrics(t[seg], ref_j[seg], resp_j[seg],
                                    jump_eps_deg=args.jump_eps)
         jr[name] = m
-        plot_payload[name] = dict(t=t, ref=ref_j, resp=resp_j, metrics=m)
+        plot_payload[name] = dict(t=t, ref=ref_j, resp=resp_j, eff=eff_j, metrics=m)
     R.plot_unit(rundir.path(f"unit-J{j1}.png"), j1,
                 plot_payload.get("square"), plot_payload.get("triangle"))
     return jr
@@ -302,6 +309,9 @@ def build_meta(args) -> dict:
             "transit_speed_deg_s": args.transit_speed,
         },
         "excitation": {"amp_deg": args.amp_deg, "period_s": args.period,
+                       "period_triangle_s": (args.period_triangle
+                                              if args.period_triangle is not None
+                                              else args.period),
                        "cycles": args.cycles, "edge_rate_deg_s": args.edge_rate},
         "ee_traj": {"kind": args.ee_kind, "plane": args.plane, "radius_m": args.radius,
                     "period_s": args.period_ee, "cycles": args.cycles_ee,
