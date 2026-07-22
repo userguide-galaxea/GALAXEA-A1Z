@@ -241,6 +241,449 @@ def noise_floor_std_deg(err_hold: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
+# v2 metrics (SOP-08 · G0 gate): lag decomposition, apex-excluded adaptive-ε
+# jump statistics, ts from ref arrival, ess/noise-floor ratio.
+#
+# Additive by hard constraint (SOP-08 §1.7): the v1 functions above are
+# untouched and their result.json fields keep byte-identical semantics; every
+# v2 entry point returns its full 口径 (k_sigma, apex_excl_s, realized ε,
+# quantization step, fit-mask counts) alongside the numbers, because cross-run
+# comparability requires the calipers to be auditable per run. All functions
+# are pure numpy over (t, ref, resp[, eff]) — hold segments and the excitation
+# window are recovered from the noise-free scripted ref itself, so archived
+# CSVs recompute without any runtime state.
+# ---------------------------------------------------------------------------
+def estimate_quant_step(x: np.ndarray) -> float:
+    """Effective quantization step of a hold-segment response trace.
+
+    Median of the nonzero |Δx| (same unit as ``x``): under a static hold the
+    response only moves in encoder/protocol quanta, so the nonzero increments
+    cluster at the effective step (J6 measured ≈0.13°, SOP-08 §1.3). Returns
+    0.0 if the trace never moves.
+    """
+    x = np.asarray(x, dtype=float)
+    if x.size < 2:
+        return 0.0
+    d = np.abs(np.diff(x))
+    nz = d[d > 0]
+    return float(np.median(nz)) if nz.size else 0.0
+
+
+def ref_speed_profile(t: np.ndarray, ref: np.ndarray, *, slope_frac: float = 0.05) -> dict:
+    """Piecewise-constant q̇_ref recovered from the scripted (noise-free) ref.
+
+    Splits the trace into hold / up / down regimes by per-sample slope sign
+    (threshold = ``slope_frac`` × max |slope|), then assigns each regime run
+    the endpoint-derived constant slope — NOT a per-sample finite difference,
+    whose 100 Hz staircase would pollute the lag regression (SOP-08 §1.1).
+
+    Returns dict with:
+        qdot          (N,) piecewise-constant reference velocity (unit/s)
+        segments      list of (i0, i1, sign, slope), samples [i0, i1)
+        apex_idx      indices where q̇_ref flips sign (±↔∓ reversals, §1.2)
+        boundary_idx  every regime-change index (reversals + hold on/offsets)
+        sweep_rate    median |slope| over moving segments (0.0 if none)
+    """
+    t = np.asarray(t, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+    n = len(ref)
+    empty = dict(qdot=np.zeros(n), segments=[(0, n, 0, 0.0)] if n else [],
+                 apex_idx=[], boundary_idx=[], sweep_rate=0.0)
+    if n < 3:
+        return empty
+    dt = np.diff(t)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s = np.where(dt > 0, np.diff(ref) / np.where(dt > 0, dt, 1.0), 0.0)
+    vmax = float(np.max(np.abs(s))) if s.size else 0.0
+    if vmax <= 0.0:
+        return empty
+    tol = slope_frac * vmax
+    sgn = np.zeros(n - 1, dtype=int)
+    sgn[s > tol] = 1
+    sgn[s < -tol] = -1
+    segments = []
+    i = 0
+    while i < n - 1:
+        j = i
+        while j < n - 1 and sgn[j] == sgn[i]:
+            j += 1
+        slope = 0.0 if sgn[i] == 0 else float((ref[j] - ref[i]) / (t[j] - t[i]))
+        segments.append((i, j, int(sgn[i]), slope))
+        i = j
+    qdot = np.zeros(n)
+    for i0, i1, _sg, sl in segments:
+        qdot[i0:i1] = sl
+    qdot[-1] = segments[-1][3]
+    apex_idx, boundary_idx = [], []
+    for k in range(1, len(segments)):
+        idx = segments[k][0]
+        boundary_idx.append(idx)
+        if segments[k - 1][2] != 0 and segments[k][2] != 0:
+            apex_idx.append(idx)
+    rates = [abs(sl) for _i0, _i1, sg, sl in segments if sg != 0]
+    return dict(qdot=qdot, segments=segments, apex_idx=apex_idx,
+                boundary_idx=boundary_idx, sweep_rate=float(np.median(rates)))
+
+
+def _boundary_excl_mask(t: np.ndarray, boundary_idx, apex_excl_s: float) -> np.ndarray:
+    """True where a sample falls within ±apex_excl_s of any regime boundary."""
+    excl = np.zeros(len(t), dtype=bool)
+    for idx in boundary_idx:
+        excl |= np.abs(t - t[idx]) <= apex_excl_s
+    return excl
+
+
+def decompose_lag(t: np.ndarray, ref: np.ndarray, resp: np.ndarray, *,
+                  apex_excl_s: float = 0.2, profile: Optional[dict] = None) -> dict:
+    """LS decomposition of the tracking error into lag terms + residual.
+
+    Target model (SOP-08 §1.1, steady-sweep PD physics per SOP-05 §6.3:
+    lag = (kd·q̇ + τ_c)/kp, verified to 5 %):
+
+        e ≈ k_v·q̇_ref + c·sign(q̇_ref) + b
+
+    Fitted on constant-velocity samples only: holds and ±apex_excl_s around
+    every regime boundary (apex reversals and excitation start/end) are
+    excluded. For a lagging joint k_v and c come out NEGATIVE (e = resp − ref
+    trails the sweep); |k_v| ≈ kd/kp (s) and |c| ≈ τ_c/kp. The residual after
+    removing the fitted lag is the smoothness signal → ``resid_std_deg``.
+
+    IDENTIFIABILITY (found by the P1 synthetic self-check, G0-6): on a
+    symmetric single-rate triangle |q̇_ref| is one constant s, so the q̇ and
+    sign(q̇) columns are exactly collinear — only the combination
+    L = k_v·s + c is observable, and a naive 3-param lstsq returns a stable
+    but meaningless min-norm split of (k_v, c). Therefore:
+
+    * single-rate data (|q̇| spread < 5 %): fit the identifiable reduced model
+      e = L·sign(q̇) + b; report |L| as ``lag_at_rate_deg`` (signed copy in
+      ``lag_signed_deg``), leave k_v_s/c_deg NaN, ``kv_c_separable=False``;
+    * multi-rate data (pooled R-D periods / mixed-rate excitation): fit the
+      full 3-param model, ``kv_c_separable=True``.
+
+    Gate impact: G0-5/G0-7 hold verbatim on lag_at_rate (kp→kp/2 doubles L
+    exactly, so the ordering and the ≈2 ratio sanity carry over); the G0-3
+    "k_v CV" must be read as lag_at_rate CV on single-rate runs.
+    """
+    t = np.asarray(t, dtype=float)
+    e = np.asarray(resp, dtype=float) - np.asarray(ref, dtype=float)
+    prof = profile if profile is not None else ref_speed_profile(t, ref)
+    qdot = prof["qdot"]
+    mask = (qdot != 0.0) & ~_boundary_excl_mask(t, prof["boundary_idx"], apex_excl_s)
+    n_fit = int(mask.sum())
+    n_dir = int(len(set(np.sign(qdot[mask])))) if n_fit else 0
+    rate = prof["sweep_rate"]
+    out = dict(k_v_s=float("nan"), c_deg=float("nan"), b_deg=float("nan"),
+               resid_std_deg=float("nan"), lag_at_rate_deg=float("nan"),
+               lag_signed_deg=float("nan"), rate_deg_s=rate * DEG,
+               n_fit=n_fit, n_total=len(t), n_directions=n_dir,
+               kv_c_separable=False, apex_excl_s=apex_excl_s, fit_ok=False)
+    if n_fit < 12 or rate <= 0.0:
+        return out
+    speeds = np.abs(qdot[mask])
+    multi_rate = float((speeds.max() - speeds.min()) / np.median(speeds)) > 0.05
+    sgn = np.sign(qdot[mask])
+    if multi_rate:
+        A = np.column_stack([qdot[mask], sgn, np.ones(n_fit)])
+        coef, *_ = np.linalg.lstsq(A, e[mask], rcond=None)
+        k_v, c, b = (float(v) for v in coef)
+        L = k_v * rate + c
+        out.update(k_v_s=k_v, c_deg=c * DEG, kv_c_separable=True)
+    else:
+        A = np.column_stack([sgn, np.ones(n_fit)])
+        coef, *_ = np.linalg.lstsq(A, e[mask], rcond=None)
+        L, b = (float(v) for v in coef)
+    resid = e[mask] - A @ coef
+    out.update(
+        b_deg=b * DEG,
+        resid_std_deg=float(np.std(resid)) * DEG,
+        lag_at_rate_deg=abs(L) * DEG,
+        lag_signed_deg=L * DEG,
+        # L·sign(q̇) and the intercept b separate only when both sweep
+        # directions are present; single-direction fits stay flagged not-ok.
+        fit_ok=(n_dir == 2),
+    )
+    return out
+
+
+def ess_ratio(ess_deg: Optional[float], noise_floor_deg: Optional[float]) -> Optional[float]:
+    """ess / noise-floor (SOP-08 §1.5): ≲1 means ess has hit the sensor floor
+    and further "improvement" of ess is not credible. None if undefined."""
+    if ess_deg is None or noise_floor_deg is None:
+        return None
+    if not math.isfinite(ess_deg) or not math.isfinite(noise_floor_deg) \
+            or noise_floor_deg <= 0.0:
+        return None
+    return float(ess_deg / noise_floor_deg)
+
+
+def triangle_metrics_v2(
+    t: np.ndarray,
+    ref: np.ndarray,
+    resp: np.ndarray,
+    *,
+    k_sigma: float = 4.0,
+    apex_excl_s: float = 0.2,
+    eps_min_deg: float = 0.05,
+    eps_override_deg: Optional[float] = None,
+    eff: Optional[np.ndarray] = None,
+    hf_cut_hz: float = 5.0,
+) -> dict:
+    """v2 triangle metrics over the FULL capture, holds included (SOP-08 §1).
+
+    Differences vs v1 ``triangle_metrics`` (which expects a pre-sliced
+    excitation segment and a fixed ε):
+
+    * the leading/trailing holds are recovered from ref and provide the noise
+      floor σ and quantization step for the adaptive dead-band
+      ε = max(k_sigma·σ_floor, 2·q_step, eps_min_deg)  (§1.3);
+    * error decomposition (``decompose_lag``) separates tracking lag from the
+      residual — ``resid_std_deg`` replaces v1 ``err_std_deg`` in the
+      smoothness role (§1.1);
+    * jump statistics run per contiguous chunk after cutting ±apex_excl_s
+      around every ref regime boundary, so neither the apex error flip nor a
+      splice discontinuity can fake a tooth (§1.2); severity is ``jump_p95``
+      (P95 口径, ODE-aligned) with max kept for diagnosis;
+    * optional eff sentinel quantities (§1.6, non-gating; ``eff=None`` for
+      the 07-20-era CSVs without an eff column, K2).
+
+    Pass ``eps_override_deg`` (e.g. a full-run ε) when slicing single cycles
+    for cycle-to-cycle σ so every slice shares one 口径 (§2.3-2).
+    """
+    t = np.asarray(t, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+    resp = np.asarray(resp, dtype=float)
+    err = resp - ref
+    prof = ref_speed_profile(t, ref)
+    qdot = prof["qdot"]
+    segs = prof["segments"]
+    dt_med = float(np.median(np.diff(t))) if len(t) > 1 else 0.01
+
+    # --- hold segments (noise floor + quantization step), inner edge trimmed
+    hold_err, hold_resp_diffs, n_hold = [], [], 0
+    if segs and segs[0][2] == 0:
+        i0, i1 = segs[0][0], segs[0][1]
+        i1 = max(i0, i1 - int(round(apex_excl_s / dt_med)))
+        if i1 - i0 >= 5:
+            hold_err.append(err[i0:i1] - np.mean(err[i0:i1]))
+            hold_resp_diffs.append(np.abs(np.diff(resp[i0:i1])))
+            n_hold += i1 - i0
+    if len(segs) > 1 and segs[-1][2] == 0:
+        i0, i1 = segs[-1][0], segs[-1][1] + 1
+        i0 = min(i1, i0 + int(round(apex_excl_s / dt_med)))
+        if i1 - i0 >= 5:
+            hold_err.append(err[i0:i1] - np.mean(err[i0:i1]))
+            hold_resp_diffs.append(np.abs(np.diff(resp[i0:i1])))
+            n_hold += i1 - i0
+    sigma_floor_deg = (noise_floor_std_deg(np.concatenate(hold_err))
+                       if hold_err else 0.0)
+    q_step_source = "hold"
+    if hold_resp_diffs:
+        alld = np.concatenate(hold_resp_diffs)
+        nz = alld[alld > 0]
+        q_step_deg = (float(np.median(nz)) * DEG) if nz.size else 0.0
+    else:
+        q_step_deg = 0.0
+    if q_step_deg == 0.0:
+        # Hold-silent quantization (found by the P1 synthetic rig): a hold
+        # parked mid-cell with sub-step noise rounds to ONE level — the hold
+        # shows neither σ nor steps while the sweep still carries a ±q/2
+        # sawtooth that would flood the tooth count. Fall back to a
+        # sweep-based estimate: median of the dust-filtered
+        # |Δresp − median Δresp| within each uniform-velocity segment
+        # (segment-interior diffs only — a boundary-crossing diff carries the
+        # apex error flip, not quantization). Motion cancels in the deviation:
+        # a quantized sweep yields ≈ q (double/missing steps), a smooth noisy
+        # sweep yields ≈1.3σ_noise — harmless, dominated by k_sigma·σ_floor.
+        devs, steps_all = [], []
+        for i0, i1, sg, _sl in segs:
+            if sg == 0 or i1 - i0 < 8:
+                continue
+            d = np.diff(resp[i0:i1])
+            devs.append(np.abs(d - np.median(d)))
+            steps_all.append(np.abs(d))
+        if devs:
+            alld = np.concatenate(devs)
+            med_step = float(np.median(np.concatenate(steps_all)))
+            alld = alld[alld > max(1e-12, 0.02 * med_step)]   # drop float dust
+            if alld.size:
+                q_step_deg = float(np.median(alld)) * DEG
+                q_step_source = "sweep-med-dev"
+
+    # --- adaptive dead-band (§1.3)
+    if eps_override_deg is not None:
+        eps_deg, eps_source = float(eps_override_deg), "override"
+    else:
+        eps_deg = max(k_sigma * sigma_floor_deg, 2.0 * q_step_deg, eps_min_deg)
+        eps_source = "adaptive"
+    eps = math.radians(eps_deg)
+
+    # --- excitation samples, boundary windows excluded, per-chunk ZigZag
+    excl = _boundary_excl_mask(t, prof["boundary_idx"], apex_excl_s)
+    moving = qdot != 0.0
+    keep = moving & ~excl
+    n_kept = int(keep.sum())
+    amps, n_teeth = [], 0
+    idx = np.flatnonzero(keep)
+    if idx.size:
+        splits = np.where(np.diff(idx) > 1)[0] + 1
+        for chunk in np.split(idx, splits):
+            if chunk.size < 3:
+                continue
+            _pi, vals, is_peak = _zigzag_pivots(err[chunk[0]:chunk[-1] + 1], eps)
+            n_teeth += int(sum(is_peak))
+            if len(vals) > 1:
+                amps.extend(np.abs(np.diff(np.asarray(vals))).tolist())
+    amps = np.asarray(amps)
+    kept_dur = n_kept * dt_med
+
+    # --- apex diagnostics (G0-4): big legs of a full-region ZigZag that touch
+    # an excluded window ≈ the geometric error flips the exclusion removed.
+    n_apex = len(prof["apex_idx"])
+    apex_removed = 0
+    big_thr = math.radians(max(1.0, 5.0 * eps_deg))
+    mi = np.flatnonzero(moving)
+    if mi.size:
+        e0 = mi[0]
+        piv_idx, piv_vals, _pk = _zigzag_pivots(err[e0:mi[-1] + 1], eps)
+        for a, b_, va, vb in zip(piv_idx[:-1], piv_idx[1:],
+                                 piv_vals[:-1], piv_vals[1:]):
+            if abs(vb - va) >= big_thr and excl[e0 + a:e0 + b_ + 1].any():
+                apex_removed += 1
+
+    # --- lag decomposition (§1.1)
+    lag = decompose_lag(t, ref, resp, apex_excl_s=apex_excl_s, profile=prof)
+
+    # --- eff sentinel (§1.6, non-gating; tolerate missing channel, K2)
+    eff_std_nm = eff_hf_ratio = None
+    if eff is not None:
+        eff = np.asarray(eff, dtype=float)
+        ke = eff[keep]
+        ke = ke[np.isfinite(ke)]
+        if ke.size >= 8:
+            eff_std_nm = float(np.std(ke))
+            x = ke - np.mean(ke)
+            spec = np.abs(np.fft.rfft(x)) ** 2
+            freqs = np.fft.rfftfreq(len(x), d=dt_med)
+            tot = float(spec[1:].sum())
+            eff_hf_ratio = (float(spec[freqs >= hf_cut_hz].sum()) / tot
+                            if tot > 0 else 0.0)
+
+    exc_t = (float(t[mi[0]]), float(t[mi[-1]])) if mi.size else (float("nan"),) * 2
+    return dict(
+        metrics_version=2,
+        # calipers (§1.7 — auditable 口径 travels with the numbers)
+        k_sigma=k_sigma, apex_excl_s=apex_excl_s, eps_min_deg=eps_min_deg,
+        eps_adapt_deg=eps_deg, eps_source=eps_source,
+        sigma_floor_deg=sigma_floor_deg, q_step_deg=q_step_deg,
+        q_step_source=q_step_source,
+        n_hold_samples=n_hold, n_kept=n_kept, n_total=len(t),
+        excite_window_s=exc_t,
+        # significant-tooth statistics (§1.3)
+        jump_count_v2=n_teeth,
+        jump_rate_hz_v2=(n_teeth / kept_dur) if kept_dur > 0 else 0.0,
+        jump_mean_deg_v2=(float(np.mean(amps)) * DEG if amps.size else 0.0),
+        jump_p95_deg=(float(np.percentile(amps, 95)) * DEG if amps.size else 0.0),
+        jump_max_deg_v2=(float(np.max(amps)) * DEG if amps.size else 0.0),
+        n_legs=int(amps.size),
+        # apex diagnostics (§1.2 / G0-4)
+        n_apex=n_apex, apex_removed_big_teeth=apex_removed,
+        # lag decomposition (§1.1)
+        k_v_s=lag["k_v_s"], c_deg=lag["c_deg"], b_deg=lag["b_deg"],
+        resid_std_deg=lag["resid_std_deg"],
+        lag_at_rate_deg=lag["lag_at_rate_deg"], rate_deg_s=lag["rate_deg_s"],
+        fit_ok=lag["fit_ok"], n_fit=lag["n_fit"],
+        n_directions=lag["n_directions"],
+        # eff sentinel (§1.6, not part of G0)
+        eff_std_nm=eff_std_nm, eff_hf_ratio=eff_hf_ratio,
+    )
+
+
+def _step_events_v2(ref: np.ndarray, dt: float, min_delta_rad: float):
+    """Like ``_step_events`` but keeps the moving-run end = ref plateau arrival.
+
+    Returns (i_onset, i_arrival, i_next, delta) per event. Kept separate so the
+    v1 function stays byte-identical (SOP-08 §1.7); detection logic mirrors
+    ``_step_events`` exactly and the two lists align one-to-one.
+    """
+    d = np.diff(ref)
+    move_eps = max(min_delta_rad * 0.05, 1e-4)
+    moving = np.abs(d) > move_eps
+    onsets = []
+    i = 0
+    n = len(d)
+    while i < n:
+        if moving[i]:
+            j = i + 1
+            while j < n and moving[j]:
+                j += 1
+            delta = ref[j] - ref[i]
+            if abs(delta) >= min_delta_rad:
+                onsets.append((i, j, delta))
+            i = j
+        else:
+            i += 1
+    events = []
+    for k, (i0, run_end, delta) in enumerate(onsets):
+        i_next = onsets[k + 1][0] if k + 1 < len(onsets) else len(ref) - 1
+        events.append((i0, run_end, i_next, delta))
+    return events
+
+
+def step_metrics_v2(
+    t: np.ndarray,
+    ref: np.ndarray,
+    resp: np.ndarray,
+    *,
+    band: float = 0.05,
+    ess_win_s: float = 0.3,
+    min_delta_deg: float = 2.0,
+) -> List[dict]:
+    """v1 per-step fields + ``ts_ms_v2`` counted from ref plateau arrival.
+
+    v1 ``ts_ms`` starts at the first moving sample, so a slew-limited edge
+    (amp 15° default ≈125 ms of commanded ramp) puts a hard floor under it —
+    it cannot resolve the sub-125 ms settling A2 targets (SOP-08 §1.4). v2
+    re-references the SAME settle sample to the instant ref reaches its
+    plateau: ``ts_ms_v2 = ts_ms − ref_arrival_ms`` (clamped at 0 if the
+    response is already in-band before the command stops ramping).
+    ``ref_arrival_ms`` (the commanded slew duration) is included per step.
+    v1 fields are produced by the untouched ``step_metrics``.
+    """
+    t = np.asarray(t, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+    resp = np.asarray(resp, dtype=float)
+    steps = step_metrics(t, ref, resp, band=band, ess_win_s=ess_win_s,
+                         min_delta_deg=min_delta_deg)
+    dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.01
+    events = [ev for ev in _step_events_v2(ref, dt, math.radians(min_delta_deg))
+              if ev[2] - ev[0] >= 2]           # mirror v1's short-event skip
+    assert len(events) == len(steps), "v1/v2 step event detection diverged"
+    out = []
+    for (i0, i_arr, _i_next, _delta), s in zip(events, steps):
+        arrival_ms = float((t[i_arr] - t[i0]) * 1000.0)
+        s2 = dict(s)
+        s2["ref_arrival_ms"] = arrival_ms
+        s2["ts_ms_v2"] = (max(0.0, s["ts_ms"] - arrival_ms)
+                          if s["ts_ms"] is not None else None)
+        out.append(s2)
+    return out
+
+
+def summarize_steps_v2(steps: List[dict],
+                       noise_floor_deg: Optional[float] = None) -> dict:
+    """v1 summary fields + worst-case ``ts_v2`` and ``ess_ratio`` (§1.4/§1.5)."""
+    base = summarize_steps(steps)
+    ts2 = [s["ts_ms_v2"] for s in steps if s.get("ts_ms_v2") is not None]
+    base.update(
+        metrics_version=2,
+        ts_v2_max_ms=(max(ts2) if ts2 else None),
+        noise_floor_deg=noise_floor_deg,
+        ess_ratio=ess_ratio(base["ess_max_deg"], noise_floor_deg),
+    )
+    return base
+
+
+# ---------------------------------------------------------------------------
 # End-effector RMSE
 # ---------------------------------------------------------------------------
 def geodesic_angle(R_ref: np.ndarray, R_resp: np.ndarray) -> float:
@@ -302,3 +745,24 @@ if __name__ == "__main__":
         print(" ", {k: (round(v, 2) if isinstance(v, float) else v) for k, v in s.items()})
     tri = triangle_metrics(t, ref, resp)
     print("triangle:", {k: (round(v, 3) if isinstance(v, float) else v) for k, v in tri.items()})
+
+    # v2 synthetic self-check (SOP-08 P1/P2): known-parameter round trip.
+    # Full assertions live in tests/test_metrics_v2.py; this is the smoke view.
+    from a1z.analysis import synth
+    t2, ref2, _qd = synth.make_triangle_ref()
+    resp2 = synth.lag_teeth_response(
+        t2, ref2, _qd, k_v_s=-0.16, c_deg=-0.30, b_deg=0.05,
+        noise_std_deg=0.02, quant_step_deg=0.13,
+        teeth=((2.0, 1.2), (6.2, 0.9), (10.0, 1.5)), seed=0)
+    m2 = triangle_metrics_v2(t2, ref2, resp2)
+    print("triangle_v2 (inject k_v=-0.16 c=-0.30 b=0.05, 3 teeth):")
+    for k in ("k_v_s", "c_deg", "b_deg", "resid_std_deg", "lag_at_rate_deg",
+              "eps_adapt_deg", "sigma_floor_deg", "q_step_deg",
+              "jump_count_v2", "jump_p95_deg", "n_apex", "apex_removed_big_teeth"):
+        v = m2[k]
+        print(f"  {k} = {v:.4f}" if isinstance(v, float) else f"  {k} = {v}")
+    t3, ref3, _ = synth.make_square_ref()
+    resp3 = synth.first_order_response(t3, ref3, tau=0.05)
+    s2 = step_metrics_v2(t3, ref3, resp3)
+    print("step_v2:", [(round(s["ref_arrival_ms"], 1), s["ts_ms"] and round(s["ts_ms"], 1),
+                        s["ts_ms_v2"] and round(s["ts_ms_v2"], 1)) for s in s2])
