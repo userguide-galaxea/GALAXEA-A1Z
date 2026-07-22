@@ -32,7 +32,7 @@ _JOINT_LIMITS = [
 ]
 
 _DEFAULT_KP = np.array([70.0, 60.0, 40.0, 30.0, 10.0, 25.0])
-_DEFAULT_KD = np.array([5.0,  4.5,  5.0,  2.0,  0.5,  0.5])
+_DEFAULT_KD = np.array([5.0,  4.5,  5.0,  2.0,  0.5,  4])
 _JOINT_SIGN = np.array([1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
 _GRAVITY_TORQUE_SCALE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 _MAX_GRAVITY_TORQUE = np.array([50.0, 50.0, 50.0, 24.0, 10.0, 10.0])
