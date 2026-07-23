@@ -21,10 +21,12 @@ from typing import Dict, List, Optional, Protocol, runtime_checkable
 import can
 import numpy as np
 
-from a1z.motor_drivers.motor_a_driver import MotorA, MotorAFeedback, MotorARanges
+from a1z.motor_drivers.motor_a_driver import MotorA
 from a1z.motor_drivers.utils import float_to_uint, uint_to_float
 
 logger = logging.getLogger(__name__)
+
+_CAN_SEND_TIMEOUT_S = 0.0
 
 
 MOTOR_B_ERROR_CODES = {
@@ -84,21 +86,21 @@ class MotorB:
         """Send motor enable command (0xFC)."""
         data = bytes([0xFF] * 7 + [0xFC])
         msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
 
     def disable(self) -> None:
         """Send motor disable command (0xFD)."""
         data = bytes([0xFF] * 7 + [0xFD])
         msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
 
     def clear_error(self) -> None:
         """Clear motor error (0xFB)."""
         data = bytes([0xFF] * 7 + [0xFB])
         msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
 
     def write_register(self, reg_id: int, value: int | float, is_float: bool = False) -> None:
@@ -119,7 +121,7 @@ class MotorB:
         else:
             struct.pack_into("<I", data, 4, int(value))
         msg = can.Message(arbitration_id=0x7FF, data=bytes(data), is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
 
     def set_ctrl_mode(self, mode: int) -> None:
@@ -150,7 +152,7 @@ class MotorB:
         msg = can.Message(
             arbitration_id=0x300 + self.motor_id, data=data, is_extended_id=False
         )
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
 
     def set_zero_ram(self) -> None:
         """Set current position as zero in RAM only (0xFE). Does not write flash.
@@ -160,7 +162,7 @@ class MotorB:
         """
         data = bytes([0xFF] * 7 + [0xFE])
         msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
 
     def send_mit_command(
@@ -198,7 +200,7 @@ class MotorB:
         data[7] = tor_u12 & 0xFF
 
         msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
 
     def parse_feedback(self, msg: can.Message) -> Optional[MotorBFeedback]:
         """Parse MotorB feedback CAN frame."""
@@ -302,6 +304,12 @@ class MixedMotorChain:
         self._positions = np.zeros(self._n)
         self._velocities = np.zeros(self._n)
         self._efforts = np.zeros(self._n)
+        # Per-arm-joint freshness only. External motors such as the gripper
+        # are routed for parsing but must never make a missing arm joint look
+        # healthy.
+        self._feedback_seen = np.zeros(self._n, dtype=bool)
+        self._last_feedback_monotonic = np.zeros(self._n)
+        self._feedback_time_lock = threading.Lock()
 
     def num_motors(self) -> int:
         return self._n
@@ -316,17 +324,29 @@ class MixedMotorChain:
         # Send twice for both motor types — a single frame arriving immediately
         # after an MIT command can be missed on a busy bus.
         # motor.disable() already includes a 10 ms inter-frame gap.
+        motors = [
+            (f"MotorA[{motor.motor_id}]", motor)
+            for motor in self._motor_a_list
+        ] + [
+            (f"MotorB[{motor.motor_id}]", motor)
+            for motor in self._motor_b_list
+        ]
+        sent_once = set()
+        last_error: Dict[int, BaseException] = {}
         for _ in range(2):
-            for motor in self._motor_a_list:
+            for index, (_name, motor) in enumerate(motors):
                 try:
                     motor.disable()
-                except Exception:
-                    pass
-            for motor in self._motor_b_list:
-                try:
-                    motor.disable()
-                except Exception:
-                    pass
+                    sent_once.add(index)
+                except Exception as exc:
+                    last_error[index] = exc
+        missing = [
+            f"{name}: {last_error.get(index, 'no disable frame accepted')}"
+            for index, (name, _motor) in enumerate(motors)
+            if index not in sent_once
+        ]
+        if missing:
+            raise RuntimeError("; ".join(missing))
 
     def drain_and_update(self, bus: can.BusABC, timeout: float = 0.001, max_messages: int = 0) -> int:
         """Drain all pending CAN messages from the bus, dispatching to the correct motor parser.
@@ -379,6 +399,10 @@ class MixedMotorChain:
         fb = motor.parse_feedback(msg)
         if fb is not None:
             motor.last_feedback = fb
+            if joint_idx >= 0:
+                with self._feedback_time_lock:
+                    self._feedback_seen[joint_idx] = True
+                    self._last_feedback_monotonic[joint_idx] = time.monotonic()
 
     def register_external_motor(self, motor: "MotorB") -> None:
         """Register a motor for CAN feedback routing without adding it to the joint chain.
@@ -397,6 +421,52 @@ class MixedMotorChain:
 
     def get_efforts(self) -> np.ndarray:
         return self._efforts.copy()
+
+    def get_feedback_health(self, now: Optional[float] = None) -> tuple:
+        """Return ``(seen, age_s)`` for each arm joint.
+
+        External/unknown CAN frames are deliberately excluded. Unseen joints
+        have an infinite age so callers cannot mistake another motor's traffic
+        for complete arm feedback.
+        """
+        if now is None:
+            now = time.monotonic()
+        with self._feedback_time_lock:
+            seen = self._feedback_seen.copy()
+            last = self._last_feedback_monotonic.copy()
+        age = np.full(self._n, np.inf)
+        age[seen] = np.maximum(0.0, now - last[seen])
+        return seen, age
+
+    def reset_feedback_health(self) -> None:
+        """Start a new feedback session without trusting cached motor frames.
+
+        ``ArmRobot.start()`` calls this before its zero-gain probe. Clearing
+        both freshness and each motor's parsed cache prevents a stop/start
+        cycle from treating the previous session's pose as fresh startup data.
+        """
+        with self._feedback_time_lock:
+            self._feedback_seen.fill(False)
+            self._last_feedback_monotonic.fill(0.0)
+        self._positions.fill(0.0)
+        self._velocities.fill(0.0)
+        self._efforts.fill(0.0)
+        for motor in self._motor_a_list:
+            motor.last_feedback = None
+        for motor in self._motor_b_list:
+            motor.last_feedback = None
+        for _motor_type, motor, joint_idx in self._motor_id_map.values():
+            if joint_idx < 0:
+                motor.last_feedback = None
+
+    def get_joint_motor_types(self) -> List[str]:
+        """Return ``motor_a``/``motor_b`` for each arm-joint index."""
+        out = [""] * self._n
+        for idx in self._motor_a_joint_indices:
+            out[idx] = "motor_a"
+        for idx in self._motor_b_joint_indices:
+            out[idx] = "motor_b"
+        return out
 
     @property
     def inter_cmd_gap_s(self) -> float:
