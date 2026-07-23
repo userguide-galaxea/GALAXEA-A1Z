@@ -240,6 +240,39 @@ def noise_floor_std_deg(err_hold: np.ndarray) -> float:
     return float(np.std(err_hold)) * DEG
 
 
+def hold_noise_floor_from_trace(t: np.ndarray, ref: np.ndarray, resp: np.ndarray,
+                                *, trim_s: float = 0.3) -> Optional[float]:
+    """Noise-floor σ (deg) from the LEADING+TRAILING holds of a full trace.
+
+    Recovers hold segments from the scripted ref (``ref_speed_profile`` sign==0)
+    and takes only the first/last, trimming ``trim_s`` off the inner edge (the
+    side adjoining a slew) so the post-edge settle transient of a middle square
+    plateau can't inflate the floor above the steady-state error (SOP-08 §1.5).
+    Each segment is de-meaned before pooling. Returns None if no usable hold.
+    """
+    t = np.asarray(t, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+    resp = np.asarray(resp, dtype=float)
+    prof = ref_speed_profile(t, ref)
+    segs = prof["segments"]
+    if not segs:
+        return None
+    dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.01
+    trim = int(round(trim_s / dt))
+    errs = []
+    if segs[0][2] == 0:                       # leading hold: trim right (→ slew)
+        i0, i1 = segs[0][0], max(segs[0][0], segs[0][1] - trim)
+        if i1 - i0 >= 5:
+            e = resp[i0:i1] - ref[i0:i1]
+            errs.append(e - np.mean(e))
+    if len(segs) > 1 and segs[-1][2] == 0:    # trailing hold: trim left (slew →)
+        i0, i1 = min(segs[-1][1], segs[-1][0] + trim), segs[-1][1]
+        if i1 - i0 >= 5:
+            e = resp[i0:i1] - ref[i0:i1]
+            errs.append(e - np.mean(e))
+    return noise_floor_std_deg(np.concatenate(errs)) if errs else None
+
+
 # ---------------------------------------------------------------------------
 # v2 metrics (SOP-08 · G0 gate): lag decomposition, apex-excluded adaptive-ε
 # jump statistics, ts from ref arrival, ess/noise-floor ratio.

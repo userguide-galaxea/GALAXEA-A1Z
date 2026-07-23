@@ -103,6 +103,13 @@ def build_args():
     ap.add_argument("--q-nom-deg", default="-20,35,-25,-25,0,0")
     ap.add_argument("--transit-speed", type=float, default=15.0)
     ap.add_argument("--jump-eps", type=float, default=0.1)
+    ap.add_argument("--k-sigma", type=float, default=4.0,
+                    help="v2 adaptive dead-band factor ε=max(k·σ_floor, 2·q_step, "
+                         "ε_min); SOP-08 §1.3 default 4.0")
+    ap.add_argument("--apex-excl-s", type=float, default=0.55,
+                    help="v2 apex/boundary exclusion half-window (s); SOP-08 §9.2-4 "
+                         "gate-finalized 0.55 for kd=4-era (≈3.4·τ). Scale with "
+                         "τ=kd/kp when sweeping PD widely.")
     ap.add_argument("--gap-us", type=float, default=None,
                     help="inter-command CAN pacing gap (µs), forwarded to "
                          "get_a1z_robot(inter_cmd_gap_us=…); default None = SDK "
@@ -219,11 +226,23 @@ def _process_joint(args, rundir, j1, out) -> dict:
             # the first edge.
             steps = M.step_metrics(t, ref_j, resp_j)
             m = M.summarize_steps(steps)
+            # v2 (additive, SOP-08 P5): ts from ref-arrival + ess/noise-floor
+            # ratio; v1 fields above stay byte-identical.
+            nf = M.hold_noise_floor_from_trace(t, ref_j, resp_j)
+            m["v2"] = M.summarize_steps_v2(
+                M.step_metrics_v2(t, ref_j, resp_j), noise_floor_deg=nf)
         else:
             t0, t1 = tr.excite_window
             seg = (t >= t0) & (t <= t1)
             m = M.triangle_metrics(t[seg], ref_j[seg], resp_j[seg],
                                    jump_eps_deg=args.jump_eps)
+            # v2 runs on the FULL trace (holds included): it recovers the noise
+            # floor / quantization step / apex windows from ref itself, so no
+            # excite_window slice (SOP-08 §1). Caliper from CLI, recorded in the
+            # returned dict for cross-run auditability.
+            m["v2"] = M.triangle_metrics_v2(
+                t, ref_j, resp_j, eff=eff_j,
+                k_sigma=args.k_sigma, apex_excl_s=args.apex_excl_s)
         jr[name] = m
         plot_payload[name] = dict(t=t, ref=ref_j, resp=resp_j, eff=eff_j, metrics=m)
     R.plot_unit(rundir.path(f"unit-J{j1}.png"), j1,
@@ -343,6 +362,8 @@ def build_meta(args) -> dict:
                                               if args.period_triangle is not None
                                               else args.period),
                        "cycles": args.cycles, "edge_rate_deg_s": args.edge_rate},
+        "metrics_v2": {"jump_eps_deg": args.jump_eps, "k_sigma": args.k_sigma,
+                       "apex_excl_s": args.apex_excl_s},
         "ee_traj": {"kind": args.ee_kind, "plane": args.plane, "radius_m": args.radius,
                     "period_s": args.period_ee, "cycles": args.cycles_ee,
                     "q_nom_deg": [float(x) for x in args.q_nom_deg.split(",")],

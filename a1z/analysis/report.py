@@ -176,15 +176,26 @@ def plot_unit(path: Path, joint1: int,
 
 
 def _fmt_metrics(name: str, m: dict) -> str:
+    v2 = m.get("v2") or {}
     if name == "square":
-        return (f"n={m.get('n_steps', 0)}  "
+        base = (f"n={m.get('n_steps', 0)}  "
                 f"σmax={_f(m.get('overshoot_max_pct'))}%  "
                 f"t_s max={_f(m.get('ts_max_ms'))}ms  "
                 f"e_ss max={_f(m.get('ess_max_deg'))}°")
-    return (f"range={_f(m.get('err_range_deg'))}°  "
+        if v2:
+            base += (f"\n[v2] t_s(from ref)={_f(v2.get('ts_v2_max_ms'))}ms  "
+                     f"ess/floor={_f(v2.get('ess_ratio'))}")
+        return base
+    base = (f"range={_f(m.get('err_range_deg'))}°  "
             f"std={_f(m.get('err_std_deg'))}°  "
             f"jumps={m.get('jump_count', 0)} ({_f(m.get('jump_rate_hz'))}Hz)  "
             f"mean={_f(m.get('jump_mean_deg'))}° max={_f(m.get('jump_max_deg'))}°")
+    if v2:
+        base += (f"\n[v2] lag={_f(v2.get('lag_at_rate_deg'))}°  "
+                 f"resid_std={_f(v2.get('resid_std_deg'))}°  "
+                 f"jumpP95={_f(v2.get('jump_p95_deg'))}° (n{v2.get('jump_count_v2', 0)}, "
+                 f"ε{_f(v2.get('eps_adapt_deg'))}°)")
+    return base
 
 
 def _f(v) -> str:

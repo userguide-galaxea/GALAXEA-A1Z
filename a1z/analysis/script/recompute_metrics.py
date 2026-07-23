@@ -95,33 +95,13 @@ def _load_unit_csv(path: Path):
             np.asarray(d["resp"], float), eff)
 
 
-def _hold_noise_floor_deg(t, ref, resp, *, trim_s: float = 0.3):
-    """Noise-floor σ (deg) from the LEADING+TRAILING holds only (SOP-08 §1.5).
+def _hold_noise_floor_deg(t, ref, resp):
+    """Noise-floor σ (deg) from the leading+trailing holds (SOP-08 §1.5).
 
-    Middle square plateaus carry the post-edge settle transient, so including
-    them inflates the floor above the steady-state error (S3 J6: 3.8° vs ess
-    0.72°). Take only the first/last sign==0 segments and trim ``trim_s`` off
-    the inner edge (the side adjoining a slew) so only the genuine static hold
-    remains; each segment is de-meaned before pooling.
+    Thin wrapper over ``metrics.hold_noise_floor_from_trace`` (single source of
+    truth, also used by run_test's v2 wiring).
     """
-    prof = M.ref_speed_profile(t, ref)
-    segs = prof["segments"]
-    if not segs:
-        return None
-    dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.01
-    trim = int(round(trim_s / dt))
-    errs = []
-    if segs[0][2] == 0:                       # leading hold: trim right (→ slew)
-        i0, i1 = segs[0][0], max(segs[0][0], segs[0][1] - trim)
-        if i1 - i0 >= 5:
-            e = resp[i0:i1] - ref[i0:i1]
-            errs.append(e - np.mean(e))
-    if len(segs) > 1 and segs[-1][2] == 0:    # trailing hold: trim left (slew →)
-        i0, i1 = min(segs[-1][1], segs[-1][0] + trim), segs[-1][1]
-        if i1 - i0 >= 5:
-            e = resp[i0:i1] - ref[i0:i1]
-            errs.append(e - np.mean(e))
-    return M.noise_floor_std_deg(np.concatenate(errs)) if errs else None
+    return M.hold_noise_floor_from_trace(t, ref, resp)
 
 
 def recompute_run(rundir: Path, *, k_sigma: float, apex_excl_s: float) -> dict:
