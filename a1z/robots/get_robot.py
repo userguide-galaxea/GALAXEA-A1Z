@@ -128,7 +128,7 @@ def get_a1z_robot(
     with_gripper: bool = False,
     gripper_max_torque: float = 2.0,
     inter_cmd_gap_us: Optional[float] = None,
-    integral_level: str = "K0",
+    integral_level: str = "K1",
     integral_joints: Optional[list] = None,
     integral_overrides: Optional[dict] = None,
 ) -> ArmRobot:
@@ -158,8 +158,8 @@ def get_a1z_robot(
                           to [0, 500] µs at construction (ValueError otherwise). The
                           SDK reads no environment variable for this.
         integral_level: Error-integral feedforward level (SOP-09 §3):
-                          "K0" (default, ki=0 — no integrator, behavior byte-for-byte
-                          unchanged) / "K1" / "K2" / "K3". τ̂_c anchor from _TAU_C_HAT.
+                          "K0" (ki=0 — no integrator) / "K1" (default, gentle
+                          t_wind≈2s) / "K2" / "K3". τ̂_c anchor from _TAU_C_HAT.
         integral_joints: 1-based joint list to enable (e.g. [6] or [4,5,6]); None =
                           all calibrated joints. Uncalibrated (NaN τ̂_c) joints stay
                           disabled regardless.
