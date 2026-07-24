@@ -1,3 +1,11 @@
+# # Joint motors specs and manuals
+
+- folder `pdf` contains motors specs and manuals in pdf format
+
+- folder `md` contains motors specs and manuals in markdown format
+
+# Joint motors configuration
+
 ## Old configuration
 
 - J1, J2, J3: ENCOS A4315-P2-36
