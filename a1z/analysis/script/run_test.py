@@ -118,7 +118,41 @@ def build_args():
                          "(SOP-08 K1) — the SDK reads no env var since 0584cf4.")
     ap.add_argument("--sample-hz", type=int, default=100)
     ap.add_argument("--dry-run", action="store_true")
+    # --- error-integral feedforward (SOP-09 §7 mechanism-pair companion) ---
+    ap.add_argument("--ki-level", default="K0", choices=["K0", "K1", "K2", "K3"],
+                    help="integral level (SOP-09 §3): K0=off (default). Forwarded "
+                         "to get_a1z_robot; effective per-joint vector is "
+                         "machine-recorded in meta.integral from get_robot_info().")
+    ap.add_argument("--integral-joints", default=None,
+                    help="comma-separated 1-based joints to enable (e.g. 6 or "
+                         "4,5,6); default = all calibrated (finite τ̂_c) joints")
+    ap.add_argument("--t-leak", type=float, default=1.0,
+                    help="integral leak time constant T_leak (s); λ=1−Δt/T_leak")
+    ap.add_argument("--e-db-deg", type=float, default=0.3,
+                    help="integral error dead-band (deg); |e|<e_db → no accumulate")
+    ap.add_argument("--qd-freeze", type=float, default=0.15,
+                    help="freeze threshold (rad/s); |q̇_des|>qd_freeze → no accumulate")
     return ap.parse_args()
+
+
+def _parse_int_list(s):
+    """'4,5,6' → [4,5,6]; None/'' → None (all calibrated joints)."""
+    if not s:
+        return None
+    return [int(x) for x in str(s).split(",") if x.strip()]
+
+
+def _integral_kwargs(args) -> dict:
+    """Runner kwargs for the error-integral feedforward (forwarded to factory)."""
+    return {
+        "integral_level": args.ki_level,
+        "integral_joints": _parse_int_list(args.integral_joints),
+        "integral_overrides": {
+            "t_leak_s": args.t_leak,
+            "e_db_deg": args.e_db_deg,
+            "qd_freeze": args.qd_freeze,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +181,11 @@ def _stamp_pd_defaults(meta, robot):
     info = robot.get_robot_info()
     meta["pd"]["default_kp"] = info["default_kp"].tolist()
     meta["pd"]["default_kd"] = info["default_kd"].tolist()
+    # Effective per-joint integral vector read back from the live robot — the
+    # authoritative "setpoint = readback" record (SOP-09 P0-4 / R6). Overwrites
+    # the args-derived intent stamped in build_meta.
+    if "integral" in info:
+        meta.setdefault("integral", {})["effective"] = info["integral"]
     chain = getattr(robot, "_motor_chain", None)
     if chain is not None and hasattr(chain, "inter_cmd_gap_s"):
         meta["hardware"]["inter_cmd_gap_us_live"] = chain.inter_cmd_gap_s * 1e6
@@ -170,7 +209,7 @@ def run_joint_units(args, rundir, meta, result):
         cycles=args.cycles, waves=waves,
         edge_rate_deg_s=args.edge_rate,
         sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed,
-        inter_cmd_gap_us=args.gap_us)
+        inter_cmd_gap_us=args.gap_us, **_integral_kwargs(args))
     unit = {}
     failed = []
     try:
@@ -263,7 +302,8 @@ def run_ee(args, rundir, meta, result, *, dry_run: bool):
         args.can, q_nom_deg=q_nom_deg, ee_kind=args.ee_kind, plane=args.plane,
         radius=args.radius, period=args.period_ee, cycles=args.cycles_ee,
         sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed,
-        kp=ee_kp, kd=ee_kd, inter_cmd_gap_us=args.gap_us)
+        kp=ee_kp, kd=ee_kd, inter_cmd_gap_us=args.gap_us,
+        **_integral_kwargs(args))
     off = runner.solve_offline()
     g = off["gate"]
     lim = safety.effective_limits(safety.LIMIT_BUFFER_RAD, ee.urdf_limits(runner.kin))
@@ -364,6 +404,16 @@ def build_meta(args) -> dict:
                        "cycles": args.cycles, "edge_rate_deg_s": args.edge_rate},
         "metrics_v2": {"jump_eps_deg": args.jump_eps, "k_sigma": args.k_sigma,
                        "apex_excl_s": args.apex_excl_s},
+        "integral": {
+            # Intent from CLI; `effective` is overwritten with the live per-joint
+            # readback from get_robot_info() at robot start (SOP-09 P0-4 / §7).
+            "level": args.ki_level,
+            "joints": _parse_int_list(args.integral_joints),
+            "t_leak_s": args.t_leak,
+            "e_db_deg": args.e_db_deg,
+            "qd_freeze": args.qd_freeze,
+            "effective": None,
+        },
         "ee_traj": {"kind": args.ee_kind, "plane": args.plane, "radius_m": args.radius,
                     "period_s": args.period_ee, "cycles": args.cycles_ee,
                     "q_nom_deg": [float(x) for x in args.q_nom_deg.split(",")],

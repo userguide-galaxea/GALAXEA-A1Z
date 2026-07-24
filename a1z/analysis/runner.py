@@ -38,7 +38,10 @@ class _Base:
     def __init__(self, can_channel: str, *, sample_hz: int = 100,
                  transit_speed_deg_s: float = 15.0,
                  kp: Optional[np.ndarray] = None, kd: Optional[np.ndarray] = None,
-                 inter_cmd_gap_us: Optional[float] = None):
+                 inter_cmd_gap_us: Optional[float] = None,
+                 integral_level: str = "K0",
+                 integral_joints: Optional[list] = None,
+                 integral_overrides: Optional[dict] = None):
         # Cross-check the mirrored SDK limits against the live constant so a
         # future SDK edit can't silently desync the safety gate.
         safety.assert_matches_sdk_limits(_JOINT_LIMITS)
@@ -51,6 +54,11 @@ class _Base:
         # CAN pacing gap forwarded verbatim to get_a1z_robot (SOP-06: the SDK
         # reads no env var; None = SDK default 250 µs, 0 = unpaced/B0 regime).
         self.inter_cmd_gap_us = inter_cmd_gap_us
+        # Error-integral feedforward level + config, forwarded to get_a1z_robot
+        # (SOP-09 §7 mechanism-pair companion run; K0 = no integrator).
+        self.integral_level = integral_level
+        self.integral_joints = integral_joints
+        self.integral_overrides = integral_overrides
         # Robot/CAN bus are created lazily in start() so offline paths
         # (dry-run gate, IK solve) never open the bus.
         self.robot = None
@@ -61,7 +69,10 @@ class _Base:
         # Position-hold + PD (NOT zero-gravity): we want the arm to track.
         self.robot = get_a1z_robot(can_channel=self.can_channel,
                                    zero_gravity_mode=False, with_gripper=False,
-                                   inter_cmd_gap_us=self.inter_cmd_gap_us)
+                                   inter_cmd_gap_us=self.inter_cmd_gap_us,
+                                   integral_level=self.integral_level,
+                                   integral_joints=self.integral_joints,
+                                   integral_overrides=self.integral_overrides)
         self.robot.start()
         self._started = True
 

@@ -13,6 +13,7 @@ import numpy as np
 from a1z.dynamics.gravity_model import GravityModel
 from a1z.motor_drivers.motor_b_driver import MixedMotorChain
 from a1z.robots.gripper import Gripper
+from a1z.robots.integrator import IntegralConfig, JointErrorIntegrator
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class ArmRobot:
         control_freq_hz: int = 250,
         min_freq_hz: float = 80.0,
         motor_a_kt: float = 2.8,
+        integral_config: Optional[IntegralConfig] = None,
         # --- runtime safety (P0) ---
         runtime_limit_buffer_rad: float = 0.15,
         vel_limit: Optional[np.ndarray] = None,
@@ -110,6 +112,17 @@ class ArmRobot:
         self._control_freq_hz = control_freq_hz
         self._control_period_s = 1.0 / control_freq_hz
         self._min_freq_hz = min_freq_hz
+
+        # --- error-integral feedforward (SOP-09 S2; None = 逐字节不变的现状) ---
+        # Serves only the streaming command_joint_state tracking path; every
+        # non-streaming entry / fault resets it (see _reset_integral_state).
+        self._integral_config: Optional[IntegralConfig] = integral_config
+        self._integrator: Optional[JointErrorIntegrator] = (
+            JointErrorIntegrator(integral_config, self._control_period_s)
+            if integral_config is not None
+            else None
+        )
+        self._last_tau_i = np.zeros(num_joints)
 
         self._state = JointState(
             pos=np.zeros(num_joints),
@@ -313,9 +326,12 @@ class ArmRobot:
                 return
             with self._command_lock:
                 self._command.pos = arm_pos.copy()
+                self._command.vel = np.zeros(self._num_joints)
+                self._command.acc = np.zeros(self._num_joints)
                 self._command.kp = self._default_kp.copy()
                 self._command.kd = self._default_kd.copy()
                 self._command.torque_ff = np.zeros(self._num_joints)
+            self._reset_integral_state()
             self.gripper.command(float(np.clip(pos[self._num_joints], 0.0, 1.0)))
         else:
             arm_pos = self._accept_or_reject_stream(pos[:self._num_joints])
@@ -323,20 +339,27 @@ class ArmRobot:
                 return
             with self._command_lock:
                 self._command.pos = arm_pos.copy()
+                self._command.vel = np.zeros(self._num_joints)
+                self._command.acc = np.zeros(self._num_joints)
                 self._command.kp = self._default_kp.copy()
                 self._command.kd = self._default_kd.copy()
                 self._command.torque_ff = np.zeros(self._num_joints)
+            self._reset_integral_state()
 
     def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> None:
         """Set target joint state.
 
         Args:
-            joint_state: Dict with keys 'pos', 'vel', and optionally 'kp', 'kd'.
+            joint_state: Dict with keys 'pos', 'vel', and optionally 'kp', 'kd',
+                'acc', 'torque_ff'.
 
-        Out-of-range pos / vel / kp / kd reject the entire frame (previous
-        command is held). Silent clipping of garbage feedforward would let
-        a bad upstream silently distort the trajectory or PD response, which
-        is harder to diagnose than a refused frame plus an error log.
+        Out-of-range pos / vel / kp / kd / acc / torque_ff reject the entire
+        frame (previous command is held). Silent clipping of garbage
+        feedforward would let a bad upstream silently distort the trajectory or
+        PD response, which is harder to diagnose than a refused frame plus an
+        error log. Any feedforward field NOT supplied this frame (acc,
+        torque_ff) is explicitly zeroed — no stale carry-over from a prior
+        command_joint_pos / move_joints (devlog 2026-07-22 Q9 hazard).
         """
         if self._estop_latch.is_set():
             logger.warning("command_joint_state rejected: robot is in estop")
@@ -372,11 +395,46 @@ class ArmRobot:
             )
             return
 
+        # Optional feedforward keys — reject-frame on out-of-range, else zero.
+        acc_in = joint_state.get("acc")
+        if acc_in is None:
+            acc = np.zeros(self._num_joints)
+        else:
+            acc = np.asarray(acc_in, dtype=np.float64)
+            if np.any(np.abs(acc) > _MAX_CMD_ACC_RAD_S2):
+                offenders = "; ".join(
+                    f"joint{i + 1}={acc[i]:.2f}"
+                    for i in np.flatnonzero(np.abs(acc) > _MAX_CMD_ACC_RAD_S2)
+                )
+                logger.error(
+                    f"command_joint_state rejected: acc exceeds "
+                    f"{_MAX_CMD_ACC_RAD_S2} rad/s² ({offenders})"
+                )
+                return
+
+        tff_in = joint_state.get("torque_ff")
+        if tff_in is None:
+            torque_ff = np.zeros(self._num_joints)
+        else:
+            torque_ff = np.asarray(tff_in, dtype=np.float64)
+            if np.any(np.abs(torque_ff) > self._torque_clip):
+                offenders = "; ".join(
+                    f"joint{i + 1}={torque_ff[i]:.2f}"
+                    for i in np.flatnonzero(np.abs(torque_ff) > self._torque_clip)
+                )
+                logger.error(
+                    f"command_joint_state rejected: torque_ff exceeds per-joint "
+                    f"torque_clip ({offenders})"
+                )
+                return
+
         with self._command_lock:
             self._command.pos = pos.copy()
             self._command.vel = vel.copy()
+            self._command.acc = acc.copy()
             self._command.kp = kp.copy()
             self._command.kd = kd.copy()
+            self._command.torque_ff = torque_ff.copy()
 
     def get_joint_pos(self) -> np.ndarray:
         with self._state_lock:
@@ -391,6 +449,7 @@ class ArmRobot:
                 "pos": self._state.pos.copy(),
                 "vel": self._state.vel.copy(),
                 "eff": self._state.eff.copy(),
+                "tau_i": self._last_tau_i.copy(),
                 "error_codes": self._state.error_codes.copy(),
                 "temp_mos": self._state.temp_mos.copy(),
                 "temp_rotor": self._state.temp_rotor.copy(),
@@ -418,6 +477,19 @@ class ArmRobot:
             "joint_limits": self._joint_limits,
             "gravity_comp_factor": self.gravity_comp_factor,
             "control_freq_hz": self._control_freq_hz,
+            "integral": (
+                self._integral_config.as_info()
+                if self._integral_config is not None
+                else {
+                    "level": "K0",
+                    "ki": np.zeros(self._num_joints).tolist(),
+                    "tau_i_max": np.zeros(self._num_joints).tolist(),
+                    "t_leak_s": None,
+                    "e_db_deg": np.zeros(self._num_joints).tolist(),
+                    "qd_freeze": None,
+                    "enable_mask": [False] * self._num_joints,
+                }
+            ),
         }
 
     @property
@@ -454,6 +526,7 @@ class ArmRobot:
             self._command.kd = self._default_kd.copy() * 0.5
             self._command.torque_ff = np.zeros(self._num_joints)
         self._estop_latch.set()
+        self._reset_integral_state()
 
     def release(self) -> None:
         """Release the estop latch and resume with default PD at current pose."""
@@ -469,6 +542,7 @@ class ArmRobot:
             self._command.kd = self._default_kd.copy()
             self._command.torque_ff = np.zeros(self._num_joints)
         self._estop_latch.clear()
+        self._reset_integral_state()
         logger.info("[ArmRobot] ESTOP released")
 
     def move_joints(
@@ -587,6 +661,7 @@ class ArmRobot:
             self._command.pos = target_pos.copy()
             self._command.vel = np.zeros(self._num_joints)
             self._command.acc = np.zeros(self._num_joints)
+        self._reset_integral_state()
 
     def set_gravity_mode(self, enabled: bool) -> None:
         """Switch between zero-gravity (floating) and position-hold mode.
@@ -602,6 +677,34 @@ class ArmRobot:
                 self._command.kp = self._default_kp.copy()
                 self._command.kd = self._default_kd.copy()
         self.zero_gravity_mode = enabled
+        self._reset_integral_state()
+
+    def _reset_integral_state(self) -> None:
+        """Zero the error integrator (None-safe). Called by every non-streaming
+        command entry and fault path so integral only serves the streaming
+        command_joint_state tracker (SOP-09 W4)."""
+        if self._integrator is not None:
+            self._integrator.reset()
+        with self._state_lock:
+            self._last_tau_i = np.zeros(self._num_joints)
+
+    def set_integral_config(self, cfg: Optional[IntegralConfig]) -> None:
+        """Atomically swap the integral config (or disable with None) and reset.
+
+        Rebuilds the integrator under the command lock so a mid-run 档位切换
+        never mixes old accumulator state with new gains.
+        """
+        with self._command_lock:
+            self._integral_config = cfg
+            self._integrator = (
+                JointErrorIntegrator(cfg, self._control_period_s)
+                if cfg is not None else None
+            )
+        self._reset_integral_state()
+
+    def reset_integral(self) -> None:
+        """Public: zero the integral accumulator without changing config."""
+        self._reset_integral_state()
 
     def start_recording(self, sample_hz: int = 50) -> None:
         """Start recording joint positions (during gravity-comp teaching).
@@ -829,6 +932,20 @@ class ArmRobot:
         with self._state_lock:
             q = self._state.pos.copy()
 
+        # 4.5) Error-integral feedforward (SOP-09 W2). e = q_des − q_meas, both
+        # in URDF frame. Only accumulates on the streaming tracker and never
+        # while estopped; steps at the 250 Hz control rate. tau_i (already
+        # clamped to ±tau_i_max inside the integrator) joins the torque sum
+        # below — ahead of × joint_sign and torque_clip, so it is frame-correct
+        # and the global clip stays the mechanical backstop for a runaway.
+        integrator = self._integrator
+        if integrator is not None and not self._estop_latch.is_set():
+            tau_i = integrator.step(cmd.pos - q, cmd.vel)
+        else:
+            tau_i = np.zeros(self._num_joints)
+        with self._state_lock:
+            self._last_tau_i = tau_i.copy()
+
         tau_id = self._gravity_model.compute_inverse_dynamics(q, cmd.vel, cmd.acc)
 
         # Safety check
@@ -840,7 +957,7 @@ class ArmRobot:
 
         # 5) Combine torques (in URDF frame), then convert to motor frame
         tau_id_scaled = tau_id * self._gravity_torque_scale
-        torques_urdf = cmd.torque_ff + tau_id_scaled * self.gravity_comp_factor
+        torques_urdf = cmd.torque_ff + tau_i + tau_id_scaled * self.gravity_comp_factor
         motor_torques = np.clip(torques_urdf * self._joint_sign, -self._torque_clip, self._torque_clip)
 
         # 6) Send commands to motor chain (convert position/velocity to motor frame)

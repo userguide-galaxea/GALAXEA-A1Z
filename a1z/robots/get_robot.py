@@ -11,6 +11,7 @@ from a1z.motor_drivers.motor_b_driver import MotorB, MotorBRanges, MixedMotorCha
 from a1z.motor_drivers.motor_a_driver import MotorA, MotorARanges
 from a1z.robots.arm_robot import ArmRobot
 from a1z.robots.gripper import Gripper, GRIPPER_CAN_ID, GRIPPER_MOTOR_RANGES
+from a1z.robots.integrator import IntegralConfig
 
 # Default URDF path (bundled inside the package)
 _DEFAULT_URDF_PATH = str(Path(__file__).parent.parent / "robot_models" / "a1z" / "A1Z_G1Z.urdf")
@@ -31,12 +32,35 @@ _JOINT_LIMITS = [
     (-2.007, 2.007),   # arm_joint6
 ]
 
-_DEFAULT_KP = np.array([70.0, 60.0, 40.0, 30.0, 10.0, 25.0])
-_DEFAULT_KD = np.array([5.0,  4.5,  5.0,  2.0,  0.5,  4])
+_DEFAULT_KP = np.array([100.0, 60.0, 40.0, 30.0, 10.0, 25.0])
+_DEFAULT_KD = np.array([4.9,  4.5,  5.0,  2.0,  0.5,  4])
 _JOINT_SIGN = np.array([1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
 _GRAVITY_TORQUE_SCALE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 _MAX_GRAVITY_TORQUE = np.array([50.0, 50.0, 50.0, 24.0, 10.0, 10.0])
 _TORQUE_CLIP = np.array([70.0, 70.0, 70.0, 27.0, 10.0, 10.0])
+
+# Per-joint Coulomb-friction estimate τ̂_c (Nm), the calibration anchor for the
+# error-integral clamp τ_I,max = 1.2·τ̂_c (SOP-09 §3 / P0-6). NaN joints are
+# unstandardised → IntegralConfig.from_level auto-disables them (enable-mask
+# implementation).
+#
+# J1/J2/J3/J5 backfilled from the G0E multi-rate regression (SOP-09 §10.2,
+# devlog 2026-07-24): per-joint clean 3-rate triangle sets (p2/p4/p8, default PD,
+# gap 250 µs), regressed via regress_tau_c.py (R²: J1 0.97, J2 0.97, J3 0.89,
+# J5 0.66). J6 ≈ 0.13 Nm is measured (SOP-05 §6 / devlog 2026-07-21 §4-2), with
+# the G0E-口径 regression (0.1125) as confirmation — left at the measured 0.13.
+#
+# J4 = 0.66 is a LOW-SPEED (Stribeck-regime) anchor, not the linear intercept.
+# Its 4-rate sweep (+p16) is monotonic in the WRONG direction for the Coulomb+
+# viscous model — friction RISES as speed falls (β_v<0, R²=0.66): the sweep sits
+# on the Stribeck downslope, so the linear intercept (0.646) over-extrapolates.
+# The integral only acts below qd_freeze=0.15 rad/s, exactly the p8/p16 regime
+# where the direction-antisymmetric friction is measured directly at 0.62–0.66;
+# 0.66 is that measured low-speed value. The pipeline uses τ̂_c only as a scalar
+# magnitude (coulomb_ff bound 1.5·τ̂_c, τ_I,max clamp), never β_v, and explicitly
+# does not need a Stribeck curve (devlog 2026-07-22 Q8(3)) — so a magnitude-correct
+# anchor is sufficient. Enable per-joint via a P0-7-style smoke test (SOP-09 §10.2).
+_TAU_C_HAT = np.array([0.3442, 0.3665, 0.6371, 0.66, 0.143, 0.13])
 
 # MotorA ranges
 _MOTOR_A_RANGES = MotorARanges(
@@ -104,6 +128,9 @@ def get_a1z_robot(
     with_gripper: bool = False,
     gripper_max_torque: float = 2.0,
     inter_cmd_gap_us: Optional[float] = None,
+    integral_level: str = "K0",
+    integral_joints: Optional[list] = None,
+    integral_overrides: Optional[dict] = None,
 ) -> ArmRobot:
     """Create and return a configured A1Z ArmRobot.
 
@@ -130,11 +157,31 @@ def get_a1z_robot(
                           disable pacing (legacy back-to-back burst). Range-checked
                           to [0, 500] µs at construction (ValueError otherwise). The
                           SDK reads no environment variable for this.
+        integral_level: Error-integral feedforward level (SOP-09 §3):
+                          "K0" (default, ki=0 — no integrator, behavior byte-for-byte
+                          unchanged) / "K1" / "K2" / "K3". τ̂_c anchor from _TAU_C_HAT.
+        integral_joints: 1-based joint list to enable (e.g. [6] or [4,5,6]); None =
+                          all calibrated joints. Uncalibrated (NaN τ̂_c) joints stay
+                          disabled regardless.
+        integral_overrides: Optional dict forwarded to IntegralConfig.from_level
+                          (keys: t_leak_s, e_db_deg, qd_freeze).
 
     Returns:
         Configured ArmRobot instance (call .start() to begin control).
     """
     urdf = urdf_path or _DEFAULT_URDF_PATH
+
+    # Error-integral feedforward (SOP-09). K0 → None so the default path builds
+    # no integrator and the control loop stays byte-for-byte identical to PD +
+    # gravity comp; any active level constructs a per-joint leaky integrator.
+    integral_config: Optional[IntegralConfig] = None
+    if integral_level != "K0":
+        integral_config = IntegralConfig.from_level(
+            integral_level,
+            _TAU_C_HAT,
+            joints=integral_joints,
+            **(integral_overrides or {}),
+        )
 
     # Open CAN bus
     bus = can.interface.Bus(
@@ -201,4 +248,5 @@ def get_a1z_robot(
         control_freq_hz=control_freq_hz,
         min_freq_hz=min_freq_hz,
         motor_a_kt=_MOTOR_A_KT,
+        integral_config=integral_config,
     )
