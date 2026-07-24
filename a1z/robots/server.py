@@ -154,12 +154,20 @@ class RobotServer:
         return {"ok": True, "data": {"message": "Stopping server"}}
 
     def _cmd_estop(self, _args: dict) -> dict:
-        self._robot.estop()
-        return {"ok": True, "data": {"estopped": True}}
+        engaged = self._robot.estop()
+        return {
+            "ok": engaged,
+            "data": {"estopped": self._robot.is_estopped},
+            **({} if engaged else {"error": "Robot cannot enter soft estop from its current state"}),
+        }
 
     def _cmd_release(self, _args: dict) -> dict:
-        self._robot.release()
-        return {"ok": True, "data": {"estopped": self._robot.is_estopped}}
+        released = self._robot.release()
+        return {
+            "ok": released,
+            "data": {"estopped": self._robot.is_estopped},
+            **({} if released else {"error": "Robot fault could not be released"}),
+        }
 
     def _cmd_info(self, _args: dict) -> dict:
         return {

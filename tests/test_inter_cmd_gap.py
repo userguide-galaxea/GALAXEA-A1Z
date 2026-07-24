@@ -12,7 +12,7 @@ directly with ``python tests/test_inter_cmd_gap.py``.
 import pytest
 
 from a1z.motor_drivers.motor_a_driver import MotorA
-from a1z.motor_drivers.motor_b_driver import MotorB, MixedMotorChain
+from a1z.motor_drivers.motor_b_driver import MixedMotorChain, MotorB
 from a1z.robots.get_robot import (
     _DEFAULT_INTER_CMD_GAP_US,
     _MAX_INTER_CMD_GAP_US,

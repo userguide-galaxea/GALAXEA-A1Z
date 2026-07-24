@@ -26,6 +26,8 @@ import can
 
 from a1z.motor_drivers.utils import float_to_uint, uint_to_float
 
+_CAN_SEND_TIMEOUT_S = 0.0
+
 
 @dataclass
 class MotorARanges:
@@ -107,7 +109,7 @@ class MotorA:
         mid = self.motor_id
         data = bytes([(mid >> 8) & 0xFF, mid & 0xFF, 0x00, 0x01])
         msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
 
     def disable(self) -> None:
@@ -115,7 +117,7 @@ class MotorA:
         mid = self.motor_id
         data = bytes([(mid >> 8) & 0xFF, mid & 0xFF, 0x00, 0x02])
         msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
 
     def send_mit_command(
@@ -146,7 +148,7 @@ class MotorA:
 
         data = pack_motor_a_mit(mode, kp_u12, kd_u9, pos_u16, vel_u12, torque_u12)
         msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
-        self.bus.send(msg)
+        self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
 
     def parse_feedback(self, msg: can.Message) -> Optional[MotorAFeedback]:
         """Parse MotorA feedback CAN frame.
