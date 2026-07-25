@@ -234,6 +234,22 @@ class MotorB:
             temperature_rotor=temp_rotor,
         )
 
+    @staticmethod
+    def error_is_fault(code: int) -> bool:
+        """Return whether a DaMiao/MotorB status value is unusable.
+
+        This field carries enable state as well as faults: only 0x1 means the
+        motor is enabled and healthy after startup; 0x0 means disabled.
+        """
+        return int(code) != 0x1
+
+    @staticmethod
+    def describe_error(code: int) -> str:
+        """Describe a DaMiao/MotorB status value."""
+        code = int(code)
+        name = MOTOR_B_ERROR_CODES.get(code, f"unknown({code})")
+        return f"error_code=0x{code:X} ({name})"
+
 
 @runtime_checkable
 class MotorChain(Protocol):
@@ -245,6 +261,8 @@ class MotorChain(Protocol):
     def get_positions(self) -> np.ndarray: ...
     def get_velocities(self) -> np.ndarray: ...
     def get_efforts(self) -> np.ndarray: ...
+    def classify_error_codes(self, codes: np.ndarray) -> np.ndarray: ...
+    def describe_error_code(self, joint_idx: int, code: int) -> str: ...
     def send_commands(
         self,
         pos: np.ndarray,
@@ -483,9 +501,11 @@ class MixedMotorChain:
     def get_error_codes(self) -> np.ndarray:
         """Return per-joint motor error codes (int array, length n).
 
-        Motors without feedback yet return 0 (matches "disabled" code). Caller
-        is responsible for distinguishing "no data" vs. "disabled fault" by
-        also checking feedback staleness.
+        Values retain their native protocol semantics: ENCOS/MotorA uses
+        0=no-error while DaMiao/MotorB uses 0=disabled and 1=enabled.
+        Call :meth:`classify_error_codes` instead of comparing the returned
+        values against one shared constant. Motors without feedback yet return
+        0; callers must also check per-joint feedback freshness.
         """
         out = np.zeros(self._n, dtype=int)
         for i, motor in enumerate(self._motor_a_list):
@@ -499,6 +519,33 @@ class MixedMotorChain:
             if fb is not None:
                 out[idx] = int(fb.error)
         return out
+
+    def classify_error_codes(self, codes: np.ndarray) -> np.ndarray:
+        """Classify raw per-joint status values using each motor's protocol."""
+        codes = np.asarray(codes)
+        if codes.shape != (self._n,):
+            raise ValueError(
+                f"error code shape must be ({self._n},), got {codes.shape}"
+            )
+
+        is_fault = np.zeros(self._n, dtype=bool)
+        for i, motor in enumerate(self._motor_a_list):
+            idx = self._motor_a_joint_indices[i]
+            is_fault[idx] = motor.error_is_fault(codes[idx])
+        for i, motor in enumerate(self._motor_b_list):
+            idx = self._motor_b_joint_indices[i]
+            is_fault[idx] = motor.error_is_fault(codes[idx])
+        return is_fault
+
+    def describe_error_code(self, joint_idx: int, code: int) -> str:
+        """Describe a raw status value using the joint's motor protocol."""
+        for i, motor in enumerate(self._motor_a_list):
+            if self._motor_a_joint_indices[i] == joint_idx:
+                return motor.describe_error(code)
+        for i, motor in enumerate(self._motor_b_list):
+            if self._motor_b_joint_indices[i] == joint_idx:
+                return motor.describe_error(code)
+        return f"error_code=0x{int(code):X} (unknown joint {joint_idx})"
 
     def get_temperatures(self) -> tuple:
         """Return (temp_mos, temp_rotor) arrays in °C, length n.

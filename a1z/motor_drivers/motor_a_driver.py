@@ -60,6 +60,23 @@ class MotorAFeedback:
     temperature_mos: float = 0.0  # MOS temperature (°C)
 
 
+# ENCOS feedback "motor error information" field (uint5).
+#
+# This is an error field, not an enable-state field: 0 means no error and
+# non-zero values are hardware faults.  It must not share the DaMiao/MotorB
+# convention where 0 means disabled and 1 means enabled.
+MOTOR_A_ERROR_CODES = {
+    0x0: "no error",
+    0x1: "motor over temperature",
+    0x2: "over current",
+    0x3: "over voltage",
+    0x4: "under voltage",
+    0x5: "encoder error",
+    0x6: "brake voltage too high",
+    0x7: "DRV driver error",
+}
+
+
 def pack_motor_a_mit(
     mode: int,
     kp_u12: int,
@@ -111,6 +128,18 @@ class MotorA:
         msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
         self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
         time.sleep(0.01)
+
+    @staticmethod
+    def error_is_fault(code: int) -> bool:
+        """Return whether an ENCOS error-information value is a fault."""
+        return int(code) != 0x0
+
+    @staticmethod
+    def describe_error(code: int) -> str:
+        """Describe an ENCOS error-information value."""
+        code = int(code)
+        name = MOTOR_A_ERROR_CODES.get(code, f"unknown({code})")
+        return f"error_code=0x{code:X} ({name})"
 
     def disable(self) -> None:
         """Send motor disable command via 0x7FF config frame (cmd=0x02)."""

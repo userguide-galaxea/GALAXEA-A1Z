@@ -33,6 +33,13 @@ class _FakeChain:
     def get_feedback_health(self, now=None):
         return self.feedback_seen.copy(), self.feedback_age.copy()
 
+    def classify_error_codes(self, codes):
+        # This generic test double models a DaMiao-only chain.
+        return np.asarray(codes) != 0x1
+
+    def describe_error_code(self, joint_idx, code):
+        return f"error_code=0x{int(code):X} (fake-damiao)"
+
 
 class _FakeGravity:
     def compute_inverse_dynamics(self, q, vel, acc):

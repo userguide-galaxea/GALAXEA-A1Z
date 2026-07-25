@@ -394,11 +394,6 @@ class ArmRobot:
                         self.gripper._motor
                     )
 
-                # Re-send enable after gripper homing completes — the initial
-                # enable_all() may have been lost on the busy bus during home.
-                self._motor_chain.enable_all()
-                time.sleep(0.01)
-
                 # MotorA does not return feedback on enable alone — it needs at
                 # least one MIT command first. Send a zero-position-gain probe
                 # so motors answer without applying a position correction.
@@ -418,25 +413,7 @@ class ArmRobot:
                 # Fresh feedback alone is not enough to admit closed-loop
                 # gains: reject a motor that already reports disabled/faulted,
                 # over-temperature, or implausible velocity.
-                # Motors may need extra time to transition from disabled→enabled
-                # after enable_all(), especially when the bus is busy (e.g.
-                # gripper homing). Retry the probe+check up to 3 times.
-                for _attempt in range(3):
-                    try:
-                        self._check_motor_errors()
-                        break
-                    except HardSafetyFault:
-                        if _attempt == 2:
-                            raise
-                        logger.info(
-                            "Motor not yet enabled, retrying probe "
-                            f"(attempt {_attempt + 2}/3)..."
-                        )
-                        self._motor_chain.send_commands(
-                            zeros, zeros, zeros, probe_kd, zeros,
-                        )
-                        time.sleep(0.1)
-                        self._read_state()
+                self._check_motor_errors()
                 self._check_motor_temps()
                 self._check_velocity_limits()
                 logger.info(
@@ -2244,21 +2221,19 @@ class ArmRobot:
                 self._last_limit_warn_t = now
 
     def _check_motor_errors(self) -> None:
-        # MotorB reports 0x1 ("normal") when enabled; MotorA on some firmware
-        # versions stays 0x0 even after enable while actively responding to
-        # MIT commands. Since _require_complete_startup_feedback() already
-        # guarantees the motor is alive (has fresh feedback), 0x0 is safe to
-        # accept — only flag genuine hardware faults (codes 0x8+).
+        # Status semantics are protocol-specific: ENCOS/MotorA reports
+        # 0=no-error, while DaMiao/MotorB reports 0=disabled and 1=enabled.
+        # Delegate interpretation to the mixed chain instead of applying one
+        # protocol's constants to every joint.
         errs = self._state.error_codes
         feedback_seen, _ = self._joint_feedback_health()
-        bad = feedback_seen & (errs != 0x1) & (errs != 0x0)
+        bad = feedback_seen & self._motor_chain.classify_error_codes(errs)
         if np.any(bad):
-            from a1z.motor_drivers.utils import MotorErrorCode
             idx = int(np.argmax(bad))
             code = int(errs[idx])
             raise HardSafetyFault(
-                f"Motor fault on joint{idx + 1}: error_code=0x{code:X} "
-                f"({MotorErrorCode.get_error_message(code)})"
+                f"Motor fault on joint{idx + 1}: "
+                f"{self._motor_chain.describe_error_code(idx, code)}"
             )
 
     def _check_motor_temps(self) -> None:
