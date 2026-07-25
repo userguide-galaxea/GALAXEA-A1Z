@@ -14,6 +14,7 @@ from a1z.robots.arm_robot import (
     ControlState,
     HardSafetyFault,
     RecoverableControlFault,
+    _STARTUP_FEEDBACK_PROBE_ATTEMPTS,
 )
 
 
@@ -894,12 +895,67 @@ def test_startup_refuses_position_gains_without_new_feedback_from_every_joint(
     assert chain.reset_count == 1
     assert chain.enable_count == 1
     assert chain.disable_count == 1
-    assert len(chain.sent) == 1
-    np.testing.assert_array_equal(chain.sent[0]["kp"], np.zeros(6))
+    assert len(chain.sent) == _STARTUP_FEEDBACK_PROBE_ATTEMPTS
+    for command in chain.sent:
+        np.testing.assert_array_equal(command["kp"], np.zeros(6))
     assert not robot._has_sent_command
     assert robot._thread is None
     assert not robot.is_running
     assert robot.get_fault_status()["state"] == "STOPPED"
+
+
+def test_startup_retries_zero_gain_probe_until_missing_joint_recovers(
+    monkeypatch,
+):
+    class _TransientMissingChain(_ReadyStartupChain):
+        def __init__(self):
+            super().__init__()
+            self.drain_count = 0
+
+        def drain_and_update(self, _bus):
+            self.drain_count += 1
+            self.feedback_seen[:] = True
+            self.feedback_age[:] = 0.0
+            if self.drain_count == 1:
+                self.feedback_seen[2] = False
+                self.feedback_age[2] = np.inf
+                return 5
+            return 6
+
+    class _NoopThread:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+        def join(self, timeout=None):
+            self.started = False
+
+    chain = _TransientMissingChain()
+    robot, _ = _make_robot(chain=chain, zero_gravity_mode=False)
+    robot._running = False
+    robot._control_state = ControlState.STOPPED
+    monkeypatch.setattr(
+        "a1z.robots.arm_robot.time.sleep",
+        lambda _seconds: None,
+    )
+    monkeypatch.setattr(
+        "a1z.robots.arm_robot.threading.Thread",
+        _NoopThread,
+    )
+
+    robot.start()
+
+    assert chain.drain_count == 2
+    assert len(chain.sent) == 3
+    for command in chain.sent[:2]:
+        np.testing.assert_array_equal(command["kp"], np.zeros(6))
+    np.testing.assert_array_equal(chain.sent[2]["kp"], robot._default_kp)
+    assert robot.get_fault_status()["state"] == "RUNNING"
 
 
 def test_startup_queues_current_pose_only_after_complete_new_feedback(

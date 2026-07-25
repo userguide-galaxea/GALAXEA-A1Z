@@ -40,6 +40,13 @@ _MAX_CMD_KD = 5.0
 # is safer. Only confirmed hardware safety violations use hard disable.
 _RECOVERABLE_CONTROL_ERROR_TIMEOUT_S = 0.2
 
+# Startup remains open-loop until every joint has answered a zero-position-gain
+# probe.  A single CAN reply can be lost during enable, so retry the harmless
+# probe for a short, bounded window instead of admitting cached/incomplete state
+# or failing after one sample.
+_STARTUP_FEEDBACK_PROBE_ATTEMPTS = 3
+_STARTUP_FEEDBACK_PROBE_SETTLE_S = 0.05
+
 
 class ControlState(enum.Enum):
     """Lifecycle/safety state of the SDK control loop."""
@@ -399,17 +406,32 @@ class ArmRobot:
                 # so motors answer without applying a position correction.
                 zeros = np.zeros(self._num_joints)
                 probe_kd = np.full(self._num_joints, 0.05)
-                self._motor_chain.send_commands(
-                    zeros,
-                    zeros,
-                    zeros,
-                    probe_kd,
-                    zeros,
-                )
-                time.sleep(0.05)
-
-                self._read_state()
-                self._require_complete_startup_feedback()
+                for probe_attempt in range(
+                    _STARTUP_FEEDBACK_PROBE_ATTEMPTS
+                ):
+                    self._motor_chain.send_commands(
+                        zeros,
+                        zeros,
+                        zeros,
+                        probe_kd,
+                        zeros,
+                    )
+                    time.sleep(_STARTUP_FEEDBACK_PROBE_SETTLE_S)
+                    self._read_state()
+                    try:
+                        self._require_complete_startup_feedback()
+                        break
+                    except RuntimeError:
+                        if (
+                            probe_attempt
+                            == _STARTUP_FEEDBACK_PROBE_ATTEMPTS - 1
+                        ):
+                            raise
+                        logger.warning(
+                            "Startup probe incomplete, retrying "
+                            f"({probe_attempt + 2}/"
+                            f"{_STARTUP_FEEDBACK_PROBE_ATTEMPTS})..."
+                        )
                 # Fresh feedback alone is not enough to admit closed-loop
                 # gains: reject a motor that already reports disabled/faulted,
                 # over-temperature, or implausible velocity.
