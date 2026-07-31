@@ -27,8 +27,7 @@ A1Z 六轴机械臂的 Python 控制 SDK，提供 CAN 总线电机驱动、基�
 
 ```
 a1z/
-├── pyproject.toml                 # 构建配置 (flit)
-├── setup.py                       # setuptools 后备
+├── pyproject.toml                 # 构建和包元数据 (Hatch)
 ├── README.md
 ├── a1z/                       # SDK 主包
 │   ├── dynamics/
@@ -64,6 +63,14 @@ a1z/
 - URDF 模型文件（包内自带，见 `a1z/robot_models/a1z/`，默认使用 `A1Z_Flange.urdf`）
 
 ### 安装 SDK
+
+从 PyPI 安装已发布的版本：
+
+```bash
+pip install a1z
+```
+
+从源码安装当前开发版本：
 
 ```bash
 # 不带夹爪的A1Z机械臂sdk
@@ -368,8 +375,7 @@ All motors share a single CAN bus (`can0`) at 1 Mbps using the MIT position-velo
 
 ```
 a1z/
-├── pyproject.toml                 # Build config (flit)
-├── setup.py                       # setuptools fallback
+├── pyproject.toml                 # Build and package metadata (Hatch)
 ├── README.md
 ├── a1z/                       # SDK main package
 │   ├── dynamics/
@@ -405,6 +411,14 @@ a1z/
 - URDF model files (bundled, see `a1z/robot_models/a1z/`, defaults to `A1Z_Flange.urdf`)
 
 ### Install the SDK
+
+Install a released version from PyPI:
+
+```bash
+pip install a1z
+```
+
+Install the current development version from source:
 
 ```bash
 # A1Z arm SDK (without gripper)

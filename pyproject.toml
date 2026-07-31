@@ -1,26 +1,37 @@
 [build-system]
-requires = ["flit_core >= 3.4"]
-build-backend = "flit_core.buildapi"
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["a1z"]
+artifacts = ["a1z/robot_models/**/*.urdf"]
+
+[tool.hatch.version]
+source = "vcs"
 
 [project]
 name = "a1z"
-version = "0.0.1"
-readme = "README.md"
+dynamic = ["version"]
+description = "Python SDK for the Galaxea A1Z 6-DOF robotic arm"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = { file = "LICENSE" }
+authors = [{ name = "Galaxea" }]
 requires-python = ">=3.10"
-dynamic = ["description"]
 dependencies = [
     "numpy",
     "python-can>=4.0",
     "pin",
 ]
 
+[project.urls]
+Documentation = "https://github.com/userguide-galaxea/GALAXEA-A1Z#readme"
+Source = "https://github.com/userguide-galaxea/GALAXEA-A1Z"
+Tracker = "https://github.com/userguide-galaxea/GALAXEA-A1Z/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest",
 ]
-
-[tool.flit.module]
-name = "a1z"
 
 [tool.ruff]
 line-length = 119
