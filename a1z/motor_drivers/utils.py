@@ -2,7 +2,7 @@
 
 import enum
 from dataclasses import dataclass
-from typing import List
+from typing import Any
 
 
 def uint_to_float(x_int: int, x_min: float, x_max: float, bits: int) -> float:
@@ -170,7 +170,8 @@ class MotorType:
 
 
 class AutoNameEnum(enum.Enum):
-    def _generate_next_value_(name: str, start: int, count: int, last_values: List[str]) -> str:
+    @staticmethod
+    def _generate_next_value_(name: str, start: int, count: int, last_values: list[Any]) -> str:
         return name
 
 

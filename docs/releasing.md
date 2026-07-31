@@ -4,6 +4,9 @@ The CI workflow builds a wheel and source distribution for every pull request
 and every push to `main`. A tag that starts with `v` also publishes those
 artifacts to PyPI through Trusted Publishing.
 
+The distribution includes a `py.typed` marker, so mypy and other PEP 561
+type checkers use the annotations shipped in the `a1z` package.
+
 ## One-time setup
 
 The `a1z` name had no project page or simple-index entry on PyPI when checked

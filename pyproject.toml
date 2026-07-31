@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["a1z"]
-artifacts = ["a1z/robot_models/**/*.urdf"]
+artifacts = [
+    "a1z/py.typed",
+    "a1z/robot_models/**/*.urdf",
+]
 
 [tool.hatch.version]
 source = "vcs"

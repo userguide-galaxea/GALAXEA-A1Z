@@ -36,10 +36,16 @@ jobs:
         run: uv build --no-sources
 
       - name: Smoke-test wheel
-        run: uv run --python 3.10 --isolated --no-project --with dist/*.whl tests/package_smoke_test.py
+        working-directory: ${{ runner.temp }}
+        run: uv run --python 3.10 --isolated --no-project --with "${{ github.workspace }}"/dist/*.whl "${{ github.workspace }}/tests/package_smoke_test.py"
+
+      - name: Type-check downstream usage
+        working-directory: ${{ runner.temp }}
+        run: uv run --python 3.10 --isolated --no-project --with mypy --with "${{ github.workspace }}"/dist/*.whl mypy --strict "${{ github.workspace }}/tests/typecheck_consumer.py"
 
       - name: Smoke-test source distribution
-        run: uv run --python 3.10 --isolated --no-project --with dist/*.tar.gz tests/package_smoke_test.py
+        working-directory: ${{ runner.temp }}
+        run: uv run --python 3.10 --isolated --no-project --with "${{ github.workspace }}"/dist/*.tar.gz "${{ github.workspace }}/tests/package_smoke_test.py"
 
       - name: Upload distributions
         uses: actions/upload-artifact@v7
