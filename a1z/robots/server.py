@@ -25,6 +25,7 @@ import time
 import numpy as np
 
 from a1z.robots.get_robot import get_a1z_robot
+from a1z.config import load_config, config_to_robot_kwargs
 
 SOCKET_PATH = "/tmp/a1z.sock"
 
@@ -260,15 +261,22 @@ def serve(
     can_channel: str = "can0",
     with_gripper: bool = False,
     gravity_mode: bool = False,
+    config_path: str | None = None,
 ) -> None:
     """Start the robot server in the foreground."""
-    print(f"[a1z] Initialising arm  can={can_channel}  gripper={'yes' if with_gripper else 'no'}")
-    robot = get_a1z_robot(
-        can_channel=can_channel,
-        zero_gravity_mode=gravity_mode,
-        with_gripper=with_gripper,
-        gravity_comp_factor=1.0,
-    )
+    config = load_config(config_path) if config_path else {}
+    kwargs = config_to_robot_kwargs(config)
+    kwargs.setdefault("can_channel", can_channel)
+    kwargs.setdefault("with_gripper", with_gripper)
+    kwargs.setdefault("zero_gravity_mode", gravity_mode)
+    kwargs.setdefault("gravity_comp_factor", 1.0)
+    # CLI flags override config file values.
+    kwargs["can_channel"] = can_channel
+    kwargs["with_gripper"] = with_gripper
+    kwargs["zero_gravity_mode"] = gravity_mode
+
+    print(f"[a1z] Initialising arm  can={kwargs['can_channel']}  gripper={'yes' if kwargs['with_gripper'] else 'no'}")
+    robot = get_a1z_robot(**kwargs)
 
     server = RobotServer(robot, with_gripper=with_gripper)
 

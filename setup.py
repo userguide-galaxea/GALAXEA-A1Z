@@ -14,5 +14,6 @@ setuptools.setup(
         "numpy",
         "python-can>=4.0",
         "pin",
+        "pyyaml",
     ],
 )

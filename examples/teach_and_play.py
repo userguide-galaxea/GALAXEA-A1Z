@@ -25,6 +25,18 @@ import numpy as np
 
 from a1z.robots.arm_robot import ArmRobot
 from a1z.robots.get_robot import get_a1z_robot
+from a1z.config import add_config_argument, load_config, config_to_robot_kwargs
+
+
+def _build_robot_kwargs(args: argparse.Namespace) -> dict:
+    """Merge config file and CLI arguments into get_a1z_robot kwargs."""
+    config = load_config(args.config) if args.config else {}
+    kwargs = config_to_robot_kwargs(config)
+    if args.can is not None:
+        kwargs["can_channel"] = args.can
+    if args.with_gripper:
+        kwargs["with_gripper"] = True
+    return kwargs
 
 
 def _wait_enter(prompt: str) -> None:
@@ -33,24 +45,23 @@ def _wait_enter(prompt: str) -> None:
 
 
 def cmd_record(args: argparse.Namespace) -> None:
-    robot = get_a1z_robot(
-        can_channel=args.can,
-        zero_gravity_mode=True,
-        gravity_comp_factor=1.0,
-        with_gripper=args.with_gripper,
-    )
+    kwargs = _build_robot_kwargs(args)
+    kwargs.setdefault("zero_gravity_mode", True)
+    kwargs.setdefault("gravity_comp_factor", 1.0)
+    robot = get_a1z_robot(**kwargs)
+    with_gripper = kwargs.get("with_gripper", False)
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     print("=" * 60)
     print("  A1Z Teach — Record")
-    print(f"  CAN:        {args.can}")
+    print(f"  CAN:        {kwargs.get('can_channel', 'can0')}")
     print(f"  Sample Hz:  {args.sample_hz}")
     print(f"  Save to:    {args.file}")
-    print(f"  Gripper:    {args.with_gripper}")
+    print(f"  Gripper:    {with_gripper}")
     print("=" * 60)
 
     robot.start()
-    if args.with_gripper:
+    if with_gripper:
         robot.set_gripper_free_drive(True)
         print("[record] Arm in zero-gravity mode; gripper in free-drive (move by hand).\n")
     else:
@@ -68,7 +79,7 @@ def cmd_record(args: argparse.Namespace) -> None:
                 state = robot.get_joint_state()
                 pos_deg = np.degrees(state["pos"])
                 grip_str = ""
-                if args.with_gripper:
+                if with_gripper:
                     grip = robot.get_gripper_pos()
                     grip_str = f"  grip: {grip:.2f}"
                 print(
@@ -100,7 +111,7 @@ def cmd_record(args: argparse.Namespace) -> None:
         print("\n[record] Interrupted.")
     finally:
         if robot.is_running:
-            if args.with_gripper:
+            if with_gripper:
                 robot.set_gripper_free_drive(False)
             print("[record] Returning to zero...")
             robot.move_joints(np.zeros(6), speed=0.3)
@@ -110,21 +121,20 @@ def cmd_record(args: argparse.Namespace) -> None:
 
 
 def cmd_play(args: argparse.Namespace) -> None:
-    robot = get_a1z_robot(
-        can_channel=args.can,
-        zero_gravity_mode=False,
-        gravity_comp_factor=1.0,
-        with_gripper=args.with_gripper,
-    )
+    kwargs = _build_robot_kwargs(args)
+    kwargs.setdefault("zero_gravity_mode", False)
+    kwargs.setdefault("gravity_comp_factor", 1.0)
+    robot = get_a1z_robot(**kwargs)
+    with_gripper = kwargs.get("with_gripper", False)
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     print("=" * 60)
     print("  A1Z Teach — Play")
-    print(f"  CAN:        {args.can}")
+    print(f"  CAN:        {kwargs.get('can_channel', 'can0')}")
     print(f"  File:       {args.file}")
     print(f"  Speed:      {args.speed}x")
     print(f"  Loop:       {'yes' if args.loop else 'no'}")
-    print(f"  Gripper:    {args.with_gripper}")
+    print(f"  Gripper:    {with_gripper}")
     print("=" * 60)
 
     print(f"[play] Loading trajectory from {args.file}...")
@@ -134,7 +144,7 @@ def cmd_play(args: argparse.Namespace) -> None:
 
     expected_dofs = robot.num_dofs()
     # If playing without a gripper, ignore any recorded gripper DOF.
-    if not args.with_gripper:
+    if not with_gripper:
         trajectory = [(t, pos[:6]) for t, pos in trajectory]
 
     robot.start()
@@ -174,9 +184,10 @@ def cmd_play(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A1Z teach-and-play")
-    parser.add_argument("--can", default="can0", help="CAN channel (default: can0)")
+    parser.add_argument("--can", default=None, help="CAN channel (default: can0)")
     parser.add_argument("--with-gripper", action="store_true",
                         help="Attach the G1Z gripper (record/play 7th DOF).")
+    add_config_argument(parser)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_record = sub.add_parser("record", help="Record a trajectory and save to file")

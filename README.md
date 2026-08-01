@@ -73,7 +73,28 @@ pip install -e .
 pip install .
 ```
 
-依赖会自动安装：`numpy`、`python-can>=4.0`、`pin`（Pinocchio）。
+依赖会自动安装：`numpy`、`python-can>=4.0`、`pin`（Pinocchio）、`pyyaml`。
+
+### 配置文件（可选）
+
+仓库根目录提供了一份示例 `a1z_config.yaml`，可在其中一次性设置 CAN 通道、URDF、夹爪等参数。所有支持 `--config` 的脚本都会读取该文件，且命令行参数优先级高于配置文件。
+
+```yaml
+can_channel: can0
+control_freq_hz: 250
+gravity_comp_factor: 1.0
+zero_gravity_mode: true
+with_gripper: false
+# 使用夹爪时只需改为 true，会自动切换为 A1Z_G1Z.urdf
+```
+
+使用示例：
+
+```bash
+python examples/position_hold.py --config a1z_config.yaml --with-gripper
+python tools/a1zctl serve --config a1z_config.yaml --with-gripper
+python tools/motor_diag.py --scan --config a1z_config.yaml
+```
 
 ### 配置 CAN 总线（SocketCAN 模式）
 
@@ -579,7 +600,28 @@ pip install -e .
 pip install .
 ```
 
-Dependencies are installed automatically: `numpy`, `python-can>=4.0`, `pin` (Pinocchio).
+Dependencies are installed automatically: `numpy`, `python-can>=4.0`, `pin` (Pinocchio), `pyyaml`.
+
+### Configuration File (Optional)
+
+An example `a1z_config.yaml` is provided in the repo root. Put default robot parameters there once and reuse them across examples and tools. Command-line flags override config-file values.
+
+```yaml
+can_channel: can0
+control_freq_hz: 250
+gravity_comp_factor: 1.0
+zero_gravity_mode: true
+with_gripper: false
+# Set with_gripper: true to use A1Z_G1Z.urdf automatically
+```
+
+Example usage:
+
+```bash
+python examples/position_hold.py --config a1z_config.yaml --with-gripper
+python tools/a1zctl serve --config a1z_config.yaml --with-gripper
+python tools/motor_diag.py --scan --config a1z_config.yaml
+```
 
 ### Configure the CAN Bus (SocketCAN)
 

@@ -28,6 +28,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from a1z.robots.server import SOCKET_PATH, serve  # noqa: E402
+from a1z.config import add_config_argument
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
         can_channel=args.can,
         with_gripper=args.with_gripper,
         gravity_mode=args.gravity_mode,
+        config_path=args.config,
     )
 
 
@@ -175,6 +177,7 @@ Examples:
     sp.add_argument("--with-gripper", action="store_true", help="Enable gripper motor")
     sp.add_argument("--gravity-mode", action="store_true",
                     help="Zero-gravity float mode (default: position hold)")
+    add_config_argument(sp)
 
     # status
     sub.add_parser("status", help="Print current joint positions, velocities, torques")

@@ -43,6 +43,8 @@ from typing import Dict, List, Optional, Tuple
 import can
 import numpy as np
 
+from a1z.config import add_config_argument, load_config
+
 # ── 默认配置（与 get_robot.py 一致） ──────────────────
 
 CAN_CHANNEL = "can0"
@@ -783,25 +785,32 @@ def main():
     group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-5, 6 with --with-gripper)")
     group.add_argument("--clear-error", action="store_true", help="清除 MotorB 错误码")
 
-    parser.add_argument("--channel", default=CAN_CHANNEL, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
-    parser.add_argument("--bitrate", type=int, default=CAN_BITRATE, help=f"CAN 波特率 (默认: {CAN_BITRATE})")
+    parser.add_argument("--channel", default=None, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
+    parser.add_argument("--bitrate", type=int, default=None, help=f"CAN 波特率 (默认: {CAN_BITRATE})")
     parser.add_argument("--type", choices=["all", "motor_a", "motor_b"], default="all", help="电机类型筛选")
     parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5, 6 with --with-gripper)")
     parser.add_argument("--duration", type=float, default=5.0, help="监听时长/秒 (默认: 5)")
-    parser.add_argument("--with-gripper", action="store_true", help="包含 G1Z 夹爪电机 (joint 6)")
+    parser.add_argument("--with-gripper", action="store_true", default=None,
+                        help="包含 G1Z 夹爪电机 (joint 6)")
+    add_config_argument(parser)
 
     args = parser.parse_args()
 
+    config = load_config(args.config) if args.config else {}
+    channel = args.channel if args.channel is not None else config.get("can_channel", CAN_CHANNEL)
+    bitrate = args.bitrate if args.bitrate is not None else config.get("bitrate", CAN_BITRATE)
+    with_gripper = args.with_gripper if args.with_gripper is not None else config.get("with_gripper", False)
+
     # 确定要操作的关节
-    max_joint = 6 if args.with_gripper else 5
+    max_joint = 6 if with_gripper else 5
     if args.joints:
         joints = args.joints
     elif args.type == "motor_a":
         joints = [0, 1, 2]
     elif args.type == "motor_b":
-        joints = [3, 4, 5, 6] if args.with_gripper else [3, 4, 5]
+        joints = [3, 4, 5, 6] if with_gripper else [3, 4, 5]
     else:
-        joints = list(range(7 if args.with_gripper else 6))
+        joints = list(range(7 if with_gripper else 6))
 
     for j in joints:
         if j not in JOINT_CONFIG or j > max_joint:
@@ -815,15 +824,15 @@ def main():
 
     # check-can 不需要打开 CAN 总线
     if args.check_can:
-        print(f"\n检查 CAN 接口: {args.channel}")
-        ok, detail = check_can_interface(args.channel)
+        print(f"\n检查 CAN 接口: {channel}")
+        ok, detail = check_can_interface(channel)
         if ok:
             print(f"  [OK] {detail}")
         else:
             print(f"  [FAIL] {detail}")
             sys.exit(1)
 
-        err_info = check_can_errors(args.channel)
+        err_info = check_can_errors(channel)
         if err_info:
             print(f"\n  [WARN] {err_info}")
         else:
@@ -831,19 +840,19 @@ def main():
         return
 
     # 其余操作需要打开 CAN 总线
-    print(f"\nCAN 通道: {args.channel}  波特率: {args.bitrate}")
+    print(f"\nCAN 通道: {channel}  波特率: {bitrate}")
 
     # 先检查接口
-    ok, detail = check_can_interface(args.channel)
+    ok, detail = check_can_interface(channel)
     if not ok:
         print(f"\n[FAIL] {detail}")
         sys.exit(1)
 
     try:
-        bus = can.interface.Bus(channel=args.channel, bustype=CAN_BUSTYPE, bitrate=args.bitrate)
+        bus = can.interface.Bus(channel=channel, bustype=CAN_BUSTYPE, bitrate=bitrate)
     except Exception as e:
         print(f"\n无法打开 CAN 总线: {e}")
-        print(f"请检查: sudo ip link set {args.channel} up type can bitrate {args.bitrate}")
+        print(f"请检查: sudo ip link set {channel} up type can bitrate {bitrate}")
         sys.exit(1)
 
     try:

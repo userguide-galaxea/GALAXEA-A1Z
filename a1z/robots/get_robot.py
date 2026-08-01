@@ -84,6 +84,7 @@ def get_a1z_robot(
     default_kd: Optional[np.ndarray] = None,
     with_gripper: bool = False,
     gripper_max_torque: float = 2.0,
+    motor_a_use_new_enable_protocol: bool = False,
 ) -> ArmRobot:
     """Create and return a configured A1Z ArmRobot.
 
@@ -102,6 +103,9 @@ def get_a1z_robot(
                       A1Z_G1Z.urdf model.
         gripper_max_torque: Maximum gripping torque (Nm). Default 2.0 Nm.
                             Passed to Gripper as i_des = max_torque / 11.0.
+        motor_a_use_new_enable_protocol: If True, use the 0x7FF config-frame
+            enable/disable protocol for MotorA (for newer firmware). Default
+            False keeps the legacy per-motor 0xFC/0xFD frames.
 
     Returns:
         Configured ArmRobot instance (call .start() to begin control).
@@ -122,7 +126,12 @@ def get_a1z_robot(
 
     # Create MotorA motors
     motor_a_list = [
-        MotorA(motor_id=mid, bus=bus, ranges=_MOTOR_A_RANGES)
+        MotorA(
+            motor_id=mid,
+            bus=bus,
+            ranges=_MOTOR_A_RANGES,
+            use_new_enable_protocol=motor_a_use_new_enable_protocol,
+        )
         for mid in _MOTOR_A_IDS
     ]
 

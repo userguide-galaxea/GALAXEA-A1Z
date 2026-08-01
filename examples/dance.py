@@ -23,6 +23,7 @@ import time
 import numpy as np
 
 from a1z.robots.get_robot import get_a1z_robot
+from a1z.config import add_config_argument, load_config, config_to_robot_kwargs
 
 
 def _deg(*angles: float) -> np.ndarray:
@@ -155,7 +156,7 @@ class Dance:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A1Z dance sequence")
-    parser.add_argument("--can", default="can0", help="CAN channel.")
+    parser.add_argument("--can", default=None, help="CAN channel.")
     parser.add_argument("--speed", type=float, default=0.6,
                         help="Base movement speed in rad/s (default 0.6).")
     parser.add_argument("--gripper", action="store_true",
@@ -165,7 +166,18 @@ def main() -> None:
         default=",".join(DEFAULT_ORDER),
         help=f"Comma-separated list of moves to perform (default: {','.join(DEFAULT_ORDER)}).",
     )
+    add_config_argument(parser)
     args = parser.parse_args()
+
+    config = load_config(args.config) if args.config else {}
+    kwargs = config_to_robot_kwargs(config)
+    if args.can is not None:
+        kwargs["can_channel"] = args.can
+    if args.gripper:
+        kwargs["with_gripper"] = True
+    kwargs.setdefault("gravity_comp_factor", 1.0)
+    kwargs.setdefault("zero_gravity_mode", False)
+    with_gripper = kwargs.get("with_gripper", False)
 
     order = [m.strip() for m in args.moves.split(",") if m.strip()]
     known = set(MOVES.keys())
@@ -177,18 +189,13 @@ def main() -> None:
 
     print("=" * 50)
     print("  A1Z Dance")
-    print(f"  CAN     : {args.can}")
+    print(f"  CAN     : {kwargs.get('can_channel', 'can0')}")
     print(f"  Speed   : {args.speed} rad/s")
-    print(f"  Gripper : {'yes' if args.gripper else 'no'}")
+    print(f"  Gripper : {'yes' if with_gripper else 'no'}")
     print(f"  Moves   : {', '.join(order)}")
     print("=" * 50)
 
-    robot = get_a1z_robot(
-        can_channel=args.can,
-        gravity_comp_factor=1.0,
-        zero_gravity_mode=False,
-        with_gripper=args.gripper,
-    )
+    robot = get_a1z_robot(**kwargs)
 
     def _stop(sig, frame):
         print("\n  Ctrl+C — stopping safely...")
@@ -203,7 +210,7 @@ def main() -> None:
 
     try:
         robot.start()
-        dance = Dance(robot, base_speed=args.speed, with_gripper=args.gripper)
+        dance = Dance(robot, base_speed=args.speed, with_gripper=with_gripper)
         dance.run(order)
     except Exception as exc:
         print(f"\n  Error: {exc}")

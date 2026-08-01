@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "python-can>=4.0",
     "pin",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]

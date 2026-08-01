@@ -26,6 +26,7 @@ import time
 import numpy as np
 
 from a1z.robots.get_robot import get_a1z_robot
+from a1z.config import add_config_argument, load_config, config_to_robot_kwargs
 
 
 def parse_target_q(q_target: str, q_target_deg: str, with_gripper: bool) -> np.ndarray:
@@ -45,10 +46,10 @@ def parse_target_q(q_target: str, q_target_deg: str, with_gripper: bool) -> np.n
 
 def main():
     parser = argparse.ArgumentParser(description="A1Z position hold")
-    parser.add_argument("--gravity_factor", type=float, default=1.0,
+    parser.add_argument("--gravity_factor", type=float, default=None,
                         help="Gravity compensation scale.")
-    parser.add_argument("--freq", type=int, default=250, help="Control loop frequency (Hz).")
-    parser.add_argument("--can", default="can0", help="CAN channel.")
+    parser.add_argument("--freq", type=int, default=None, help="Control loop frequency (Hz).")
+    parser.add_argument("--can", default=None, help="CAN channel.")
     parser.add_argument("--q_target", type=str, default="",
                         help="Target joint angles (rad), comma-separated. Length=6 (or 7 with --with-gripper).")
     parser.add_argument("--q_target_deg", type=str, default="",
@@ -57,28 +58,36 @@ def main():
                         help="Movement speed (rad/s) for moving to target.")
     parser.add_argument("--with-gripper", action="store_true",
                         help="Attach the G1Z gripper (adds 7th DOF).")
+    add_config_argument(parser)
     args = parser.parse_args()
 
-    q_target = parse_target_q(args.q_target, args.q_target_deg, args.with_gripper)
+    config = load_config(args.config) if args.config else {}
+    kwargs = config_to_robot_kwargs(config)
+    if args.can is not None:
+        kwargs["can_channel"] = args.can
+    if args.gravity_factor is not None:
+        kwargs["gravity_comp_factor"] = args.gravity_factor
+    if args.freq is not None:
+        kwargs["control_freq_hz"] = args.freq
+    if args.with_gripper:
+        kwargs["with_gripper"] = True
+    with_gripper = kwargs.get("with_gripper", False)
+
+    q_target = parse_target_q(args.q_target, args.q_target_deg, with_gripper)
 
     print("=" * 60)
     print(f"  A1Z Position Hold")
-    print(f"  Gravity factor:  {args.gravity_factor}")
-    print(f"  Control freq:    {args.freq} Hz")
-    print(f"  CAN channel:     {args.can}")
-    print(f"  With gripper:    {args.with_gripper}")
+    print(f"  Gravity factor:  {kwargs.get('gravity_comp_factor', 1.0)}")
+    print(f"  Control freq:    {kwargs.get('control_freq_hz', 250)} Hz")
+    print(f"  CAN channel:     {kwargs.get('can_channel', 'can0')}")
+    print(f"  With gripper:    {with_gripper}")
     if q_target.size > 0:
         print(f"  Target (rad):    {np.round(q_target, 3)}")
         print(f"  Target (deg):    {np.round(np.degrees(q_target), 1)}")
     print("=" * 60)
 
-    robot = get_a1z_robot(
-        can_channel=args.can,
-        gravity_comp_factor=args.gravity_factor,
-        zero_gravity_mode=False,
-        control_freq_hz=args.freq,
-        with_gripper=args.with_gripper,
-    )
+    kwargs.setdefault("zero_gravity_mode", False)
+    robot = get_a1z_robot(**kwargs)
 
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
