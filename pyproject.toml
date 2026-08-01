@@ -18,6 +18,10 @@ dependencies = [
 dev = [
     "pytest",
 ]
+optimize = [
+    "optuna>=3.6",
+    "torch",
+]
 
 [tool.flit.module]
 name = "a1z"

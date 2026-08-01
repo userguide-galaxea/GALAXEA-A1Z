@@ -91,10 +91,18 @@ def build_args():
                     help="triangle-only sweep period (s); default = --period "
                          "(scan-rate diagnostic, SOP-03 §10.16)")
     ap.add_argument("--cycles", type=int, default=3)
+    ap.add_argument("--hold-pre", type=float, default=1.0,
+                    help="pre-excitation hold time (s); forwarded to runner")
+    ap.add_argument("--hold-post", type=float, default=1.5,
+                    help="post-excitation hold time (s); forwarded to runner")
     ap.add_argument("--margin-deg", type=float, default=5.0)
     ap.add_argument("--edge-rate", type=float, default=240.0)  # reserved (square slew)
     ap.add_argument("--kp", type=_parse_gains, default=None)
     ap.add_argument("--kd", type=_parse_gains, default=None)
+    ap.add_argument("--gains-file", default=None,
+                    help="Path to best_gains.json (v1 schema from BO pipeline). "
+                         "Overrides --kp/--kd with the file's gains.kp/kd vectors. "
+                         "Use for L1 validation of optimised parameters.")
     ap.add_argument("--ee-kind", default="circle", choices=["circle", "line"])
     ap.add_argument("--plane", default="xz", choices=["xy", "xz", "yz"])
     ap.add_argument("--radius", type=float, default=0.04)
@@ -118,6 +126,18 @@ def build_args():
                          "(SOP-08 K1) — the SDK reads no env var since 0584cf4.")
     ap.add_argument("--sample-hz", type=int, default=100)
     ap.add_argument("--dry-run", action="store_true")
+    # --- vel-ff feedforward (SOP-10 A2 vel-ff 口径实验) ---
+    ap.add_argument("--vel-ff", action="store_true",
+                    help="feed analytic q̇_ref velocity feedforward on the "
+                         "TRIANGLE wave (SOP-10 §1.1): matches the real teleop "
+                         "kd·(v_des−v) path so lag reflects τ_c/kp, not the "
+                         "vel=0 kd·q̇/kp term. Off (default) = vel=0 现状口径; "
+                         "square never gets vel-ff (§1.3). The resolved口径 is "
+                         "machine-recorded in meta.vel_ff.")
+    ap.add_argument("--vel-blend-s", type=float, default=0.15,
+                    help="apex velocity-crossover half-window (s) for --vel-ff; "
+                         "must be < apex_excl_s (0.55) so it never touches a fit "
+                         "sample (SOP-10 §1.2 / R2 tuning grid 0.15→0.25→0.35)")
     # --- error-integral feedforward (SOP-09 §7 mechanism-pair companion) ---
     ap.add_argument("--ki-level", default="K0", choices=["K0", "K1", "K2", "K3"],
                     help="integral level (SOP-09 §3): K0=off (default). Forwarded "
@@ -132,7 +152,29 @@ def build_args():
                     help="integral error dead-band (deg); |e|<e_db → no accumulate")
     ap.add_argument("--qd-freeze", type=float, default=0.15,
                     help="freeze threshold (rad/s); |q̇_des|>qd_freeze → no accumulate")
-    return ap.parse_args()
+    # --- continuous integral overrides (SOP-11 §7.3 / Phase B BO interface) ---
+    ap.add_argument("--t-wind-s", type=float, default=None,
+                    help="integral wind-up time override (s); None = use level default")
+    ap.add_argument("--clamp-scale", type=float, default=None,
+                    help="integral clamp_scale override (τ_I,max = clamp_scale·τ̂_c)")
+    # --- Coulomb friction feedforward (SOP-11 §7.2) ---
+    ap.add_argument("--coulomb-ff", type=str, default=None,
+                    help="Coulomb FF spec: 'hat' (use _TAU_C_HAT), 'hat:1.2' (scaled),"
+                         " or '0.3,0.4,...' (6-vector literal). None = disabled.")
+    parsed = ap.parse_args()
+
+    if parsed.gains_file:
+        from a1z.analysis.optimize.gains_io import load_gains
+        g = load_gains(parsed.gains_file)
+        if parsed.kp is not None or parsed.kd is not None:
+            ap.error("--gains-file conflicts with explicit --kp/--kd")
+        parsed.kp = ("vector", g["kp"])
+        parsed.kd = ("vector", g["kd"])
+        parsed._gains_source = g["source"]
+    else:
+        parsed._gains_source = None
+
+    return parsed
 
 
 def _parse_int_list(s):
@@ -144,15 +186,44 @@ def _parse_int_list(s):
 
 def _integral_kwargs(args) -> dict:
     """Runner kwargs for the error-integral feedforward (forwarded to factory)."""
+    overrides = {
+        "t_leak_s": args.t_leak,
+        "e_db_deg": args.e_db_deg,
+        "qd_freeze": args.qd_freeze,
+    }
+    if getattr(args, "t_wind_s", None) is not None:
+        overrides["t_wind_s"] = args.t_wind_s
+    if getattr(args, "clamp_scale", None) is not None:
+        overrides["clamp_scale"] = args.clamp_scale
     return {
         "integral_level": args.ki_level,
         "integral_joints": _parse_int_list(args.integral_joints),
-        "integral_overrides": {
-            "t_leak_s": args.t_leak,
-            "e_db_deg": args.e_db_deg,
-            "qd_freeze": args.qd_freeze,
-        },
+        "integral_overrides": overrides,
     }
+
+
+def _parse_coulomb_ff(spec: str):
+    """Parse --coulomb-ff spec -> value suitable for get_a1z_robot.
+
+    'hat'     -> bare TAU_C_HAT ndarray (legacy hard-sign)
+    'hat:1.2' -> CoulombConfig from_tau_c_hat(scale=1.2) (tanh-smoothed)
+    '0.3,0.4,0.5,0.6,0.1,0.1' -> bare ndarray literal
+    """
+    if spec is None:
+        return None
+    spec = spec.strip()
+    if spec.startswith("hat"):
+        from a1z.robots.get_robot import _TAU_C_HAT
+        if ":" in spec:
+            scale = float(spec.split(":", 1)[1])
+            from a1z.analysis.optimize.friction import CoulombConfig
+            return CoulombConfig.from_tau_c_hat(
+                np.asarray(_TAU_C_HAT), scale=scale)
+        return np.asarray(_TAU_C_HAT)
+    vals = [float(x) for x in spec.split(",")]
+    if len(vals) != 6:
+        raise ValueError(f"--coulomb-ff vector must have 6 elements, got {len(vals)}")
+    return np.asarray(vals)
 
 
 # ---------------------------------------------------------------------------
@@ -206,10 +277,14 @@ def run_joint_units(args, rundir, meta, result):
     runner = JointUnitTestRunner(
         args.can, amp_deg=args.amp_deg, margin_deg=args.margin_deg,
         period=args.period, period_triangle=args.period_triangle,
-        cycles=args.cycles, waves=waves,
+        cycles=args.cycles, hold_pre=args.hold_pre, hold_post=args.hold_post,
+        waves=waves,
         edge_rate_deg_s=args.edge_rate,
+        vel_ff=args.vel_ff, vel_blend_s=args.vel_blend_s,
         sample_hz=args.sample_hz, transit_speed_deg_s=args.transit_speed,
-        inter_cmd_gap_us=args.gap_us, **_integral_kwargs(args))
+        inter_cmd_gap_us=args.gap_us,
+        coulomb_ff=_parse_coulomb_ff(args.coulomb_ff),
+        **_integral_kwargs(args))
     unit = {}
     failed = []
     try:
@@ -360,6 +435,37 @@ def run_ee(args, rundir, meta, result, *, dry_run: bool):
                         live["q_ref"], live["q_resp"], notes)
 
 
+def _vel_ff_meta(args) -> dict:
+    """Machine-record the vel-ff口径 for this run (SOP-10 §1.1 I4).
+
+    Always written so the口径 is queryable even when disabled (K1 教训, SOP-08
+    §2.1). When enabled, ``max_abs_rad_s`` is the analytic peak |q̇_ref| actually
+    reachable this run (per-joint triangle slope 2·(hi−lo)/period, the §1.3
+    upper-bound quantity) — computed offline, so dry runs carry it too.
+    """
+    enabled = bool(args.vel_ff)
+    tri_period = (args.period_triangle if args.period_triangle is not None
+                  else args.period)
+    max_abs = None
+    if enabled and args.mode in ("joint", "joints", "all"):
+        from a1z.analysis.signals import WaveTrajectory
+        vmax = 0.0
+        for j1 in _joints_for_mode(args):
+            tr = WaveTrajectory(np.zeros(6), j1 - 1, "triangle",
+                                amp_deg=args.amp_deg, margin_deg=args.margin_deg,
+                                period=tri_period, cycles=args.cycles,
+                                vel_blend_s=args.vel_blend_s)
+            vmax = max(vmax, tr.max_abs_vel)
+        max_abs = round(vmax, 4)
+    return {
+        "enabled": enabled,
+        "waves": ["triangle"],
+        "blend_s": args.vel_blend_s,
+        "max_abs_rad_s": max_abs,
+        "source": "analytic-ref",
+    }
+
+
 def build_meta(args) -> dict:
     # Machine-record the CAN pacing gap per run (SOP-08 K1): resolve --gap-us
     # through the same helper the robot factory uses, so meta carries the value
@@ -388,6 +494,7 @@ def build_meta(args) -> dict:
                          "kd": args.kd[1].tolist() if args.kd and args.kd[0] == "vector"
                          else (args.kd[1] if args.kd else None)},
             "applied": {},
+            "gains_source": args._gains_source,
         },
         "safety": {
             "safe_ranges_deg": {f"J{j}": list(v) for j, v in safety.SAFE_RANGES_DEG.items()},
@@ -401,9 +508,13 @@ def build_meta(args) -> dict:
                        "period_triangle_s": (args.period_triangle
                                               if args.period_triangle is not None
                                               else args.period),
-                       "cycles": args.cycles, "edge_rate_deg_s": args.edge_rate},
+                       "cycles": args.cycles,
+                       "hold_pre_s": args.hold_pre,
+                       "hold_post_s": args.hold_post,
+                       "edge_rate_deg_s": args.edge_rate},
         "metrics_v2": {"jump_eps_deg": args.jump_eps, "k_sigma": args.k_sigma,
                        "apex_excl_s": args.apex_excl_s},
+        "vel_ff": _vel_ff_meta(args),
         "integral": {
             # Intent from CLI; `effective` is overwritten with the live per-joint
             # readback from get_robot_info() at robot start (SOP-09 P0-4 / §7).

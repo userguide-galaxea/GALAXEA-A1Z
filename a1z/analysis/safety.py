@@ -38,7 +38,8 @@ SAFE_RANGES_DEG = {
 # waveform low point) self-collides on hardware (2026-07-18); pre-positioning
 # J2/J3/J4 clears the arm first. See SOP-03 §3.1 / §10.11.
 PRECONDITIONS_DEG = {
-    2: {4: -40.0},
+    2: {3: -20.0, 4: -40.0},
+    4: {3: -20.0},
     5: {2: 20.0, 3: -20.0, 4: 0.0},
     6: {2: 20.0, 3: -20.0, 4: 0.0},
 }

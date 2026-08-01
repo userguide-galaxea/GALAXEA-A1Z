@@ -41,7 +41,8 @@ class _Base:
                  inter_cmd_gap_us: Optional[float] = None,
                  integral_level: str = "K0",
                  integral_joints: Optional[list] = None,
-                 integral_overrides: Optional[dict] = None):
+                 integral_overrides: Optional[dict] = None,
+                 coulomb_ff=None):
         # Cross-check the mirrored SDK limits against the live constant so a
         # future SDK edit can't silently desync the safety gate.
         safety.assert_matches_sdk_limits(_JOINT_LIMITS)
@@ -59,6 +60,9 @@ class _Base:
         self.integral_level = integral_level
         self.integral_joints = integral_joints
         self.integral_overrides = integral_overrides
+        # Coulomb friction feedforward: ndarray (legacy hard-sign) or
+        # CoulombConfig (tanh-smoothed, SOP-11 §7.2).  None = disabled.
+        self.coulomb_ff = coulomb_ff
         # Robot/CAN bus are created lazily in start() so offline paths
         # (dry-run gate, IK solve) never open the bus.
         self.robot = None
@@ -72,7 +76,8 @@ class _Base:
                                    inter_cmd_gap_us=self.inter_cmd_gap_us,
                                    integral_level=self.integral_level,
                                    integral_joints=self.integral_joints,
-                                   integral_overrides=self.integral_overrides)
+                                   integral_overrides=self.integral_overrides,
+                                   coulomb_ff=self.coulomb_ff)
         self.robot.start()
         self._started = True
 
@@ -85,6 +90,14 @@ class _Base:
                     self.robot._bus.shutdown()
                 except Exception:
                     pass
+        elif self.robot is not None:
+            # robot.start() may have raised after opening the bus (e.g.
+            # incomplete startup feedback) — still close the CAN interface so
+            # the OS does not warn "SocketcanBus was not properly shut down".
+            try:
+                self.robot._bus.shutdown()
+            except Exception:
+                pass
         self._started = False
 
     def effective_gains(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -176,7 +189,8 @@ class _Base:
             print(f"[runner] return_to_zero skipped: {e}")
 
     # --- streaming excitation/tracking (records only this segment) ---
-    def stream(self, sample_fn, duration: float, kp: np.ndarray, kd: np.ndarray
+    def stream(self, sample_fn, duration: float, kp: np.ndarray, kd: np.ndarray,
+               vel_fn=None, watchdog=None,
                ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Stream ``sample_fn(t)->(6,)`` at sample_hz for ``duration`` seconds.
 
@@ -188,6 +202,23 @@ class _Base:
         command-path discriminator (SOP-03 §5.4): during a stall, eff ramping
         up means the motor is fighting friction/contact; eff≈0 means the
         command never produced torque (CAN delivery / gain latch).
+
+        ``vel_fn``: optional ``vel_fn(t)->(6,)`` velocity feedforward q̇_ref
+        (SOP-10 §1.1 I2). When None (default) the commanded velocity stays
+        ``_ZERO6`` every tick — this path is byte-for-byte the pre-vel-ff
+        behaviour (the only opt-in switch that changes what the follower sees,
+        devlog Q7). When given, ``js['vel']`` is refreshed each tick so the
+        follower's ``kd·(v_des−v)`` term tracks the reference slope, matching
+        the real teleop通路.
+
+        ``watchdog``: optional object with
+        ``check(t, ref, resp, eff, *, vel=None) -> (ok, reason)``.  When
+        ``ok`` is False the stream breaks immediately (SOP-11 §4.1). The
+        watchdog records its trip state internally (``wd.tripped`` /
+        ``wd.reason``); the caller inspects it after ``stream()`` returns.
+        Measured joint velocity is passed as the ``vel`` keyword when the
+        watchdog accepts it.  Default ``None`` preserves byte-identical
+        behaviour for existing callers.
         """
         t_buf: List[float] = []
         ref_buf: List[np.ndarray] = []
@@ -205,12 +236,22 @@ class _Base:
                 break
             q_ref = np.asarray(sample_fn(t), dtype=float)[:6]
             js["pos"] = q_ref
+            if vel_fn is not None:
+                js["vel"] = np.asarray(vel_fn(t), dtype=float)[:6]
             self.robot.command_joint_state(js)
             st = self.robot.get_joint_state()  # copies under one state lock
             t_buf.append(t)
             ref_buf.append(q_ref)
             resp_buf.append(st["pos"][:6])
             eff_buf.append(st["eff"][:6])
+            if watchdog is not None:
+                wd_ok, wd_reason = watchdog.check(
+                    t, q_ref, st["pos"][:6], st["eff"][:6],
+                    vel=st.get("vel", _ZERO6)[:6],
+                )
+                if not wd_ok:
+                    print(f"[runner] stream aborted: watchdog {wd_reason}")
+                    break
             time.sleep(max(0.0, self.dt - (time.monotonic() - tick)))
         return (np.array(t_buf), np.array(ref_buf), np.array(resp_buf),
                 np.array(eff_buf))
@@ -224,6 +265,7 @@ class JointUnitTestRunner(_Base):
                  period_triangle: float | None = None, cycles: int = 3,
                  hold_pre: float = 1.0, hold_post: float = 1.5,
                  edge_rate_deg_s: float = 240.0, waves=("square", "triangle"),
+                 vel_ff: bool = False, vel_blend_s: float = 0.15,
                  **base_kw):
         super().__init__(can_channel, **base_kw)
         self.amp_deg = amp_deg
@@ -240,6 +282,11 @@ class JointUnitTestRunner(_Base):
         self.hold_post = hold_post
         self.edge_rate_deg_s = edge_rate_deg_s
         self.waves = tuple(waves)
+        # vel-ff (SOP-10): opt-in analytic q̇_ref feedforward, TRIANGLE only
+        # (square slew ≈240°/s would blow the 4.0 rad/s cap, §1.3). vel_blend_s
+        # is threaded into every WaveTrajectory so the apex crossover is smooth.
+        self.vel_ff = bool(vel_ff)
+        self.vel_blend_s = vel_blend_s
 
     def run_joint(self, joint1: int) -> Dict[str, dict]:
         """Excite joint ``joint1`` (1-based). Returns {wave: {t, ref, resp}}.
@@ -260,7 +307,8 @@ class JointUnitTestRunner(_Base):
                                       margin_deg=self.margin_deg, period=_period_for(name),
                                       cycles=self.cycles, hold_pre=self.hold_pre,
                                       hold_post=self.hold_post,
-                                      edge_rate_deg_s=self.edge_rate_deg_s)
+                                      edge_rate_deg_s=self.edge_rate_deg_s,
+                                      vel_blend_s=self.vel_blend_s)
                  for name in self.waves}
         q_start = trajs[self.waves[0]].q_start
         pre = safety.PRECONDITIONS_DEG.get(joint1, {})
@@ -281,9 +329,17 @@ class JointUnitTestRunner(_Base):
             # Excitation segment(s).
             for name in self.waves:
                 tr = trajs[name]
+                # vel-ff派发 (SOP-10 §1.1 I3): TRIANGLE only, and only when the
+                # runner was built with vel_ff=True. square never gets a vel_fn
+                # (its ~240°/s slew would exceed the 4.0 rad/s cap — code-level
+                # written here, not a convention, §1.3). None → vel=0 (现状口径).
+                vel_fn = (tr.sample_vel
+                          if (self.vel_ff and name == "triangle") else None)
+                vtag = "  vel-ff" if vel_fn is not None else ""
                 print(f"[J{joint1}] excite {name} ({tr.duration:.1f}s, gains "
-                      f"kp[{j}]={kp[j]:.1f} kd[{j}]={kd[j]:.2f})")
-                t, ref, resp, eff = self.stream(tr.sample, tr.duration, kp, kd)
+                      f"kp[{j}]={kp[j]:.1f} kd[{j}]={kd[j]:.2f}){vtag}")
+                t, ref, resp, eff = self.stream(tr.sample, tr.duration, kp, kd,
+                                                vel_fn=vel_fn)
                 out[name] = dict(t=t, ref=ref, resp=resp, eff=eff, traj=tr)
                 # brief settle between waves at low point
                 if len(self.waves) > 1:

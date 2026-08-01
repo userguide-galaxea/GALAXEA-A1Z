@@ -150,6 +150,7 @@ class ArmRobot:
         min_freq_hz: float = 80.0,
         motor_a_kt: float = 2.8,
         integral_config: Optional[IntegralConfig] = None,
+        coulomb_ff: Optional[np.ndarray] = None,
         # --- runtime safety (P0) ---
         runtime_limit_buffer_rad: float = 0.15,
         vel_limit: Optional[np.ndarray] = None,
@@ -189,6 +190,19 @@ class ArmRobot:
             else None
         )
         self._last_tau_i = np.zeros(num_joints)
+
+        # --- Coulomb friction feedforward (S1; None = disabled) ---
+        # Accepts either a bare ndarray (legacy hard-sign path) or a
+        # CoulombConfig object (tanh-smoothed, SOP-11 §7.2).
+        from a1z.analysis.optimize.friction import CoulombConfig as _CoulombCfg
+        if isinstance(coulomb_ff, _CoulombCfg):
+            self._coulomb_config: Optional[_CoulombCfg] = coulomb_ff
+            self._coulomb_ff: Optional[np.ndarray] = None
+        else:
+            self._coulomb_config = None
+            self._coulomb_ff: Optional[np.ndarray] = (
+                np.asarray(coulomb_ff, dtype=float) if coulomb_ff is not None else None
+            )
 
         self._state = JointState(
             pos=np.zeros(num_joints),
@@ -414,7 +428,28 @@ class ArmRobot:
                 time.sleep(0.05)
 
                 self._read_state()
-                self._require_complete_startup_feedback()
+                # MotorA joints (J1–J3) answer the zero-gain probe in ~11–15 ms
+                # each, but on a busy or just-recovered bus a single probe can
+                # be dropped or arrive after the fixed 50 ms wait (observed
+                # 2026-07-30: joint3=missing on an otherwise healthy bus, see
+                # devlog 2026-07-30 §1). Retry probe+read like the motor-error
+                # retry below before declaring startup failure.
+                for _attempt in range(4):
+                    try:
+                        self._require_complete_startup_feedback()
+                        break
+                    except RuntimeError:
+                        if _attempt == 3:
+                            raise
+                        logger.info(
+                            "Startup feedback incomplete, re-probing "
+                            f"(attempt {_attempt + 2}/4)..."
+                        )
+                        self._motor_chain.send_commands(
+                            zeros, zeros, zeros, probe_kd, zeros,
+                        )
+                        time.sleep(0.1)
+                        self._read_state()
                 # Fresh feedback alone is not enough to admit closed-loop
                 # gains: reject a motor that already reports disabled/faulted,
                 # over-temperature, or implausible velocity.
@@ -1003,6 +1038,12 @@ class ArmRobot:
             "joint_limits": self._joint_limits,
             "gravity_comp_factor": self.gravity_comp_factor,
             "control_freq_hz": self._control_freq_hz,
+            "coulomb_ff": (
+                self._coulomb_config.as_info()
+                if self._coulomb_config is not None
+                else (self._coulomb_ff.tolist() if self._coulomb_ff is not None
+                      else None)
+            ),
             "integral": (
                 self._integral_config.as_info()
                 if self._integral_config is not None
@@ -2040,9 +2081,21 @@ class ArmRobot:
             )
 
         tau_id_scaled = tau_id * self._gravity_torque_scale
+
+        # Coulomb friction feedforward (S1): two paths —
+        # CoulombConfig (tanh-smoothed) or bare ndarray (hard sign, legacy).
+        tau_c = np.zeros(self._num_joints)
+        if not self._estop_latch.is_set():
+            if self._coulomb_config is not None:
+                tau_c = self._coulomb_config.compute_tau(cmd.vel)
+            elif self._coulomb_ff is not None:
+                e = cmd.pos - q
+                tau_c = np.sign(e) * self._coulomb_ff
+
         torques_urdf = (
             cmd.torque_ff
             + tau_i
+            + tau_c
             + tau_id_scaled * self.gravity_comp_factor
         )
         motor_torques = np.clip(

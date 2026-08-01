@@ -28,6 +28,13 @@ from a1z.analysis.safety import (
 
 DEG = 180.0 / math.pi
 
+# Hard commanded-velocity ceiling, mirrored from
+# ``a1z.robots.arm_robot._MAX_CMD_VEL_RAD_S`` (kept as a literal so this stays a
+# pure-numpy module — importing arm_robot would pull in ``can``). ``sample_vel``
+# asserts against it as a second line of defence: the analytic triangle slope is
+# ≤0.53 rad/s (§1.3), well under this, so a hit here means a config/logic bug.
+_MAX_CMD_VEL_RAD_S = 4.0
+
 
 # ---------------------------------------------------------------------------
 # Joint excitation: square / triangle in a safe absolute window
@@ -61,6 +68,7 @@ class WaveTrajectory:
         hold_pre: float = 1.0,
         hold_post: float = 1.5,
         edge_rate_deg_s: float = 240.0,
+        vel_blend_s: float = 0.15,
     ):
         if kind not in ("square", "triangle"):
             raise ValueError(f"unknown wave kind: {kind}")
@@ -76,6 +84,11 @@ class WaveTrajectory:
         self.hold_pre = float(hold_pre)
         self.hold_post = float(hold_post)
         self.edge_rate = math.radians(edge_rate_deg_s)   # square slew cap (rad/s)
+        # Apex-crossing half-window over which the vel-ff channel ramps linearly
+        # through/toward zero (SOP-10 §1.2). Must stay inside the metric apex
+        # exclusion window (apex_excl_s=0.55 s) so the crossover never touches a
+        # fit sample; also < period/4 so adjacent blend windows don't overlap.
+        self.vel_blend_s = float(vel_blend_s)
 
         q = np.asarray(q0, dtype=float).copy()[:6]
         for pj1, deg in PRECONDITIONS_DEG.get(j1, {}).items():
@@ -123,6 +136,74 @@ class WaveTrajectory:
         q = self.q_start.copy()
         q[self.j] = self._val(t)
         return q
+
+    @property
+    def max_abs_vel(self) -> float:
+        """Analytic peak |q̇_ref| of the excited joint (rad/s).
+
+        For a triangle the slope is the piecewise constant
+        ``s = 2·(hi−lo)/period``; the apex blend only ever lowers |v| toward
+        zero, so ``s`` is the exact upper bound. Meaningful only for triangles
+        (square vel-ff is disabled, §1.3)."""
+        return 2.0 * (self.hi - self.lo) / self.period
+
+    def _vel_val(self, t: float) -> float:
+        """Scalar analytic velocity of the excited joint (rad/s) at time ``t``.
+
+        Triangle only. The raw velocity is piecewise constant ``±s`` inside the
+        excitation window and 0 in the holds, stepping by ``2s`` at every apex
+        (multiples of ``period/2`` in wave-relative time) and by ``±s`` where the
+        wave enters/leaves the holds. Within ``±vel_blend_s`` of each such
+        transition the value ramps LINEARLY between the two neighbouring segment
+        constants — so a sign-flip apex crosses through zero and the wave
+        start/end eases in/out of the hold — instead of a ``2s`` step that the
+        motor's ``kd·Δv`` term would turn into a torque slam (SOP-10 §1.2).
+        """
+        if self.kind != "triangle":
+            raise ValueError(
+                f"sample_vel is triangle-only; vel-ff is disabled for "
+                f"'{self.kind}' (slew ≈240°/s > {_MAX_CMD_VEL_RAD_S} rad/s, "
+                f"SOP-10 §1.3)")
+        span = self.cycles * self.period
+        half = self.period / 2.0
+        s = self.max_abs_vel
+        blend = self.vel_blend_s
+        tt = t - self.hold_pre
+
+        def raw(x: float) -> float:
+            # Piecewise-constant analytic slope at wave-relative time ``x``.
+            if x <= 0.0 or x >= span:
+                return 0.0
+            ph = (x % self.period) / self.period
+            return s if ph < 0.5 else -s
+
+        # Nearest transition (k·half for k=0..2·cycles); blend if within window.
+        if half > 0.0 and blend > 0.0:
+            k = round(tt / half)
+            t_j = k * half
+            if 0.0 <= t_j <= span and abs(tt - t_j) < blend:
+                v0 = raw(t_j - blend)          # left segment constant
+                v1 = raw(t_j + blend)          # right segment constant
+                frac = (tt - (t_j - blend)) / (2.0 * blend)
+                return v0 + (v1 - v0) * frac
+        return raw(tt)
+
+    def sample_vel(self, t: float) -> np.ndarray:
+        """Full (6,) canonical velocity feedforward q̇_ref at time ``t`` (rad/s).
+
+        The excited joint carries its analytic (apex-blended) slope; the other
+        five joints are held at fixed preset angles, so their feedforward is 0.
+        This is the time-derivative of :meth:`sample` on the excited channel
+        (verified pointwise offline, SOP-10 §1.4) — feeding it as vel-ff makes
+        the joint dynamic-response test share the follower MIT controller's
+        ``kd·(v_des−v)`` path with real teleop (TeleopBridge sends q̇ too)."""
+        v = np.zeros(6)
+        vj = self._vel_val(t)
+        assert abs(vj) <= _MAX_CMD_VEL_RAD_S, (
+            f"sample_vel J{self.j + 1} |v|={vj:.3f} exceeds "
+            f"{_MAX_CMD_VEL_RAD_S} rad/s (kind={self.kind}, period={self.period})")
+        v[self.j] = vj
+        return v
 
 
 def make_wave(kind: str, q0: np.ndarray, joint: int, **kw) -> WaveTrajectory:
@@ -261,9 +342,10 @@ if __name__ == "__main__":  # tiny smoke print
     for kind in ("square", "triangle"):
         for j in range(6):
             w = make_wave(kind, q0, joint=j)
+            vtxt = (f"  vmax={w.max_abs_vel:.3f}rad/s" if kind == "triangle" else "")
             print(f"{kind:8s} J{j + 1} dur={w.duration:5.1f}s  "
                   f"wave=[{w.lo * DEG:+6.1f},{w.hi * DEG:+6.1f}]deg  "
-                  f"start={np.round(w.q_start * DEG, 1)}")
+                  f"start={np.round(w.q_start * DEG, 1)}{vtxt}")
     print("=== ee trajectories (anchor = identity @ [0.4,0,0.3]) ===")
     T = np.eye(4); T[:3, 3] = [0.4, 0.0, 0.3]
     for kind in ("circle", "line"):
