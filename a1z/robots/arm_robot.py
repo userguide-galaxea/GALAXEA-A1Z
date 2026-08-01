@@ -12,6 +12,7 @@ import numpy as np
 
 from a1z.dynamics.gravity_model import GravityModel
 from a1z.motor_drivers.motor_b_driver import MixedMotorChain
+from a1z.robots.gripper import Gripper
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class ArmRobot:
         default_kp: Optional[np.ndarray] = None,
         default_kd: Optional[np.ndarray] = None,
         joint_limits: Optional[List[Tuple[float, float]]] = None,
+        gripper: Optional[Gripper] = None,
         control_freq_hz: int = 250,
         min_freq_hz: float = 80.0,
         motor_a_kt: float = 2.8,
@@ -104,6 +106,7 @@ class ArmRobot:
         self._default_kp = default_kp if default_kp is not None else np.array([30.0, 30.0, 30.0, 20.0, 5.0, 5.0])
         self._default_kd = default_kd if default_kd is not None else np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])
         self._joint_limits = joint_limits
+        self.gripper: Optional[Gripper] = gripper
         self._control_freq_hz = control_freq_hz
         self._control_period_s = 1.0 / control_freq_hz
         self._min_freq_hz = min_freq_hz
@@ -132,6 +135,8 @@ class ArmRobot:
         self._record_last_t: float = 0.0
         self._record_period: float = 1.0 / 50.0
 
+        self._gripper_free_drive: bool = False
+
         self._last_clip_warn_t: float = 0.0
 
         # --- runtime safety state ---
@@ -158,7 +163,7 @@ class ArmRobot:
         self._last_limit_warn_t: float = 0.0
 
     def num_dofs(self) -> int:
-        return self._num_joints
+        return self._num_joints + (1 if self.gripper is not None else 0)
 
     def start(
         self,
@@ -173,6 +178,11 @@ class ArmRobot:
         """
         logger.info("Enabling motors...")
         self._motor_chain.enable_all()
+        if self.gripper is not None:
+            self.gripper.enable()
+            self.gripper.home()
+            # Route gripper CAN feedback through drain_and_update so last_feedback stays fresh.
+            self._motor_chain.register_external_motor(self.gripper._motor)
 
         # MotorA does not return feedback on enable alone — it needs at least one
         # MIT command first.  Send a zero-gain probe (kp=0, tiny kd, zero torque)
@@ -231,7 +241,42 @@ class ArmRobot:
         # Safety net: disable again from main thread in case the control thread
         # was killed before its own disable_all() completed (e.g. join timeout).
         self._motor_chain.disable_all()
+        if self.gripper is not None:
+            self.gripper.disable()
         logger.info("All motors disabled.")
+
+    def command_gripper(self, value: float) -> None:
+        """Set gripper target position.
+
+        Args:
+            value: Normalized position in [0.0, 1.0]. 0.0 = closed, 1.0 = fully open.
+
+        Raises:
+            RuntimeError: If no gripper was attached at construction.
+        """
+        if self.gripper is None:
+            raise RuntimeError("No gripper attached. Pass gripper= to get_a1z_robot().")
+        if self._estop_latch.is_set():
+            logger.warning("command_gripper rejected: robot is in estop")
+            return
+        self.gripper.command(value)
+
+    def get_gripper_pos(self) -> Optional[float]:
+        """Return current commanded gripper position [0.0=closed, 1.0=fully open], or None if no gripper."""
+        if self.gripper is None:
+            return None
+        return self.gripper.get_pos()
+
+    def set_gripper_free_drive(self, enabled: bool) -> None:
+        """Toggle gripper free-drive (zero-torque) mode for hand teaching.
+
+        When enabled, the control loop sends gripper.free_drive_step() instead
+        of step(), so the jaw produces no torque and the operator can open/close
+        it manually while feedback continues to stream.
+        """
+        if self.gripper is None:
+            return
+        self._gripper_free_drive = bool(enabled)
 
     def _accept_or_reject_stream(
         self, pos: np.ndarray
@@ -254,18 +299,33 @@ class ArmRobot:
         return self._clip_joint_pos(pos)
 
     def command_joint_pos(self, pos: np.ndarray) -> None:
-        """Set target joint angles (rad) with default PD gains."""
+        """Set target joint angles (rad) with default PD gains.
+
+        Accepts either a 6-element arm-only array or a 7-element array where
+        pos[6] is the gripper normalized position in [0.0, 1.0].
+        """
         if self._estop_latch.is_set():
             logger.warning("command_joint_pos rejected: robot is in estop")
             return
-        arm_pos = self._accept_or_reject_stream(pos[:self._num_joints])
-        if arm_pos is None:
-            return
-        with self._command_lock:
-            self._command.pos = arm_pos.copy()
-            self._command.kp = self._default_kp.copy()
-            self._command.kd = self._default_kd.copy()
-            self._command.torque_ff = np.zeros(self._num_joints)
+        if self.gripper is not None and len(pos) == self._num_joints + 1:
+            arm_pos = self._accept_or_reject_stream(pos[:self._num_joints])
+            if arm_pos is None:
+                return
+            with self._command_lock:
+                self._command.pos = arm_pos.copy()
+                self._command.kp = self._default_kp.copy()
+                self._command.kd = self._default_kd.copy()
+                self._command.torque_ff = np.zeros(self._num_joints)
+            self.gripper.command(float(np.clip(pos[self._num_joints], 0.0, 1.0)))
+        else:
+            arm_pos = self._accept_or_reject_stream(pos[:self._num_joints])
+            if arm_pos is None:
+                return
+            with self._command_lock:
+                self._command.pos = arm_pos.copy()
+                self._command.kp = self._default_kp.copy()
+                self._command.kd = self._default_kd.copy()
+                self._command.torque_ff = np.zeros(self._num_joints)
 
     def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> None:
         """Set target joint state.
@@ -320,7 +380,10 @@ class ArmRobot:
 
     def get_joint_pos(self) -> np.ndarray:
         with self._state_lock:
-            return self._state.pos.copy()
+            arm_pos = self._state.pos.copy()
+        if self.gripper is not None:
+            return np.append(arm_pos, self.gripper.get_feedback_norm())
+        return arm_pos
 
     def get_joint_state(self) -> Dict[str, np.ndarray]:
         with self._state_lock:
@@ -335,7 +398,7 @@ class ArmRobot:
 
     def get_observations(self) -> Dict[str, np.ndarray]:
         state = self.get_joint_state()
-        return {
+        obs: Dict[str, np.ndarray] = {
             "joint_pos": state["pos"],
             "joint_vel": state["vel"],
             "joint_eff": state["eff"],
@@ -343,6 +406,9 @@ class ArmRobot:
             "joint_temp_mos": state["temp_mos"],
             "joint_temp_rotor": state["temp_rotor"],
         }
+        if self.gripper is not None:
+            obs["gripper_pos"] = np.array([self.gripper.get_feedback_norm()])
+        return obs
 
     def get_robot_info(self) -> Dict[str, Any]:
         return {
@@ -370,10 +436,10 @@ class ArmRobot:
         measured position. Gravity compensation keeps running so the arm
         does not collapse under load.
 
-        Subsequent command_joint_pos / command_joint_state calls are silently
-        rejected until :meth:`release` is called. An in-flight
-        :meth:`move_joints` exits its interpolation loop on the next step
-        and returns early.
+        Subsequent command_joint_pos / command_joint_state / command_gripper
+        calls are silently rejected until :meth:`release` is called. An
+        in-flight :meth:`move_joints` exits its interpolation loop on the
+        next step and returns early.
         """
         if self._estop_latch.is_set():
             return
@@ -415,9 +481,10 @@ class ArmRobot:
     ) -> None:
         """Smoothly interpolate to target position at the given speed (rad/s).
 
-        Blocks until the target is reached or close enough.
-        Uses minimum-jerk (5th-order polynomial) interpolation so velocity and
-        acceleration are zero at both endpoints, eliminating start/stop jolts.
+        Accepts either a 6-element arm-only array or a 7-element array where
+        target_pos[6] is the gripper normalized position in [0.0, 1.0].
+        Gripper command is applied immediately; arm interpolation runs at speed.
+        Blocks until the arm target is reached or close enough.
 
         Args:
             target_pos: Target joint angles (rad). Must be within joint limits
@@ -445,11 +512,15 @@ class ArmRobot:
                 f"move_joints speed {speed:.2f} rad/s exceeds feedforward "
                 f"cap: peak vel {speed * 1.875:.2f} > {_MAX_CMD_VEL_RAD_S} rad/s"
             )
+        gripper_target: Optional[float] = None
+        if self.gripper is not None and len(target_pos) == self._num_joints + 1:
+            gripper_target = float(np.clip(target_pos[self._num_joints], 0.0, 1.0))
+            target_pos = target_pos[:self._num_joints]
 
         target_pos = self._validate_joint_pos(target_pos)
         # Safety check uses the *measured* position — this is what max_jump_rad
         # actually protects (e.g. catching elbow-flipped IK against reality).
-        measured_pos = self.get_joint_pos()
+        measured_pos = self.get_joint_pos()[:self._num_joints]
 
         if max_jump_rad is not None:
             jumps = np.abs(target_pos - measured_pos)
@@ -472,6 +543,9 @@ class ArmRobot:
 
         kp = kp if kp is not None else self._default_kp
         kd = kd if kd is not None else self._default_kd
+
+        if gripper_target is not None:
+            self.gripper.command(gripper_target)
 
         max_dist = np.max(np.abs(target_pos - current_pos))
         if max_dist < 0.001:
@@ -514,6 +588,21 @@ class ArmRobot:
             self._command.vel = np.zeros(self._num_joints)
             self._command.acc = np.zeros(self._num_joints)
 
+    def set_gravity_mode(self, enabled: bool) -> None:
+        """Switch between zero-gravity (floating) and position-hold mode.
+
+        In zero-gravity mode kp=0 so the arm follows gravity compensation only.
+        In position-hold mode the default PD gains are restored.
+        """
+        with self._command_lock:
+            if enabled:
+                self._command.kp = np.zeros(self._num_joints)
+                self._command.kd = self._default_kd.copy() * 0.5
+            else:
+                self._command.kp = self._default_kp.copy()
+                self._command.kd = self._default_kd.copy()
+        self.zero_gravity_mode = enabled
+
     def start_recording(self, sample_hz: int = 50) -> None:
         """Start recording joint positions (during gravity-comp teaching).
 
@@ -553,6 +642,9 @@ class ArmRobot:
         speed_factor: float = 1.0,
     ) -> None:
         """Play back a recorded trajectory.
+
+        Switches to position-hold mode for the duration of playback.  After
+        the last waypoint the arm stays at that position under PD control.
 
         Args:
             trajectory: List of (timestamp_s, joint_positions_rad) as returned
@@ -625,6 +717,8 @@ class ArmRobot:
                 logger.error(f"Control loop error: {e}")
                 logger.error("Emergency stop!")
                 self._motor_chain.disable_all()
+                if self.gripper is not None:
+                    self.gripper.disable()
                 self._running = False
                 return
 
@@ -649,6 +743,8 @@ class ArmRobot:
                             f"{consecutive_slow * _FREQ_CHECK_INTERVAL:.0f}s — emergency stop!"
                         )
                         self._motor_chain.disable_all()
+                        if self.gripper is not None:
+                            self.gripper.disable()
                         self._running = False
                         return
                 else:
@@ -671,6 +767,11 @@ class ArmRobot:
         except Exception:
             pass
         self._motor_chain.disable_all()
+        if self.gripper is not None:
+            try:
+                self.gripper.disable()
+            except Exception:
+                pass
         self._running = False
 
     def _update(self) -> None:
@@ -689,6 +790,8 @@ class ArmRobot:
         if self._recording and t_now - self._record_last_t >= self._record_period:
             with self._state_lock:
                 pos_snap = self._state.pos.copy()
+            if self.gripper is not None:
+                pos_snap = np.append(pos_snap, self.gripper.get_feedback_norm())
             with self._record_lock:
                 if self._recording:
                     self._record_buffer.append((t_now, pos_snap))
@@ -748,6 +851,13 @@ class ArmRobot:
             kd=cmd.kd,
             torque=motor_torques,
         )
+
+        # 7) Send gripper command (independent of arm gravity comp)
+        if self.gripper is not None:
+            if self._gripper_free_drive:
+                self.gripper.free_drive_step()
+            else:
+                self.gripper.step()
 
     def _read_state(self) -> None:
         """Read all motor feedback and update internal state."""

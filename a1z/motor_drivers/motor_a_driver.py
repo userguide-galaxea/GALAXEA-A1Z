@@ -96,23 +96,45 @@ class MotorA:
         motor_id: int,
         bus: can.BusABC,
         ranges: Optional[MotorARanges] = None,
+        use_new_enable_protocol: bool = False,
     ):
         self.motor_id = motor_id
         self.bus = bus
         self.ranges = ranges or MotorARanges()
         self.last_feedback: Optional[MotorAFeedback] = None
+        self.use_new_enable_protocol = use_new_enable_protocol
 
     def enable(self) -> None:
-        """Send motor enable command (0xFC)."""
-        data = bytes([0xFF] * 7 + [0xFC])
-        msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
+        """Send motor enable command.
+
+        Defaults to the legacy per-motor 0xFC frame for backward compatibility.
+        Pass ``use_new_enable_protocol=True`` to use the 0x7FF config frame
+        (required by newer MotorA firmware).
+        """
+        if self.use_new_enable_protocol:
+            mid = self.motor_id
+            data = bytes([(mid >> 8) & 0xFF, mid & 0xFF, 0x00, 0x01])
+            msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
+        else:
+            data = bytes([0xFF] * 7 + [0xFC])
+            msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
         self.bus.send(msg)
         time.sleep(0.01)
 
     def disable(self) -> None:
-        """Send motor disable command (0xFD)."""
-        data = bytes([0xFF] * 7 + [0xFD])
-        msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
+        """Send motor disable command.
+
+        Defaults to the legacy per-motor 0xFD frame for backward compatibility.
+        Pass ``use_new_enable_protocol=True`` to use the 0x7FF config frame
+        (required by newer MotorA firmware).
+        """
+        if self.use_new_enable_protocol:
+            mid = self.motor_id
+            data = bytes([(mid >> 8) & 0xFF, mid & 0xFF, 0x00, 0x02])
+            msg = can.Message(arbitration_id=0x7FF, data=data, is_extended_id=False)
+        else:
+            data = bytes([0xFF] * 7 + [0xFD])
+            msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
         self.bus.send(msg)
         time.sleep(0.01)
 

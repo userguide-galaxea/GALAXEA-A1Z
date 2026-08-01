@@ -11,9 +11,14 @@ from a1z.dynamics.gravity_model import GravityModel
 from a1z.motor_drivers.motor_b_driver import MotorB, MotorBRanges, MixedMotorChain
 from a1z.motor_drivers.motor_a_driver import MotorA, MotorARanges
 from a1z.robots.arm_robot import ArmRobot
+from a1z.robots.gripper import Gripper, GRIPPER_CAN_ID, GRIPPER_MOTOR_RANGES
 
 # Default URDF path (bundled inside the package)
+# Keep the arm-only A1Z_Flange.urdf as the default so existing users without a
+# gripper are not affected. The G1Z variant is selected automatically when
+# ``with_gripper=True``.
 _DEFAULT_URDF_PATH = str(Path(__file__).parent.parent / "robot_models" / "a1z" / "A1Z_Flange.urdf")
+_GRIPPER_URDF_PATH = str(Path(__file__).parent.parent / "robot_models" / "a1z" / "A1Z_G1Z.urdf")
 
 # Default A1Z configuration
 _NUM_JOINTS = 6
@@ -38,7 +43,7 @@ _GRAVITY_TORQUE_SCALE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 _MAX_GRAVITY_TORQUE = np.array([50.0, 50.0, 50.0, 24.0, 10.0, 10.0])
 _TORQUE_CLIP = np.array([70.0, 70.0, 70.0, 27.0, 10.0, 10.0])
 
-# MotorA ranges (EC-A4315-P2-36)
+# MotorA ranges
 _MOTOR_A_RANGES = MotorARanges(
     kp_min=0.0, kp_max=500.0,
     kd_min=0.0, kd_max=5.0,
@@ -77,6 +82,8 @@ def get_a1z_robot(
     urdf_path: Optional[str] = None,
     default_kp: Optional[np.ndarray] = None,
     default_kd: Optional[np.ndarray] = None,
+    with_gripper: bool = False,
+    gripper_max_torque: float = 2.0,
 ) -> ArmRobot:
     """Create and return a configured A1Z ArmRobot.
 
@@ -91,11 +98,20 @@ def get_a1z_robot(
         urdf_path: Override URDF path.
         default_kp: Override default position gains.
         default_kd: Override default velocity gains.
+        with_gripper: If True, attach a Gripper at CAN ID 0x07 and use the
+                      A1Z_G1Z.urdf model.
+        gripper_max_torque: Maximum gripping torque (Nm). Default 2.0 Nm.
+                            Passed to Gripper as i_des = max_torque / 11.0.
 
     Returns:
         Configured ArmRobot instance (call .start() to begin control).
     """
-    urdf = urdf_path or _DEFAULT_URDF_PATH
+    if urdf_path is not None:
+        urdf = urdf_path
+    elif with_gripper:
+        urdf = _GRIPPER_URDF_PATH
+    else:
+        urdf = _DEFAULT_URDF_PATH
 
     # Open CAN bus
     bus = can.interface.Bus(
@@ -130,6 +146,11 @@ def get_a1z_robot(
     # Load gravity model
     gravity_model = GravityModel(urdf)
 
+    gripper = None
+    if with_gripper:
+        gripper_motor = MotorB(motor_id=GRIPPER_CAN_ID, bus=bus, ranges=GRIPPER_MOTOR_RANGES)
+        gripper = Gripper(gripper_motor, max_torque=gripper_max_torque)
+
     return ArmRobot(
         motor_chain=motor_chain,
         bus=bus,
@@ -144,6 +165,7 @@ def get_a1z_robot(
         default_kp=default_kp if default_kp is not None else _DEFAULT_KP,
         default_kd=default_kd if default_kd is not None else _DEFAULT_KD,
         joint_limits=_JOINT_LIMITS,
+        gripper=gripper,
         control_freq_hz=control_freq_hz,
         min_freq_hz=min_freq_hz,
         motor_a_kt=_MOTOR_A_KT,

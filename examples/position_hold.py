@@ -13,6 +13,9 @@ Usage:
 
     # Move to target (degrees):
     python examples/position_hold.py --q_target_deg 0,30,0,-45,0,0
+
+    # With an attached G1Z gripper (7-DOF target):
+    python examples/position_hold.py --with-gripper --q_target 0,0.6,0.4,-0.5,0,0,0.5
 """
 
 import argparse
@@ -25,15 +28,16 @@ import numpy as np
 from a1z.robots.get_robot import get_a1z_robot
 
 
-def parse_target_q(q_target: str, q_target_deg: str) -> np.ndarray:
+def parse_target_q(q_target: str, q_target_deg: str, with_gripper: bool) -> np.ndarray:
     if q_target and q_target_deg:
         raise ValueError("--q_target and --q_target_deg are mutually exclusive")
     s = q_target_deg if q_target_deg else q_target
     if not s:
         return np.array([])
     q = np.fromstring(s, sep=",", dtype=np.float64)
-    if q.shape[0] != 6:
-        raise ValueError(f"Expected 6 values, got {q.shape[0]}: {s}")
+    expected = 7 if with_gripper else 6
+    if q.shape[0] != expected:
+        raise ValueError(f"Expected {expected} values, got {q.shape[0]}: {s}")
     if q_target_deg:
         q = np.deg2rad(q)
     return q
@@ -46,21 +50,24 @@ def main():
     parser.add_argument("--freq", type=int, default=250, help="Control loop frequency (Hz).")
     parser.add_argument("--can", default="can0", help="CAN channel.")
     parser.add_argument("--q_target", type=str, default="",
-                        help="Target joint angles (rad), comma-separated, length=6.")
+                        help="Target joint angles (rad), comma-separated. Length=6 (or 7 with --with-gripper).")
     parser.add_argument("--q_target_deg", type=str, default="",
-                        help="Target joint angles (degrees), comma-separated, length=6.")
+                        help="Target joint angles (degrees), comma-separated. Length=6 (or 7 with --with-gripper).")
     parser.add_argument("--speed", type=float, default=0.5,
                         help="Movement speed (rad/s) for moving to target.")
+    parser.add_argument("--with-gripper", action="store_true",
+                        help="Attach the G1Z gripper (adds 7th DOF).")
     args = parser.parse_args()
 
-    q_target = parse_target_q(args.q_target, args.q_target_deg)
+    q_target = parse_target_q(args.q_target, args.q_target_deg, args.with_gripper)
 
     print("=" * 60)
     print(f"  A1Z Position Hold")
     print(f"  Gravity factor:  {args.gravity_factor}")
     print(f"  Control freq:    {args.freq} Hz")
     print(f"  CAN channel:     {args.can}")
-    if q_target.size == 6:
+    print(f"  With gripper:    {args.with_gripper}")
+    if q_target.size > 0:
         print(f"  Target (rad):    {np.round(q_target, 3)}")
         print(f"  Target (deg):    {np.round(np.degrees(q_target), 1)}")
     print("=" * 60)
@@ -70,6 +77,7 @@ def main():
         gravity_comp_factor=args.gravity_factor,
         zero_gravity_mode=False,
         control_freq_hz=args.freq,
+        with_gripper=args.with_gripper,
     )
 
     signal.signal(signal.SIGINT, signal.default_int_handler)
@@ -77,7 +85,7 @@ def main():
     try:
         robot.start()
 
-        if q_target.size == 6:
+        if q_target.size > 0:
             print(f"\nMoving to target at {args.speed} rad/s...")
             robot.move_joints(q_target, speed=args.speed)
             print("Target reached.")
@@ -88,8 +96,12 @@ def main():
             state = robot.get_joint_state()
             pos_deg = np.degrees(state["pos"])
             eff = state["eff"]
+            extra = ""
+            if args.with_gripper:
+                grip = robot.get_gripper_pos()
+                extra = f"  grip: {grip:.2f}"
             print(
-                f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]  "
+                f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]{extra}  "
                 f"eff(Nm): [{', '.join(f'{e:6.2f}' for e in eff)}]",
                 end="\r",
             )
@@ -103,7 +115,6 @@ def main():
             robot.move_joints(np.zeros(6), speed=args.speed * 0.5)
             time.sleep(0.3)
         robot.stop()
-        print("\nDone.")
         print("\nDone.")
 
 

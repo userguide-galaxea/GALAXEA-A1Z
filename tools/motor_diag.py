@@ -14,14 +14,21 @@
   # 扫描所有 6 个电机
   python tools/motor_diag.py --scan
 
+  # 只扫描 MotorA 或 MotorB
+  python tools/motor_diag.py --scan --type motor_a
+  python tools/motor_diag.py --scan --type motor_b
+
   # 持续监控所有电机（Ctrl+C 退出）
   python tools/motor_diag.py --monitor
 
   # 被动监听 CAN 总线 5 秒
   python tools/motor_diag.py --listen --duration 5
 
-  # 探测关节 3（4340）
+  # 探测关节 3
   python tools/motor_diag.py --probe 3
+
+  # 带 G1Z 夹爪时扫描/监控 7 个电机
+  python tools/motor_diag.py --scan --with-gripper
 """
 
 import argparse
@@ -50,6 +57,7 @@ JOINT_CONFIG = {
     3: ("arm_joint4", "MotorB4340", 0x04),
     4: ("arm_joint5", "MotorB4310", 0x05),
     5: ("arm_joint6", "MotorB4310", 0x06),
+    6: ("gripper",   "MotorB4310", 0x07),
 }
 
 # MotorA 反馈解析范围
@@ -121,8 +129,9 @@ def parse_motor_a_feedback(data: bytes) -> dict:
     vel_raw = (frame >> 28) & 0xFFF
     cur_raw = (frame >> 16) & 0xFFF
     # Temperature encoding: raw = actual_°C * 2 + 50
-    temp_motor = ((frame >> 8) & 0xFF - 50) / 2
-    temp_mos = (frame & 0xFF - 50) / 2
+    # Parentheses required — '-' has higher precedence than '&' in Python.
+    temp_motor = (((frame >> 8) & 0xFF) - 50) / 2
+    temp_mos   = ((frame & 0xFF) - 50) / 2
 
     return {
         "error_code": error_code,
@@ -762,6 +771,7 @@ def main():
   python tools/motor_diag.py --probe 3             探测关节 3
   python tools/motor_diag.py --clear-error         清除所有 MotorB 错误
   python tools/motor_diag.py --clear-error --joints 3 4  清除指定关节错误
+  python tools/motor_diag.py --scan --with-gripper 扫描带夹爪的 7 个电机
         """,
     )
 
@@ -770,30 +780,33 @@ def main():
     group.add_argument("--scan", action="store_true", help="扫描电机通信")
     group.add_argument("--monitor", action="store_true", help="持续监控电机状态")
     group.add_argument("--listen", action="store_true", help="被动监听 CAN 总线")
-    group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-5)")
+    group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-5, 6 with --with-gripper)")
     group.add_argument("--clear-error", action="store_true", help="清除 MotorB 错误码")
 
     parser.add_argument("--channel", default=CAN_CHANNEL, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
     parser.add_argument("--bitrate", type=int, default=CAN_BITRATE, help=f"CAN 波特率 (默认: {CAN_BITRATE})")
     parser.add_argument("--type", choices=["all", "motor_a", "motor_b"], default="all", help="电机类型筛选")
-    parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5)")
+    parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5, 6 with --with-gripper)")
     parser.add_argument("--duration", type=float, default=5.0, help="监听时长/秒 (默认: 5)")
+    parser.add_argument("--with-gripper", action="store_true", help="包含 G1Z 夹爪电机 (joint 6)")
 
     args = parser.parse_args()
 
     # 确定要操作的关节
+    max_joint = 6 if args.with_gripper else 5
     if args.joints:
         joints = args.joints
     elif args.type == "motor_a":
         joints = [0, 1, 2]
     elif args.type == "motor_b":
-        joints = [3, 4, 5]
+        joints = [3, 4, 5, 6] if args.with_gripper else [3, 4, 5]
     else:
-        joints = list(range(6))
+        joints = list(range(7 if args.with_gripper else 6))
 
     for j in joints:
-        if j not in JOINT_CONFIG:
-            print(f"错误: 关节 {j} 不存在 (有效范围: 0-5)")
+        if j not in JOINT_CONFIG or j > max_joint:
+            valid_range = f"0-{max_joint}"
+            print(f"错误: 关节 {j} 不存在 (有效范围: {valid_range})")
             sys.exit(1)
 
     print("=" * 60)
@@ -846,7 +859,7 @@ def main():
             run_listen(bus, args.duration)
 
         elif args.probe is not None:
-            if args.probe not in JOINT_CONFIG:
+            if args.probe not in JOINT_CONFIG or args.probe > max_joint:
                 print(f"错误: 关节 {args.probe} 不存在")
                 sys.exit(1)
             run_probe(bus, args.probe)

@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""a1zctl — CLI client for the A1Z robot arm server.
+
+Start the server first, then send commands from any terminal (including OpenClaw).
+
+Usage
+-----
+  # Terminal 1 — keep running:
+  python3 tools/a1zctl serve [--can can0] [--with-gripper] [--gravity-mode]
+
+  # Terminal 2 (or OpenClaw):
+  python3 tools/a1zctl status
+  python3 tools/a1zctl move 0,60,-60,0,0,0
+  python3 tools/a1zctl move --preset home
+  python3 tools/a1zctl gripper 0.5
+  python3 tools/a1zctl dance --moves salute,wave,bow
+  python3 tools/a1zctl info
+  python3 tools/a1zctl stop
+"""
+
+import argparse
+import json
+import os
+import socket
+import sys
+
+# Allow running from any directory without installing the package.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from a1z.robots.server import SOCKET_PATH, serve  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Socket helpers
+# ---------------------------------------------------------------------------
+
+def _send(cmd: str, args: dict | None = None) -> dict:
+    """Send one command to the server and return the parsed response."""
+    req = json.dumps({"cmd": cmd, "args": args or {}}) + "\n"
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(120.0)
+        sock.connect(SOCKET_PATH)
+        sock.sendall(req.encode())
+        data = b""
+        while b"\n" not in data:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        sock.close()
+        return json.loads(data.split(b"\n", 1)[0].decode())
+    except FileNotFoundError:
+        print(f"[a1zctl] Socket not found: {SOCKET_PATH}")
+        print("[a1zctl] Start the server first:  python3 tools/a1zctl serve")
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print("[a1zctl] Server not running.  Start with:  python3 tools/a1zctl serve")
+        sys.exit(1)
+
+
+def _ok_or_exit(resp: dict) -> dict:
+    if not resp.get("ok"):
+        print(f"[a1zctl] Error: {resp.get('error', 'unknown error')}")
+        sys.exit(1)
+    return resp.get("data", {})
+
+
+# ---------------------------------------------------------------------------
+# Sub-command implementations
+# ---------------------------------------------------------------------------
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    serve(
+        can_channel=args.can,
+        with_gripper=args.with_gripper,
+        gravity_mode=args.gravity_mode,
+    )
+
+
+def cmd_status(_args: argparse.Namespace) -> None:
+    data = _ok_or_exit(_send("status"))
+    pos = data["pos_deg"]
+    vel = data["vel_rad_s"]
+    trq = data["torque_nm"]
+    joint_names = ["J1", "J2", "J3", "J4", "J5", "J6"]
+    print(f"{'Joint':<6}  {'pos(deg)':>9}  {'vel(rad/s)':>10}  {'torque(Nm)':>10}")
+    print("-" * 42)
+    for i, name in enumerate(joint_names):
+        print(f"{name:<6}  {pos[i]:>9.2f}  {vel[i]:>10.3f}  {trq[i]:>10.3f}")
+    if "gripper" in data:
+        gval = data["gripper"]
+        gstr = f"{gval:.3f}" if gval is not None else "N/A"
+        print(f"\nGripper: {gstr}  (0.0=closed, 1.0=open)")
+
+
+def cmd_move(args: argparse.Namespace) -> None:
+    req_args: dict = {"speed": args.speed}
+    if args.preset:
+        req_args["preset"] = args.preset
+    elif args.joints:
+        try:
+            vals = [float(v) for v in args.joints.split(",")]
+        except ValueError:
+            print("[a1zctl] joints must be 6 comma-separated numbers, e.g. 0,60,-60,0,0,0")
+            sys.exit(1)
+        if len(vals) != 6:
+            print("[a1zctl] joints must have exactly 6 values")
+            sys.exit(1)
+        req_args["joints"] = vals
+    else:
+        print("[a1zctl] move requires --preset or a joints string, e.g.:  move 0,60,-60,0,0,0")
+        sys.exit(1)
+
+    print("[a1zctl] Moving...")
+    data = _ok_or_exit(_send("move", req_args))
+    pos = data.get("pos_deg", [])
+    if pos:
+        print(f"[a1zctl] Arrived: {[round(v, 1) for v in pos]}")
+
+
+def cmd_gripper(args: argparse.Namespace) -> None:
+    data = _ok_or_exit(_send("gripper", {"value": args.value}))
+    print(f"[a1zctl] Gripper set to {data['gripper']:.2f}")
+
+
+def cmd_dance(args: argparse.Namespace) -> None:
+    req_args: dict = {"speed": args.speed}
+    if args.moves:
+        req_args["moves"] = [m.strip() for m in args.moves.split(",") if m.strip()]
+    print("[a1zctl] Running dance sequence...")
+    data = _ok_or_exit(_send("dance", req_args))
+    print(f"[a1zctl] Dance complete: {', '.join(data['moves'])}")
+
+
+def cmd_stop(_args: argparse.Namespace) -> None:
+    data = _ok_or_exit(_send("stop"))
+    print(f"[a1zctl] {data.get('message', 'Done.')}")
+
+
+def cmd_info(_args: argparse.Namespace) -> None:
+    data = _ok_or_exit(_send("info"))
+    print("Presets:     ", ", ".join(data["presets"]))
+    print("Dance moves: ", ", ".join(data["dance_moves"]))
+    print("Joint limits (degrees):")
+    for joint, (lo, hi) in data["joint_limits_deg"].items():
+        print(f"  {joint}: [{lo}, {hi}]")
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="a1zctl",
+        description="A1Z robot arm CLI — controls a running a1zctl serve daemon.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 tools/a1zctl serve --with-gripper
+  python3 tools/a1zctl status
+  python3 tools/a1zctl move 0,60,-60,0,0,0
+  python3 tools/a1zctl move --preset home
+  python3 tools/a1zctl gripper 0.5
+  python3 tools/a1zctl dance --moves salute,wave,bow --speed 0.7
+  python3 tools/a1zctl stop
+        """,
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    # serve
+    sp = sub.add_parser("serve", help="Start the robot server (blocking)")
+    sp.add_argument("--can", default="can0", help="SocketCAN channel (default: can0)")
+    sp.add_argument("--with-gripper", action="store_true", help="Enable gripper motor")
+    sp.add_argument("--gravity-mode", action="store_true",
+                    help="Zero-gravity float mode (default: position hold)")
+
+    # status
+    sub.add_parser("status", help="Print current joint positions, velocities, torques")
+
+    # move
+    mp = sub.add_parser(
+        "move",
+        help="Move to joint angles or a named preset",
+        description=(
+            "Move to absolute joint angles (degrees) or a named preset.\n\n"
+            "  a1zctl move 0,60,-60,0,0,0\n"
+            "  a1zctl move --preset home"
+        ),
+    )
+    mp.add_argument("joints", nargs="?", default=None,
+                    help="6 joint angles in degrees, comma-separated (e.g. 0,60,-60,0,0,0)")
+    mp.add_argument("--preset", default=None,
+                    help="Named preset: home | ready | salute | wave_l | wave_r | reach | bow ...")
+    mp.add_argument("--speed", type=float, default=0.5, help="Movement speed rad/s (default: 0.5)")
+
+    # gripper
+    gp = sub.add_parser("gripper", help="Set gripper opening (0.0=closed, 1.0=open)")
+    gp.add_argument("value", type=float, help="Opening in [0.0, 1.0]")
+
+    # dance
+    dp = sub.add_parser("dance", help="Run a dance sequence")
+    dp.add_argument("--moves", default=None,
+                    help="Comma-separated move names (default: salute,wave,nod,reach,bow)")
+    dp.add_argument("--speed", type=float, default=0.6, help="Base speed rad/s (default: 0.6)")
+
+    # stop
+    sub.add_parser("stop", help="Stop the robot server gracefully")
+
+    # info
+    sub.add_parser("info", help="List available presets, dance moves, and joint limits")
+
+    return p
+
+
+_COMMANDS = {
+    "serve":   cmd_serve,
+    "status":  cmd_status,
+    "move":    cmd_move,
+    "gripper": cmd_gripper,
+    "dance":   cmd_dance,
+    "stop":    cmd_stop,
+    "info":    cmd_info,
+}
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    _COMMANDS[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

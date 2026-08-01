@@ -6,9 +6,13 @@ MotorB MIT command bit layout (64 bits):
 MotorB Feedback layout:
     error(4, high nibble byte0) | pos(16) | vel(12) | torque(12) |
     temp_mos(8) | temp_rotor(8)
+
+Force-position hybrid command (mode 4) frame layout (CAN ID 0x300+motor_id):
+    p_des(float32-LE) | v_des(uint16-LE, ×100 → rad/s) | i_des(uint16-LE, ×10000 → fraction)
 """
 
 import logging
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -93,6 +97,68 @@ class MotorB:
     def clear_error(self) -> None:
         """Clear motor error (0xFB)."""
         data = bytes([0xFF] * 7 + [0xFB])
+        msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
+        self.bus.send(msg)
+        time.sleep(0.01)
+
+    def write_register(self, reg_id: int, value: int | float, is_float: bool = False) -> None:
+        """Write a value to a motor register via the 0x7FF broadcast frame.
+
+        Args:
+            reg_id:   Register address (see manual register table).
+            value:    Value to write.
+            is_float: True for float32 registers, False for uint32.
+        """
+        data = bytearray(8)
+        data[0] = self.motor_id & 0xFF
+        data[1] = (self.motor_id >> 8) & 0xFF
+        data[2] = 0x55  # write command
+        data[3] = reg_id & 0xFF
+        if is_float:
+            struct.pack_into("<f", data, 4, float(value))
+        else:
+            struct.pack_into("<I", data, 4, int(value))
+        msg = can.Message(arbitration_id=0x7FF, data=bytes(data), is_extended_id=False)
+        self.bus.send(msg)
+        time.sleep(0.01)
+
+    def set_ctrl_mode(self, mode: int) -> None:
+        """Switch control mode in RAM (lost on power cycle).
+
+        Modes: 1=MIT, 2=position-speed cascade, 3=speed, 4=force-position hybrid.
+        """
+        self.write_register(0x0A, mode, is_float=False)
+
+    def send_hybrid_command(self, pos: float, vel: float, i_des: float) -> None:
+        """Send force-position hybrid command (mode 4).
+
+        The motor drives toward ``pos`` at up to ``vel`` rad/s while clamping
+        the phase current to ``i_des`` × max-phase-current.  When the gripper
+        contacts an object the current limit kicks in and the motor holds with
+        constant force, regardless of the position error.
+
+        Args:
+            pos:   Target position (rad).
+            vel:   Speed limit (rad/s), clamped to [0, 100].
+            i_des: Torque current fraction [0.0, 1.0] of max phase current.
+                   Use ``max_torque_nm / MOTOR_PEAK_TORQUE_NM`` to convert.
+        """
+        p_bytes = struct.pack("<f", pos)
+        v_int = int(np.clip(vel * 100.0, 0, 10000))
+        i_int = int(np.clip(i_des * 10000.0, 0, 10000))
+        data = p_bytes + v_int.to_bytes(2, "little") + i_int.to_bytes(2, "little")
+        msg = can.Message(
+            arbitration_id=0x300 + self.motor_id, data=data, is_extended_id=False
+        )
+        self.bus.send(msg)
+
+    def set_zero_ram(self) -> None:
+        """Set current position as zero in RAM only (0xFE). Does not write flash.
+
+        Use after mechanically homing to a known stop so the motor's multi-turn
+        counter is re-anchored without overwriting the factory flash calibration.
+        """
+        data = bytes([0xFF] * 7 + [0xFE])
         msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
         self.bus.send(msg)
         time.sleep(0.01)
@@ -305,6 +371,15 @@ class MixedMotorChain:
         fb = motor.parse_feedback(msg)
         if fb is not None:
             motor.last_feedback = fb
+
+    def register_external_motor(self, motor: "MotorB") -> None:
+        """Register a motor for CAN feedback routing without adding it to the joint chain.
+
+        Use for motors (e.g. gripper) that share the bus but are not part of the
+        6-DOF joint chain. Their feedback frames are dispatched to motor.last_feedback
+        by drain_and_update so callers can read torque/position.
+        """
+        self._motor_id_map[motor.motor_id] = ("motor_b", motor, -1)
 
     def get_positions(self) -> np.ndarray:
         return self._positions.copy()

@@ -10,6 +10,10 @@ Usage
     # Load and play:
     python examples/teach_and_play.py play teach.json
     python examples/teach_and_play.py play teach.json --speed 0.5 --loop
+
+    # With an attached G1Z gripper:
+    python examples/teach_and_play.py record teach.json --with-gripper
+    python examples/teach_and_play.py play teach.json --with-gripper
 """
 
 import argparse
@@ -33,6 +37,7 @@ def cmd_record(args: argparse.Namespace) -> None:
         can_channel=args.can,
         zero_gravity_mode=True,
         gravity_comp_factor=1.0,
+        with_gripper=args.with_gripper,
     )
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
@@ -41,10 +46,15 @@ def cmd_record(args: argparse.Namespace) -> None:
     print(f"  CAN:        {args.can}")
     print(f"  Sample Hz:  {args.sample_hz}")
     print(f"  Save to:    {args.file}")
+    print(f"  Gripper:    {args.with_gripper}")
     print("=" * 60)
 
     robot.start()
-    print("[record] Arm running in zero-gravity mode.\n")
+    if args.with_gripper:
+        robot.set_gripper_free_drive(True)
+        print("[record] Arm in zero-gravity mode; gripper in free-drive (move by hand).\n")
+    else:
+        print("[record] Arm running in zero-gravity mode.\n")
 
     try:
         _wait_enter("[record] Press ENTER to START recording...")
@@ -57,8 +67,12 @@ def cmd_record(args: argparse.Namespace) -> None:
             while not _stop_display.is_set():
                 state = robot.get_joint_state()
                 pos_deg = np.degrees(state["pos"])
+                grip_str = ""
+                if args.with_gripper:
+                    grip = robot.get_gripper_pos()
+                    grip_str = f"  grip: {grip:.2f}"
                 print(
-                    f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]",
+                    f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]{grip_str}",
                     end="\r",
                 )
                 time.sleep(0.1)
@@ -86,6 +100,8 @@ def cmd_record(args: argparse.Namespace) -> None:
         print("\n[record] Interrupted.")
     finally:
         if robot.is_running:
+            if args.with_gripper:
+                robot.set_gripper_free_drive(False)
             print("[record] Returning to zero...")
             robot.move_joints(np.zeros(6), speed=0.3)
             time.sleep(0.3)
@@ -98,6 +114,7 @@ def cmd_play(args: argparse.Namespace) -> None:
         can_channel=args.can,
         zero_gravity_mode=False,
         gravity_comp_factor=1.0,
+        with_gripper=args.with_gripper,
     )
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
@@ -107,6 +124,7 @@ def cmd_play(args: argparse.Namespace) -> None:
     print(f"  File:       {args.file}")
     print(f"  Speed:      {args.speed}x")
     print(f"  Loop:       {'yes' if args.loop else 'no'}")
+    print(f"  Gripper:    {args.with_gripper}")
     print("=" * 60)
 
     print(f"[play] Loading trajectory from {args.file}...")
@@ -114,10 +132,17 @@ def cmd_play(args: argparse.Namespace) -> None:
     duration = trajectory[-1][0] if trajectory else 0.0
     print(f"[play] Loaded {len(trajectory)} frames ({duration:.2f}s).\n")
 
+    expected_dofs = robot.num_dofs()
+    # If playing without a gripper, ignore any recorded gripper DOF.
+    if not args.with_gripper:
+        trajectory = [(t, pos[:6]) for t, pos in trajectory]
+
     robot.start()
 
     try:
         start_pos = trajectory[0][1]
+        if len(start_pos) > expected_dofs:
+            start_pos = start_pos[:expected_dofs]
         print("[play] Returning to start position...")
         robot.move_joints(start_pos, speed=0.4)
         print("[play] Ready.\n")
@@ -150,6 +175,8 @@ def cmd_play(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="A1Z teach-and-play")
     parser.add_argument("--can", default="can0", help="CAN channel (default: can0)")
+    parser.add_argument("--with-gripper", action="store_true",
+                        help="Attach the G1Z gripper (record/play 7th DOF).")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_record = sub.add_parser("record", help="Record a trajectory and save to file")
