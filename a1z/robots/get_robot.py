@@ -25,15 +25,27 @@ _MOTOR_B_IDS = [0x04, 0x05, 0x06]
 
 _JOINT_LIMITS = [
     (-2.094, 2.094),   # arm_joint1
-    (0.0,    3.142),   # arm_joint2
+    (-3.142, 3.142),   # arm_joint2: allow full shoulder-pitch hemisphere; the
+                       # leader arm can command negative J2 when lifting from a
+                       # downward start pose, and the previous [0, pi] lower
+                       # bound rejected valid teleop commands.
     (-3.142, 0.0),     # arm_joint3
     (-1.484, 1.484),   # arm_joint4
     (-1.484, 1.484),   # arm_joint5
     (-2.007, 2.007),   # arm_joint6
 ]
 
-_DEFAULT_KP = np.array([100.0, 60.0, 40.0, 30.0, 10.0, 25.0])
-_DEFAULT_KD = np.array([4.9,  4.5,  5.0,  2.0,  0.5,  4])
+# _DEFAULT_KP = np.array([100.0, 60.0, 40.0, 30.0, 10.0, 25.0])
+# _DEFAULT_KD = np.array([4.9,  4.5,  5.0,  2.0,  0.5,  4])
+
+# _DEFAULT_KP = np.array([130.8931, 83.0542, 90.3748, 120.0, 30.0, 57.5026])
+# _DEFAULT_KD = np.array([5,  5,  5.0,  2.0776,  1,  1])
+
+
+
+_DEFAULT_KP = np.array([146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0])
+_DEFAULT_KD = np.array([5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553])
+
 _JOINT_SIGN = np.array([1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
 _GRAVITY_TORQUE_SCALE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 _MAX_GRAVITY_TORQUE = np.array([50.0, 50.0, 50.0, 24.0, 10.0, 10.0])
@@ -131,6 +143,7 @@ def get_a1z_robot(
     integral_level: str = "K1",
     integral_joints: Optional[list] = None,
     integral_overrides: Optional[dict] = None,
+    coulomb_ff: Optional[np.ndarray] = None,
 ) -> ArmRobot:
     """Create and return a configured A1Z ArmRobot.
 
@@ -164,7 +177,11 @@ def get_a1z_robot(
                           all calibrated joints. Uncalibrated (NaN τ̂_c) joints stay
                           disabled regardless.
         integral_overrides: Optional dict forwarded to IntegralConfig.from_level
-                          (keys: t_leak_s, e_db_deg, qd_freeze).
+                          (keys: t_leak_s, e_db_deg, qd_freeze, t_wind_s,
+                          clamp_scale).
+        coulomb_ff: Per-joint Coulomb friction feedforward amplitude (Nm),
+                          shape (6,). Applied as sign(e)·coulomb_ff in the torque
+                          sum (S1 strategy layer). None = disabled (default).
 
     Returns:
         Configured ArmRobot instance (call .start() to begin control).
@@ -249,4 +266,5 @@ def get_a1z_robot(
         min_freq_hz=min_freq_hz,
         motor_a_kt=_MOTOR_A_KT,
         integral_config=integral_config,
+        coulomb_ff=coulomb_ff,
     )

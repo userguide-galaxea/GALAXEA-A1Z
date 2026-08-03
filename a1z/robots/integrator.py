@@ -46,11 +46,12 @@ class IntegralConfig:
     """逐关节积分器配置（生效全向量即 meta 回读的唯一来源，SOP-09 P0-4）。"""
 
     ki: np.ndarray                                       # (n,) Nm/(rad·s)；0 = 该关节关断
-    tau_i_max: np.ndarray                                # (n,) Nm = 1.2·τ̂_c（关断关节置 0）
+    tau_i_max: np.ndarray                                # (n,) Nm = clamp_scale·τ̂_c（关断关节置 0）
     e_db_rad: np.ndarray                                 # (n,) 误差死区（默认 0.3°）
     t_leak_s: float = 1.0                                # λ = 1 − Δt/T_leak
     qd_freeze: float = 0.15                              # rad/s：|q̇_des| 超过即冻结积分
     level: str = "K0"                                    # 档位名（记账用）
+    clamp_scale: float = 1.2                             # τ_I,max = clamp_scale · τ̂_c
 
     def __post_init__(self) -> None:
         self.ki = np.asarray(self.ki, dtype=float)
@@ -75,11 +76,18 @@ class IntegralConfig:
         t_leak_s: float = 1.0,
         e_db_deg: float = 0.3,
         qd_freeze: float = 0.15,
+        t_wind_s: Optional[float] = None,
+        clamp_scale: float = 1.2,
     ) -> "IntegralConfig":
         """按档位构造配置。
 
         ki = τ_I,max / (E_TYP_RAD · t_wind)；τ̂_c 为 NaN 或不在 ``joints`` 内的
         关节 ki=0 且 τ_I,max=0（enable mask 的实现形式）。K0 → 全零（等价关断）。
+
+        Args:
+            t_wind_s: Continuous override for the discrete level's t_wind (s).
+                      None (default) uses the level's canonical value.
+            clamp_scale: τ_I,max = clamp_scale · τ̂_c (default 1.2).
         """
         if level not in LEVELS:
             raise ValueError(f"unknown integral level {level!r}; choose from {list(LEVELS)}")
@@ -87,9 +95,9 @@ class IntegralConfig:
         n = tau_c_hat.shape[0]
 
         enabled = np.isfinite(tau_c_hat) & _joints_mask(joints, n)
-        tau_i_max = np.where(enabled, 1.2 * tau_c_hat, 0.0)
+        tau_i_max = np.where(enabled, clamp_scale * tau_c_hat, 0.0)
 
-        t_wind = LEVELS[level]
+        t_wind = t_wind_s if t_wind_s is not None else LEVELS[level]
         if t_wind is None:  # K0
             ki = np.zeros(n)
         else:
@@ -107,6 +115,7 @@ class IntegralConfig:
             t_leak_s=float(t_leak_s),
             qd_freeze=float(qd_freeze),
             level=level,
+            clamp_scale=float(clamp_scale),
         )
 
     def as_info(self) -> Dict[str, Any]:
@@ -115,6 +124,7 @@ class IntegralConfig:
             "level": self.level,
             "ki": self.ki.tolist(),
             "tau_i_max": self.tau_i_max.tolist(),
+            "clamp_scale": self.clamp_scale,
             "t_leak_s": self.t_leak_s,
             "e_db_deg": np.round(np.rad2deg(self.e_db_rad), 4).tolist(),
             "qd_freeze": self.qd_freeze,
