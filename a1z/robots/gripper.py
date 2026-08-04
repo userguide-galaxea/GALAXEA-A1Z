@@ -120,11 +120,16 @@ class Gripper:
     def disable(self) -> None:
         self._motor.disable()
 
-    def home(self, timeout: float = 1.5) -> bool:
+    def home(self, timeout: float = 1.5, use_bus_recv: bool = True) -> bool:
         """Drive gripper to open position and wait for arrival.
 
         Args:
-            timeout: Maximum seconds to wait (default 3 s).
+            timeout: Maximum seconds to wait (default 1.5 s).
+            use_bus_recv: If True (default), read CAN feedback directly via
+                bus.recv(). If False, rely on motor.last_feedback being updated
+                by an external dispatcher (e.g. MixedMotorChain.drain_and_update()
+                in the control thread) — avoids stealing arm motor feedback frames
+                from the shared bus.
 
         Returns:
             True if gripper reached open position, False if timed out.
@@ -138,11 +143,16 @@ class Gripper:
             self._motor.send_hybrid_command(
                 pos=self._open_rad, vel=GRIPPER_HOME_VEL, i_des=i_home
             )
-            msg = bus.recv(timeout=0.01)
-            if msg is not None and int(msg.arbitration_id) == self._motor.motor_id:
-                fb = self._motor.parse_feedback(msg)
-                if fb is not None:
-                    self._motor.last_feedback = fb
+            if use_bus_recv:
+                msg = bus.recv(timeout=0.01)
+                if msg is not None and int(msg.arbitration_id) == self._motor.motor_id:
+                    fb = self._motor.parse_feedback(msg)
+                    if fb is not None:
+                        self._motor.last_feedback = fb
+            else:
+                # Let the control thread's drain_and_update() dispatch feedback.
+                # Avoid direct bus.recv() which would steal arm motor frames.
+                time.sleep(0.005)
             fb = self._motor.last_feedback
             if fb is not None and abs(fb.position - self._open_rad) < 0.1:
                 logger.info(
