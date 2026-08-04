@@ -14,8 +14,8 @@ LIMITS = [
     (-1.484, 1.484),
     (-2.007, 2.007),
 ]
-LOWER_TOLERANCE = np.array([0.0, 0.05, 0.0, 0.0, 0.0, 0.0])
-UPPER_TOLERANCE = np.zeros(6)
+LOWER_TOLERANCE = np.full(6, 0.05)
+UPPER_TOLERANCE = np.full(6, 0.05)
 
 
 def _robot():
@@ -67,21 +67,34 @@ def test_non_streaming_validation_uses_the_same_per_joint_tolerance():
         robot._validate_joint_pos(outside)
 
 
-def test_only_j2_lower_boundary_has_tolerance():
+def test_all_boundaries_have_uniform_tolerance():
     info = _robot().get_robot_info()
-    assert info["joint_limit_lower_tolerance_rad"] == [
-        0.0, 0.05, 0.0, 0.0, 0.0, 0.0
-    ]
-    assert info["joint_limit_upper_tolerance_rad"] == [0.0] * 6
+    assert info["joint_limit_lower_tolerance_rad"] == [0.05] * 6
+    assert info["joint_limit_upper_tolerance_rad"] == [0.05] * 6
 
+    # Within tolerance of a boundary: accepted and clipped onto the limit.
     robot = _robot()
     j1_below = np.zeros(6)
-    j1_below[0] = LIMITS[0][0] - 0.001
-    assert robot.command_joint_pos(j1_below) is False
+    j1_below[0] = LIMITS[0][0] - 0.049
+    assert robot.command_joint_pos(j1_below) is True
+    assert robot.get_command_state()["pos"][0] == LIMITS[0][0]
 
+    robot = _robot()
     j2_above = np.zeros(6)
-    j2_above[1] = LIMITS[1][1] + 0.001
-    assert robot.command_joint_pos(j2_above) is False
+    j2_above[1] = LIMITS[1][1] + 0.049
+    assert robot.command_joint_pos(j2_above) is True
+    assert robot.get_command_state()["pos"][1] == LIMITS[1][1]
+
+    # Beyond tolerance: the frame is rejected.
+    robot = _robot()
+    j1_too_far = np.zeros(6)
+    j1_too_far[0] = LIMITS[0][0] - 0.051
+    assert robot.command_joint_pos(j1_too_far) is False
+
+    robot = _robot()
+    j2_too_far = np.zeros(6)
+    j2_too_far[1] = LIMITS[1][1] + 0.051
+    assert robot.command_joint_pos(j2_too_far) is False
 
 
 @pytest.mark.parametrize("bad", [np.zeros(5), np.full(6, -0.01), np.full(6, np.nan)])
