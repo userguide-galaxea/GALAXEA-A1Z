@@ -190,14 +190,19 @@ SDK 默认按平台自动选择 CAN 后端：
 
 ### 使用 example 脚本
 
+> ⚠️ **带 G1Z 夹爪时，以下所有命令都要加 `--config a1z_g1z.yaml`**（或在支持的脚本上加 `--with-gripper`）。这不只是控制夹爪——重力补偿的动力学模型需要包含夹爪的质量，缺了它补偿力矩会偏小，机械臂会缓慢下垂。
+
 ```bash
-# 零力漂浮（默认 URDF A1Z_Flange.urdf；加 --with-gripper 使用 A1Z_G1Z.urdf）
+# 零力漂浮（默认 URDF A1Z_Flange.urdf；带夹爪用 --config a1z_g1z.yaml 自动切换 A1Z_G1Z.urdf）
 
 # 从小补偿因子开始（推荐首次调试方式）
 python examples/gravity_comp.py --gravity_factor 0.3
 
 # 确认补偿方向正确后提升到全补偿
 python examples/gravity_comp.py --gravity_factor 1.0
+
+# 带 G1Z 夹爪：指定夹爪配置（重力补偿会包含夹爪质量）
+python examples/gravity_comp.py --config a1z_g1z.yaml --gravity_factor 0.3
 
 # 位置保持模式
 python examples/gravity_comp.py --mode hold
@@ -787,14 +792,19 @@ When `--bustype` is omitted, the OS default is used: Linux defaults to `socketca
 
 ### Example Scripts
 
+> ⚠️ **With a G1Z gripper attached, add `--config a1z_g1z.yaml` to every command below** (or `--with-gripper` where supported). This is not just about controlling the gripper — the gravity-compensation dynamics model must include the gripper's mass; without it the compensation torque is too small and the arm will slowly droop.
+
 ```bash
-# Zero-force float (default URDF A1Z_Flange.urdf; add --with-gripper to use A1Z_G1Z.urdf)
+# Zero-force float (default URDF A1Z_Flange.urdf; use --config a1z_g1z.yaml to switch to A1Z_G1Z.urdf automatically)
 
 # Start with a small compensation factor (recommended for first-time setup)
 python examples/gravity_comp.py --gravity_factor 0.3
 
 # Increase to full compensation once direction is confirmed correct
 python examples/gravity_comp.py --gravity_factor 1.0
+
+# With G1Z gripper: specify the gripper config (gravity comp includes gripper mass)
+python examples/gravity_comp.py --config a1z_g1z.yaml --gravity_factor 0.3
 
 # Position hold mode
 python examples/gravity_comp.py --mode hold
