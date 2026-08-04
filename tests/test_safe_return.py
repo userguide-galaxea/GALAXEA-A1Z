@@ -11,6 +11,7 @@ class SafeReturnTests(unittest.TestCase):
     def test_gain_ramp_tracks_measured_pose_before_position_control(self):
         robot = ArmRobot.__new__(ArmRobot)
         robot._num_joints = 6
+        robot.gripper = None
         robot._control_period_s = 0.25
         robot._default_kp = np.array([30.0, 30.0, 30.0, 20.0, 5.0, 5.0])
         robot._default_kd = np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])

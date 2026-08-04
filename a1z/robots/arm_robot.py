@@ -1174,20 +1174,25 @@ class ArmRobot:
         age = now - self._last_feedback_t
         get_ages = getattr(self._motor_chain, "get_feedback_ages", None)
         ages = get_ages() if get_ages is not None else np.full(self._num_joints, age)
-        estop_over = ages > self._stale_estop_s
-        if np.any(estop_over):
-            idx = int(np.argmax(ages - self._stale_estop_s))
-            raise RuntimeError(
-                f"CAN feedback stale for joint{idx + 1}: {ages[idx] * 1000:.0f}ms "
-                f"(limit {self._stale_estop_s[idx] * 1000:.0f}ms) — bus may be down"
-            )
-        warn_over = ages > self._stale_warn_s
-        if np.any(warn_over) and now - self._last_stale_warn_t > 1.0:
-            parts = "; ".join(
+        stale = ages > self._stale_estop_s
+        if np.any(stale):
+            details = ", ".join(
                 f"joint{i + 1}={ages[i] * 1000:.0f}ms"
-                for i in np.flatnonzero(warn_over)
+                f"/{self._stale_estop_s[i] * 1000:.0f}ms"
+                for i in np.flatnonzero(stale)
             )
-            logger.warning(f"CAN feedback stale: {parts}")
+            raise RuntimeError(
+                f"CAN feedback stale: {details} "
+                "— bus or motor feedback may be down"
+            )
+        warning = ages > self._stale_warn_s
+        if np.any(warning) and now - self._last_stale_warn_t > 1.0:
+            details = ", ".join(
+                f"joint{i + 1}={ages[i] * 1000:.0f}ms"
+                f"/{self._stale_warn_s[i] * 1000:.0f}ms"
+                for i in np.flatnonzero(warning)
+            )
+            logger.warning(f"CAN feedback delayed: {details}")
             self._last_stale_warn_t = now
 
     def _clip_joint_pos(
@@ -1278,5 +1283,5 @@ class ArmRobot:
                 )
 
     def __del__(self):
-        if self._running:
+        if getattr(self, "_running", False):
             self.stop()
