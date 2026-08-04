@@ -32,6 +32,12 @@ _JOINT_LIMITS = [
     (-2.007, 2.007),   # arm_joint6
 ]
 
+# Physical limits remain identical to the URDF.  Only J2's lower boundary has a
+# calibration/noise margin: [-0.05, 0) rad is accepted but clipped to 0.  Every
+# upper boundary and every other joint boundary remains strict.
+_JOINT_LIMIT_LOWER_TOLERANCE_RAD = np.array([0.0, 0.05, 0.0, 0.0, 0.0, 0.0])
+_JOINT_LIMIT_UPPER_TOLERANCE_RAD = np.zeros(_NUM_JOINTS)
+
 # _DEFAULT_KP = np.array([100.0, 60.0, 40.0, 120.0, 10.0, 25.0])
 # _DEFAULT_KD = np.array([4.9,  4.5,  5.0,  2.0,  0.5,  4])
 
@@ -256,6 +262,8 @@ def get_a1z_robot(
         default_kp=default_kp if default_kp is not None else _DEFAULT_KP,
         default_kd=default_kd if default_kd is not None else _DEFAULT_KD,
         joint_limits=_JOINT_LIMITS,
+        joint_limit_lower_tolerance_rad=_JOINT_LIMIT_LOWER_TOLERANCE_RAD,
+        joint_limit_upper_tolerance_rad=_JOINT_LIMIT_UPPER_TOLERANCE_RAD,
         gripper=gripper,
         control_freq_hz=control_freq_hz,
         min_freq_hz=min_freq_hz,

@@ -167,6 +167,8 @@ class ArmRobot:
         temp_rotor_estop_c: float = 90.0,
         stale_feedback_warn_s: float = 0.05,
         stale_feedback_estop_s: float = 0.2,
+        joint_limit_lower_tolerance_rad: Optional[np.ndarray] = None,
+        joint_limit_upper_tolerance_rad: Optional[np.ndarray] = None,
     ):
         self._motor_chain = motor_chain
         self._bus = bus
@@ -182,6 +184,31 @@ class ArmRobot:
         self._default_kp = default_kp if default_kp is not None else np.array([30.0, 30.0, 30.0, 20.0, 5.0, 5.0])
         self._default_kd = default_kd if default_kd is not None else np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])
         self._joint_limits = joint_limits
+
+        def _validated_tolerance(
+            name: str, value: Optional[np.ndarray]
+        ) -> np.ndarray:
+            tolerance = (
+                np.zeros(num_joints, dtype=np.float64)
+                if value is None
+                else np.asarray(value, dtype=np.float64)
+            )
+            if tolerance.shape != (num_joints,):
+                raise ValueError(
+                    f"{name} must contain exactly {num_joints} values"
+                )
+            if not np.all(np.isfinite(tolerance)) or np.any(tolerance < 0.0):
+                raise ValueError(f"{name} values must be finite and non-negative")
+            return tolerance.copy()
+
+        self._joint_limit_lower_tolerance_rad = _validated_tolerance(
+            "joint_limit_lower_tolerance_rad",
+            joint_limit_lower_tolerance_rad,
+        )
+        self._joint_limit_upper_tolerance_rad = _validated_tolerance(
+            "joint_limit_upper_tolerance_rad",
+            joint_limit_upper_tolerance_rad,
+        )
         self.gripper: Optional[Gripper] = gripper
         self._control_freq_hz = control_freq_hz
         self._control_period_s = 1.0 / control_freq_hz
@@ -814,15 +841,18 @@ class ArmRobot:
             return None
         return self._clip_joint_pos(vector)
 
-    def command_joint_pos(self, pos: np.ndarray) -> None:
+    def command_joint_pos(self, pos: np.ndarray) -> bool:
         """Set target joint angles (rad) with default PD gains.
 
         Accepts either a 6-element arm-only array or a 7-element array where
         pos[6] is the gripper normalized position in [0.0, 1.0].
+
+        Returns:
+            True when the arm frame was accepted, otherwise False.
         """
         if self._commands_blocked.is_set():
             logger.warning("command_joint_pos rejected: robot is in estop")
-            return
+            return False
         # Keep the historical 7-element compatibility even when no integrated
         # gripper is attached; in that case the final value is ignored.
         allowed_sizes = (self._num_joints, self._num_joints + 1)
@@ -832,14 +862,14 @@ class ArmRobot:
             allowed_sizes=allowed_sizes,
         )
         if target is None:
-            return
+            return False
         arm_pos = self._accept_or_reject_stream(target[:self._num_joints])
         if arm_pos is None:
-            return
+            return False
         with self._command_lock:
             if self._commands_blocked.is_set():
                 logger.warning("command_joint_pos rejected: robot entered a fault")
-                return
+                return False
             self._command.pos = arm_pos.copy()
             self._command.vel = np.zeros(self._num_joints)
             self._command.acc = np.zeros(self._num_joints)
@@ -854,13 +884,17 @@ class ArmRobot:
             self._command_gripper_if_allowed(
                 float(np.clip(target[self._num_joints], 0.0, 1.0))
             )
+        return True
 
-    def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> None:
+    def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> bool:
         """Set target joint state.
 
         Args:
             joint_state: Dict with keys 'pos', 'vel', and optionally 'kp', 'kd',
                 'acc', 'torque_ff'.
+
+        Returns:
+            True when the complete frame was accepted, otherwise False.
 
         Out-of-range pos / vel / kp / kd / acc / torque_ff reject the entire
         frame (previous command is held). Silent clipping of garbage
@@ -872,17 +906,17 @@ class ArmRobot:
         """
         if self._commands_blocked.is_set():
             logger.warning("command_joint_state rejected: robot is in estop")
-            return
+            return False
         if not isinstance(joint_state, dict) or "pos" not in joint_state or "vel" not in joint_state:
             logger.error("command_joint_state rejected: required keys are 'pos' and 'vel'")
-            return
+            return False
         pos = self._accept_or_reject_stream(joint_state["pos"])
         if pos is None:
-            return
+            return False
 
         vel = self._coerce_joint_vector(joint_state["vel"], "joint velocity")
         if vel is None:
-            return
+            return False
         if np.any(np.abs(vel) > _MAX_CMD_VEL_RAD_S):
             offenders = "; ".join(
                 f"joint{i + 1}={vel[i]:.2f}"
@@ -892,32 +926,32 @@ class ArmRobot:
                 f"command_joint_state rejected: vel exceeds "
                 f"{_MAX_CMD_VEL_RAD_S} rad/s ({offenders})"
             )
-            return
+            return False
 
         kp = self._coerce_joint_vector(
             joint_state.get("kp", self._default_kp),
             "joint kp",
         )
         if kp is None:
-            return
+            return False
         if np.any(kp < 0) or np.any(kp > _MAX_CMD_KP):
             logger.error(
                 f"command_joint_state rejected: kp out of [0, {_MAX_CMD_KP}] "
                 f"({np.round(kp, 2).tolist()})"
             )
-            return
+            return False
         kd = self._coerce_joint_vector(
             joint_state.get("kd", self._default_kd),
             "joint kd",
         )
         if kd is None:
-            return
+            return False
         if np.any(kd < 0) or np.any(kd > _MAX_CMD_KD):
             logger.error(
                 f"command_joint_state rejected: kd out of [0, {_MAX_CMD_KD}] "
                 f"({np.round(kd, 3).tolist()})"
             )
-            return
+            return False
 
         # Optional feedforward keys — reject-frame on out-of-range, else zero.
         acc_in = joint_state.get("acc")
@@ -934,7 +968,7 @@ class ArmRobot:
                     f"command_joint_state rejected: acc exceeds "
                     f"{_MAX_CMD_ACC_RAD_S2} rad/s² ({offenders})"
                 )
-                return
+                return False
 
         tff_in = joint_state.get("torque_ff")
         if tff_in is None:
@@ -950,18 +984,19 @@ class ArmRobot:
                     f"command_joint_state rejected: torque_ff exceeds per-joint "
                     f"torque_clip ({offenders})"
                 )
-                return
+                return False
 
         with self._command_lock:
             if self._commands_blocked.is_set():
                 logger.warning("command_joint_state rejected: robot entered a fault")
-                return
+                return False
             self._command.pos = pos.copy()
             self._command.vel = vel.copy()
             self._command.acc = acc.copy()
             self._command.kp = kp.copy()
             self._command.kd = kd.copy()
             self._command.torque_ff = torque_ff.copy()
+        return True
 
     def get_joint_pos(self) -> np.ndarray:
         with self._state_lock:
@@ -1014,6 +1049,12 @@ class ArmRobot:
             "default_kp": self._default_kp.copy(),
             "default_kd": self._default_kd.copy(),
             "joint_limits": self._joint_limits,
+            "joint_limit_lower_tolerance_rad": (
+                self._joint_limit_lower_tolerance_rad.tolist()
+            ),
+            "joint_limit_upper_tolerance_rad": (
+                self._joint_limit_upper_tolerance_rad.tolist()
+            ),
             "gravity_comp_factor": self.gravity_comp_factor,
             "control_freq_hz": self._control_freq_hz,
             "coulomb_ff": (
@@ -2385,20 +2426,18 @@ class ArmRobot:
             logger.warning(f"CAN feedback delayed: {details}")
             self._last_stale_warn_t = now
 
-    def _clip_joint_pos(
-        self, pos: np.ndarray, tol_rad: float = 0.05
-    ) -> Optional[np.ndarray]:
+    def _clip_joint_pos(self, pos: np.ndarray) -> Optional[np.ndarray]:
         """Clip small overshoots, reject genuinely out-of-limit commands.
 
         Used by the streaming command entry points (teleop / trajectory replay
         loops) where raising on a single noisy frame would tank the entire
         session. The behavior splits the violation by magnitude:
 
-        - Within tol_rad of a limit: clipped silently (feedback noise, teach
-          recordings resting at the boundary).
-        - Beyond tol_rad: command is *rejected*. Returns None so the caller
-          knows to keep the previous valid command instead of driving the arm
-          to a geometrically unrelated clipped pose.
+        - Within the per-joint tolerance of a limit: clipped (feedback noise,
+          teach recordings resting at the boundary).
+        - Beyond that joint's tolerance: command is *rejected*. Returns None so
+          the caller knows to keep the previous valid command instead of driving
+          the arm to a geometrically unrelated clipped pose.
 
         Rejections are logged at error level on every occurrence (no rate
         limiting) because a junk IK solution is a serious upstream bug. Small
@@ -2410,9 +2449,15 @@ class ArmRobot:
         rejected: List[str] = []
         clipped: List[str] = []
         for i, (lo, hi) in enumerate(self._joint_limits):
-            if pos[i] < lo - tol_rad or pos[i] > hi + tol_rad:
+            lower_tol = float(self._joint_limit_lower_tolerance_rad[i])
+            upper_tol = float(self._joint_limit_upper_tolerance_rad[i])
+            allowed_lo = lo - lower_tol
+            allowed_hi = hi + upper_tol
+            if pos[i] < allowed_lo or pos[i] > allowed_hi:
                 rejected.append(
-                    f"joint{i + 1}={pos[i]:.3f} outside [{lo:.3f}, {hi:.3f}]"
+                    f"joint{i + 1}={pos[i]:.4f} outside allowed "
+                    f"[{allowed_lo:.4f}, {allowed_hi:.4f}] "
+                    f"(physical [{lo:.3f}, {hi:.3f}])"
                 )
             elif pos[i] < lo or pos[i] > hi:
                 clipped.append(
@@ -2435,14 +2480,13 @@ class ArmRobot:
                 )
         return pos
 
-    def _validate_joint_pos(
-        self, pos: np.ndarray, tolerance_rad: float = 0.05
-    ) -> np.ndarray:
+    def _validate_joint_pos(self, pos: np.ndarray) -> np.ndarray:
         """Validate target against joint limits: clip within tolerance, raise beyond.
 
         Small overshoots (e.g. recorded waypoints resting slightly past a soft
-        limit) are silently clipped; anything beyond tolerance_rad indicates an
-        upstream error (bad IK solution, wrong units) and raises ValueError
+        limit) are silently clipped; anything beyond the configured boundary
+        tolerance indicates an upstream error (bad IK solution, wrong units)
+        and raises ValueError
         instead of executing a geometrically unrelated clipped configuration.
         """
         pos = pos.copy()
@@ -2450,9 +2494,15 @@ class ArmRobot:
             return pos
         violations = []
         for i, (lo, hi) in enumerate(self._joint_limits):
-            if pos[i] < lo - tolerance_rad or pos[i] > hi + tolerance_rad:
+            lower_tol = float(self._joint_limit_lower_tolerance_rad[i])
+            upper_tol = float(self._joint_limit_upper_tolerance_rad[i])
+            allowed_lo = lo - lower_tol
+            allowed_hi = hi + upper_tol
+            if pos[i] < allowed_lo or pos[i] > allowed_hi:
                 violations.append(
-                    f"joint{i + 1}: {pos[i]:.3f} rad outside [{lo:.3f}, {hi:.3f}]"
+                    f"joint{i + 1}: {pos[i]:.4f} rad outside allowed "
+                    f"[{allowed_lo:.4f}, {allowed_hi:.4f}] "
+                    f"(physical [{lo:.3f}, {hi:.3f}])"
                 )
             pos[i] = np.clip(pos[i], lo, hi)
         if violations:
