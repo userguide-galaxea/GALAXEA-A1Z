@@ -24,6 +24,7 @@ Available URDF models (a1z/robot_models/a1z/):
 """
 
 import argparse
+import logging
 import signal
 import sys
 import time
@@ -32,6 +33,8 @@ import numpy as np
 
 from a1z.robots.get_robot import get_a1z_robot
 from a1z.config import add_config_argument, load_config, config_to_robot_kwargs
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 
 
 def main():
@@ -42,14 +45,34 @@ def main():
                         help="Gravity compensation scale (0=off, 1=full). Start small (e.g. 0.3).")
     parser.add_argument("--freq", type=int, default=None, help="Control loop frequency (Hz).")
     parser.add_argument("--can", default=None, help="CAN channel.")
+    parser.add_argument("--bustype", default=None,
+                        help="python-can backend: socketcan, gs_usb, pcan, slcan. "
+                             "Default: socketcan on Linux, gs_usb on macOS/Windows.")
     parser.add_argument("--urdf", default=None, help="Override URDF path.")
+    parser.add_argument("--duration", type=float, default=0.0,
+                        help="Automatically stop after N seconds; 0 runs until Ctrl+C.")
     parser.add_argument("--with-gripper", action="store_true",
                         help="Enable G1Z gripper (overrides config if set).")
     parser.add_argument("--kd", type=str, default=None,
                         help="Override kd gains, comma-separated (6 values). "
                              "E.g. --kd 0.2,0.2,0.2,0.1,0.1,0.1")
+    parser.set_defaults(return_zero=True)
+    parser.add_argument(
+        "--return-zero",
+        dest="return_zero",
+        action="store_true",
+        help="Actively return to zero after stopping (default).",
+    )
+    parser.add_argument(
+        "--no-return-zero",
+        dest="return_zero",
+        action="store_false",
+        help="Disable immediately after stopping instead of returning to zero.",
+    )
     add_config_argument(parser)
     args = parser.parse_args()
+    if not np.isfinite(args.duration) or args.duration < 0:
+        raise ValueError("--duration must be a finite value >= 0")
 
     config = load_config(args.config) if args.config else {}
     kwargs = config_to_robot_kwargs(config)
@@ -61,6 +84,8 @@ def main():
         kwargs["gravity_comp_factor"] = args.gravity_factor
     if args.freq is not None:
         kwargs["control_freq_hz"] = args.freq
+    if args.bustype is not None:
+        kwargs["bustype"] = args.bustype
     if args.urdf is not None:
         kwargs["urdf_path"] = args.urdf
     if args.with_gripper:
@@ -83,9 +108,13 @@ def main():
     print(f"  Gravity factor:  {kwargs.get('gravity_comp_factor', 1.0)}")
     print(f"  Control freq:    {kwargs.get('control_freq_hz', 250)} Hz")
     print(f"  CAN channel:     {kwargs.get('can_channel', 'can0')}")
+    print(f"  CAN backend:     {kwargs.get('bustype', 'auto')}")
     print(f"  With gripper:    {kwargs.get('with_gripper', False)}")
+    if args.duration > 0:
+        print(f"  Duration:        {args.duration:g}s")
     if kd_override is not None:
         print(f"  kd override:     {kd_override}")
+    print(f"  Stop behavior:   {'Return to zero' if args.return_zero else 'Immediate disable'}")
     print("=" * 60)
 
     robot = get_a1z_robot(**kwargs)
@@ -95,8 +124,14 @@ def main():
     try:
         robot.start(initial_kd=kd_override)
         print("\nRobot running. Press Ctrl+C to stop.\n")
+        stop_deadline = (
+            time.monotonic() + args.duration if args.duration > 0 else None
+        )
 
         while robot.is_running:
+            if stop_deadline is not None and time.monotonic() >= stop_deadline:
+                print(f"\nDuration {args.duration:g}s reached.")
+                break
             state = robot.get_joint_state()
             pos_deg = np.degrees(state["pos"])
             eff = state["eff"]
@@ -110,11 +145,32 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if robot.is_running:
-            print("\nReturning to zero...")
-            robot.move_joints(np.zeros(6), speed=0.3)
-            time.sleep(0.3)
-        robot.stop()
+        try:
+            if robot.is_running and args.return_zero:
+                print("\nReturning to zero...")
+                robot.move_joints(
+                    np.zeros(6),
+                    speed=0.3,
+                    sync_to_measured=zero_gravity,
+                    gain_ramp_s=0.75,
+                )
+                time.sleep(0.3)
+            elif robot.is_running:
+                print(
+                    "\nStopping immediately "
+                    "(automatic return-to-zero disabled)..."
+                )
+        except KeyboardInterrupt:
+            print("\nReturn-to-zero interrupted; disabling immediately...")
+        except Exception:
+            logging.exception("Return-to-zero failed; disabling immediately")
+        finally:
+            # A second Ctrl+C must never interrupt the motor-disable sequence.
+            previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                robot.stop()
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint)
         print("\nDone.")
 
 

@@ -239,10 +239,11 @@ class MotorChain(Protocol):
 
     def num_motors(self) -> int: ...
     def enable_all(self) -> None: ...
-    def disable_all(self) -> None: ...
+    def disable_all(self) -> bool: ...
     def get_positions(self) -> np.ndarray: ...
     def get_velocities(self) -> np.ndarray: ...
     def get_efforts(self) -> np.ndarray: ...
+    def get_feedback_ages(self) -> np.ndarray: ...
     def send_commands(
         self,
         pos: np.ndarray,
@@ -294,6 +295,10 @@ class MixedMotorChain:
         self._positions = np.zeros(self._n)
         self._velocities = np.zeros(self._n)
         self._efforts = np.zeros(self._n)
+        # Monotonic receive time for the most recent successfully parsed
+        # feedback frame from each joint. ``-inf`` means no valid feedback has
+        # ever been received; wall-clock changes cannot affect these ages.
+        self._last_feedback_monotonic = np.full(self._n, -np.inf)
 
     def num_motors(self) -> int:
         return self._n
@@ -304,21 +309,25 @@ class MixedMotorChain:
         for motor in self._motor_b_list:
             motor.enable()
 
-    def disable_all(self) -> None:
+    def disable_all(self) -> bool:
         # Send twice for both motor types — a single frame arriving immediately
         # after an MIT command can be missed on a busy bus.
         # motor.disable() already includes a 10 ms inter-frame gap.
+        success = True
         for _ in range(2):
             for motor in self._motor_a_list:
                 try:
                     motor.disable()
                 except Exception:
-                    pass
+                    success = False
+                    logger.exception("Failed to disable MotorA id=%s", motor.motor_id)
             for motor in self._motor_b_list:
                 try:
                     motor.disable()
                 except Exception:
-                    pass
+                    success = False
+                    logger.exception("Failed to disable MotorB id=%s", motor.motor_id)
+        return success
 
     def drain_and_update(self, bus: can.BusABC, timeout: float = 0.001, max_messages: int = 0) -> int:
         """Drain all pending CAN messages from the bus, dispatching to the correct motor parser.
@@ -329,18 +338,23 @@ class MixedMotorChain:
             max_messages: Maximum messages to read per call. 0 means 2 * num_motors.
 
         Returns:
-            Number of messages processed.
+            Number of valid feedback messages processed.
         """
         if max_messages <= 0:
             max_messages = self._n * 2
-        count = 0
-        t_end = time.time() + timeout
-        while count < max_messages and time.time() < t_end:
+        drained_count = 0
+        valid_count = 0
+        t_end = time.monotonic() + timeout
+        while drained_count < max_messages and time.monotonic() < t_end:
             msg = bus.recv(timeout=0.0)
             if msg is None:
                 break
-            self._dispatch_feedback(msg)
-            count += 1
+            drained_count += 1
+            if self._dispatch_feedback(msg):
+                valid_count += 1
+        record_drain = getattr(bus, "record_drain", None)
+        if record_drain is not None:
+            record_drain(drained_count, max_messages)
 
         # Update state arrays from last_feedback
         for i, motor in enumerate(self._motor_a_list):
@@ -359,18 +373,32 @@ class MixedMotorChain:
                 self._velocities[idx] = fb.velocity
                 self._efforts[idx] = fb.torque
 
-        return count
+        return valid_count
 
-    def _dispatch_feedback(self, msg: can.Message) -> None:
-        """Route a CAN message to the correct motor parser."""
+    def _dispatch_feedback(self, msg: can.Message) -> bool:
+        """Route one CAN message and report whether valid feedback was parsed."""
         mid = int(msg.arbitration_id)
         entry = self._motor_id_map.get(mid)
         if entry is None:
-            return
+            return False
         motor_type, motor, joint_idx = entry
         fb = motor.parse_feedback(msg)
         if fb is not None:
             motor.last_feedback = fb
+            if joint_idx >= 0:
+                self._last_feedback_monotonic[joint_idx] = time.monotonic()
+            return True
+        return False
+
+    def get_feedback_ages(self) -> np.ndarray:
+        """Return age in seconds of each joint's latest valid feedback.
+
+        Joints which have never produced valid feedback return ``inf``.
+        """
+        now = time.monotonic()
+        ages = now - self._last_feedback_monotonic
+        ages[~np.isfinite(self._last_feedback_monotonic)] = np.inf
+        return ages
 
     def register_external_motor(self, motor: "MotorB") -> None:
         """Register a motor for CAN feedback routing without adding it to the joint chain.

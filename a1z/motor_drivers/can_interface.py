@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import can
 
+from a1z.motor_drivers.can_backend import open_can_bus
 from a1z.motor_drivers.utils import ReceiveMode
 
 
@@ -15,13 +16,13 @@ class CanInterface:
     def __init__(
         self,
         channel: str = "can0",
-        bustype: str = "socketcan",
+        bustype: Optional[str] = None,
         bitrate: int = 1_000_000,
         name: str = "default_can_interface",
         receive_mode: ReceiveMode = ReceiveMode.same,
         use_buffered_reader: bool = False,
     ):
-        self.bus = can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
+        self.bus = open_can_bus(channel=channel, bitrate=bitrate, bustype=bustype)
         self.busstate = self.bus.state
         self.name = name
         self.receive_mode = receive_mode

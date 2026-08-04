@@ -8,6 +8,7 @@ import can
 import numpy as np
 
 from a1z.dynamics.gravity_model import GravityModel
+from a1z.motor_drivers.can_backend import open_can_bus
 from a1z.motor_drivers.motor_b_driver import MotorB, MotorBRanges, MixedMotorChain
 from a1z.motor_drivers.motor_a_driver import MotorA, MotorARanges
 from a1z.robots.arm_robot import ArmRobot
@@ -85,6 +86,7 @@ def get_a1z_robot(
     with_gripper: bool = False,
     gripper_max_torque: float = 2.0,
     motor_a_use_new_enable_protocol: bool = False,
+    bustype: Optional[str] = None,
 ) -> ArmRobot:
     """Create and return a configured A1Z ArmRobot.
 
@@ -106,6 +108,8 @@ def get_a1z_robot(
         motor_a_use_new_enable_protocol: If True, use the 0x7FF config-frame
             enable/disable protocol for MotorA (for newer firmware). Default
             False keeps the legacy per-motor 0xFC/0xFD frames.
+        bustype: Force a python-can backend (e.g. 'socketcan', 'gs_usb',
+                 'pcan'). None auto-detects based on OS.
 
     Returns:
         Configured ArmRobot instance (call .start() to begin control).
@@ -117,12 +121,8 @@ def get_a1z_robot(
     else:
         urdf = _DEFAULT_URDF_PATH
 
-    # Open CAN bus
-    bus = can.interface.Bus(
-        channel=can_channel,
-        bustype="socketcan",
-        bitrate=1_000_000,
-    )
+    # Open CAN bus (auto-detects platform: socketcan on Linux, gs_usb on macOS/Windows)
+    bus = open_can_bus(channel=can_channel, bitrate=1_000_000, bustype=bustype)
 
     # Create MotorA motors
     motor_a_list = [
@@ -178,4 +178,10 @@ def get_a1z_robot(
         control_freq_hz=control_freq_hz,
         min_freq_hz=min_freq_hz,
         motor_a_kt=_MOTOR_A_KT,
+        # J6 firmware feedback is intentionally/sometimes sparse on both
+        # SocketCAN and userspace gs_usb (observed gaps near 200 ms). Keep
+        # J1-J5 strict while allowing that known cadence on the low-torque
+        # wrist joint.
+        stale_feedback_warn_s=np.array([0.05, 0.05, 0.05, 0.05, 0.05, 0.5]),
+        stale_feedback_estop_s=np.array([0.2, 0.2, 0.2, 0.2, 0.2, 2.0]),
     )

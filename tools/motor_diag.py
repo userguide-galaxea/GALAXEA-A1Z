@@ -44,6 +44,7 @@ import can
 import numpy as np
 
 from a1z.config import add_config_argument, load_config
+from a1z.motor_drivers.can_backend import open_can_bus
 
 # ── 默认配置（与 get_robot.py 一致） ──────────────────
 
@@ -146,6 +147,38 @@ def parse_motor_a_feedback(data: bytes) -> dict:
     }
 
 
+def _disable_joints_and_flush(bus: can.BusABC, joints: List[int]) -> bool:
+    """Repeatedly disable selected joints and wait for transport completion."""
+    ok = True
+    disable_data = bytes([0xFF] * 7 + [0xFD])
+    for _ in range(2):
+        for joint in joints:
+            _, _, can_id = JOINT_CONFIG[joint]
+            try:
+                bus.send(
+                    can.Message(
+                        arbitration_id=can_id,
+                        data=disable_data,
+                        is_extended_id=False,
+                    )
+                )
+                time.sleep(0.01)
+            except Exception as exc:
+                ok = False
+                print(f"[ERROR] Joint {joint} 失能帧发送失败: {exc}")
+
+    flush_tx = getattr(bus, "flush_tx", None)
+    if flush_tx is not None:
+        try:
+            if not flush_tx(timeout=0.5):
+                ok = False
+                print("[ERROR] 失能帧在 CAN 关闭前未完成发送")
+        except Exception as exc:
+            ok = False
+            print(f"[ERROR] 等待失能帧完成时出错: {exc}")
+    return ok
+
+
 def parse_motor_b_feedback(data: bytes, tor_range: Tuple[float, float]) -> dict:
     """解析 MotorB 反馈帧。"""
     if len(data) < 8:
@@ -174,8 +207,21 @@ def get_motor_b_torque_range(motor_type: str) -> Tuple[float, float]:
 
 # ── CAN 接口检查 ─────────────────────────────────────
 
-def check_can_interface(channel: str) -> Tuple[bool, str]:
-    """检查 CAN 接口状态，返回 (是否正常, 详情)。"""
+def check_can_interface(channel: str, bustype: Optional[str] = None) -> Tuple[bool, str]:
+    """检查 CAN 接口状态，返回 (是否正常, 详情)。
+
+    仅 Linux SocketCAN 后端需要检查；gs_usb / pcan 等用户态后端跳过。
+    """
+    import platform
+    from a1z.motor_drivers.can_backend import default_bustype
+
+    if bustype is None:
+        bustype = default_bustype()
+    if bustype != "socketcan":
+        return True, f"{bustype} 用户态后端（无需 SocketCAN 接口检查）"
+    if platform.system() != "Linux":
+        return True, "非 Linux 平台，跳过 SocketCAN 接口检查"
+
     try:
         result = subprocess.run(
             ["ip", "-details", "link", "show", channel],
@@ -786,6 +832,9 @@ def main():
     group.add_argument("--clear-error", action="store_true", help="清除 MotorB 错误码")
 
     parser.add_argument("--channel", default=None, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
+    parser.add_argument("--bustype", default=None,
+                        help="python-can 后端: socketcan, gs_usb, pcan, slcan. "
+                             "默认: Linux 用 socketcan, macOS/Windows 用 gs_usb")
     parser.add_argument("--bitrate", type=int, default=None, help=f"CAN 波特率 (默认: {CAN_BITRATE})")
     parser.add_argument("--type", choices=["all", "motor_a", "motor_b"], default="all", help="电机类型筛选")
     parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5, 6 with --with-gripper)")
@@ -798,6 +847,7 @@ def main():
 
     config = load_config(args.config) if args.config else {}
     channel = args.channel if args.channel is not None else config.get("can_channel", CAN_CHANNEL)
+    bustype = args.bustype if args.bustype is not None else config.get("bustype")
     bitrate = args.bitrate if args.bitrate is not None else config.get("bitrate", CAN_BITRATE)
     with_gripper = args.with_gripper if args.with_gripper is not None else config.get("with_gripper", False)
 
@@ -824,8 +874,8 @@ def main():
 
     # check-can 不需要打开 CAN 总线
     if args.check_can:
-        print(f"\n检查 CAN 接口: {channel}")
-        ok, detail = check_can_interface(channel)
+        print(f"\n检查 CAN 接口: {channel} (backend: {bustype or 'auto'})")
+        ok, detail = check_can_interface(channel, bustype=bustype)
         if ok:
             print(f"  [OK] {detail}")
         else:
@@ -840,19 +890,18 @@ def main():
         return
 
     # 其余操作需要打开 CAN 总线
-    print(f"\nCAN 通道: {channel}  波特率: {bitrate}")
+    print(f"\nCAN 通道: {channel}  波特率: {bitrate}  后端: {bustype or 'auto'}")
 
-    # 先检查接口
-    ok, detail = check_can_interface(channel)
+    # 先检查接口（用户态后端自动跳过 SocketCAN 检查）
+    ok, detail = check_can_interface(channel, bustype=bustype)
     if not ok:
         print(f"\n[FAIL] {detail}")
         sys.exit(1)
 
     try:
-        bus = can.interface.Bus(channel=channel, bustype=CAN_BUSTYPE, bitrate=bitrate)
+        bus = open_can_bus(channel=channel, bitrate=bitrate, bustype=bustype)
     except Exception as e:
         print(f"\n无法打开 CAN 总线: {e}")
-        print(f"请检查: sudo ip link set {channel} up type can bitrate {bitrate}")
         sys.exit(1)
 
     try:
@@ -879,11 +928,23 @@ def main():
     except KeyboardInterrupt:
         print("\n中断。")
     finally:
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            bus.shutdown()
-        except Exception:
-            pass
-        print("CAN 总线已关闭。")
+            if args.scan or args.monitor or args.probe is not None:
+                disable_joints = (
+                    [args.probe] if args.probe is not None else joints
+                )
+                if _disable_joints_and_flush(bus, disable_joints):
+                    print("所有已操作电机均已失能。")
+                else:
+                    print("[ERROR] 无法确认所有电机均已失能！")
+            try:
+                bus.shutdown()
+            except Exception as exc:
+                print(f"[ERROR] 关闭 CAN 总线失败: {exc}")
+            print("CAN 总线已关闭。")
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 if __name__ == "__main__":

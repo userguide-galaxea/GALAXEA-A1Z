@@ -21,6 +21,7 @@ a1z/
 │   ├── dynamics/
 │   │   └── gravity_model.py       # Pinocchio RNEA 重力补偿
 │   ├── motor_drivers/
+│   │   ├── can_backend.py         # 跨平台 CAN 后端选择（Linux/macOS/Windows 自动适配）
 │   │   ├── can_interface.py       # CAN 总线封装
 │   │   ├── motor_a_driver.py      # MotorA 驱动 (MIT 混控)
 │   │   ├── motor_b_driver.py      # MotorB 驱动 + MixedMotorChain
@@ -45,7 +46,10 @@ a1z/
     ├── a1zctl                     # 机械臂控制 CLI（serve/move/gripper/dance/stop）
     ├── gripper_set_zero.py        # 夹爪零点标定（出厂已完成，一般无需执行）
     ├── motor_diag.py              # 电机通信诊断与故障排查
-    └── set_zero.py                # 电机零点标定
+    ├── set_zero.py                # 电机零点标定
+    ├── setup_can.sh               # Linux SocketCAN 一键配置
+    ├── verify_can_mac.sh          # macOS CAN 通信验证
+    └── verify_can_win.py          # Windows CAN 通信验证
 ```
 
 
@@ -54,8 +58,11 @@ a1z/
 ### 依赖
 
 - Python >= 3.10
-- Linux + SocketCAN（需硬件 CAN 接口）
+- **Linux**：SocketCAN（需硬件 CAN 接口）
+- **macOS / Windows**：通过 HHS USB-CANFD 适配器（VID:PID `a8fa:8598`）连接，SDK 自动使用 gs_usb 用户态后端
 - URDF 模型文件（包内自带，见 `a1z/robot_models/a1z/`。默认使用 `A1Z_Flange.urdf`；启用夹爪时使用 `A1Z_G1Z.urdf`）
+
+> 跨平台支持详情见 [跨平台 CAN 配置](#跨平台-can-配置) 章节。
 
 ### 安装 SDK
 
@@ -66,6 +73,11 @@ git clone https://github.com/userguide-galaxea/GALAXEA-A1Z.git
 
 cd /path/to/GALAXEA-A1Z
 
+# 建议使用虚拟环境，避免污染系统 Python（可选但推荐）
+# 注意解释器必须 >= 3.10；macOS 自带的 python3 是 3.9，请显式指定，如 python3.10
+python3 -m venv .venv
+source .venv/bin/activate    # Windows 用 .venv\Scripts\activate
+
 # 开发模式安装（推荐）
 pip install -e .
 
@@ -75,9 +87,20 @@ pip install .
 
 依赖会自动安装：`numpy`、`python-can>=4.0`、`pin`（Pinocchio）、`pyyaml`。
 
+macOS / Windows 用户请改用以下命令安装（含 gs_usb 用户态后端 + 内置 libusb，无需额外安装驱动库）：
+
+```bash
+pip install -e ".[gs_usb]"
+```
+
+> 注意：macOS 默认的 zsh 会把 `[...]` 当作通配符并报 `no matches found`，所以引号不能省。
+
 ### 配置文件（可选）
 
-仓库根目录提供了一份示例 `a1z_config.yaml`，可在其中一次性设置 CAN 通道、URDF、夹爪等参数。所有支持 `--config` 的脚本都会读取该文件，且命令行参数优先级高于配置文件。
+仓库根目录提供了两份配置文件，可在其中一次性设置 CAN 通道、URDF、夹爪等参数。所有支持 `--config` 的脚本（examples、tools、a1zctl）都会读取该文件，且命令行参数优先级高于配置文件。
+
+- `a1z.yaml`：默认配置，无夹爪（`with_gripper: false`）
+- `a1z_g1z.yaml`：末端装有 G1Z 夹爪时使用（`with_gripper: true`，自动切换为 A1Z_G1Z.urdf）
 
 ```yaml
 can_channel: can0
@@ -85,15 +108,16 @@ control_freq_hz: 250
 gravity_comp_factor: 1.0
 zero_gravity_mode: true
 with_gripper: false
-# 使用夹爪时只需改为 true，会自动切换为 A1Z_G1Z.urdf
 ```
 
 使用示例：
 
 ```bash
-python examples/position_hold.py --config a1z_config.yaml --with-gripper
-python tools/a1zctl serve --config a1z_config.yaml --with-gripper
-python tools/motor_diag.py --scan --config a1z_config.yaml
+python examples/position_hold.py --config a1z.yaml
+python examples/position_hold.py --config a1z_g1z.yaml   # 带夹爪
+python tools/a1zctl serve --config a1z_g1z.yaml
+python tools/motor_diag.py --scan --config a1z.yaml
+python tools/set_zero.py --all --config a1z.yaml
 ```
 
 ### 配置 CAN 总线（SocketCAN 模式）
@@ -116,6 +140,51 @@ ip link show type can
 sudo ip link set can0 type can bitrate 1000000
 sudo ip link set can0 up
 ```
+
+#### macOS（gs_usb 用户态模式）
+
+macOS 没有 SocketCAN，SDK 会自动检测平台并使用 gs_usb 用户态后端连接 HHS USB-CANFD 适配器，**无需手动配置 CAN 接口**。
+
+```bash
+# 1. 安装 SDK + gs_usb extras（含内置 libusb，通常无需 brew）
+pip install -e ".[gs_usb]"
+
+# 2. 验证 CAN 通信（可选）
+bash tools/verify_can_mac.sh
+```
+
+#### Windows（gs_usb 用户态模式）
+
+Windows 同样走 gs_usb 用户态后端，但需要先用 **Zadig** 安装 WinUSB 驱动：
+
+```powershell
+# 1. 用 Zadig 将 HHS 适配器驱动替换为 WinUSB
+
+# 2. 安装 Pinocchio（Windows 没有 pip 预编译包，必须用 conda）
+conda install -c conda-forge pin
+
+# 3. 安装 SDK + gs_usb extras
+pip install -e ".[gs_usb]"
+
+# 4. 验证 CAN 通信（可选）
+python tools\verify_can_win.py
+```
+
+> ⚠️ **Zadig 步骤不能省**。Windows 默认会用通用 USB 串行驱动占用 HHS 设备，libusb 抢不到设备会报 `Cannot find device 0`。
+
+#### 跨平台 CAN 配置
+
+SDK 默认按平台自动选择 CAN 后端：
+
+| 平台 | 适配器 | 安装 | 使用 |
+|------|--------|------|------|
+| Linux | SocketCAN 内核驱动 | `pip install -e .` | `--can can0` |
+| **macOS** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"` | （默认）`gs_usb` |
+| **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB 运行时 | `--bustype pcan --can PCAN_USBBUS1` |
+| **Windows** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"` + Zadig WinUSB 驱动 | （默认）`gs_usb` |
+| **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK 官方驱动 | `--bustype pcan --can PCAN_USBBUS1` |
+
+不传 `--bustype` 时使用 OS 默认值：Linux 默认 `socketcan`/`can0`，macOS/Windows 默认 `gs_usb`/设备序号 `0`。
 
 ## 快速开始
 
@@ -297,6 +366,7 @@ get_a1z_robot(
     default_kd=None,              # 覆盖默认速度增益
     with_gripper=False,           # True=启用夹爪 (CAN ID 0x07)
     gripper_max_torque=2.0,       # 夹爪最大夹持力矩 (Nm)，默认 2.0 Nm
+    bustype=None,                 # CAN 后端（None=OS 默认: Linux→socketcan, macOS/Windows→gs_usb）
 ) -> ArmRobot
 ```
 
@@ -550,6 +620,7 @@ a1z/
 │   ├── dynamics/
 │   │   └── gravity_model.py       # Pinocchio RNEA gravity compensation
 │   ├── motor_drivers/
+│   │   ├── can_backend.py         # Cross-platform CAN backend selection (Linux/macOS/Windows auto-adaptation)
 │   │   ├── can_interface.py       # CAN bus wrapper
 │   │   ├── motor_a_driver.py      # MotorA driver (MIT mixed control)
 │   │   ├── motor_b_driver.py      # MotorB driver + MixedMotorChain
@@ -574,7 +645,10 @@ a1z/
     ├── a1zctl                     # Arm control CLI (serve/move/gripper/dance/stop)
     ├── gripper_set_zero.py        # Gripper zero calibration (factory-done, rarely needed)
     ├── motor_diag.py              # Motor communication diagnostics
-    └── set_zero.py                # Motor zero calibration
+    ├── set_zero.py                # Motor zero calibration
+    ├── setup_can.sh               # Linux SocketCAN one-step setup
+    ├── verify_can_mac.sh          # macOS CAN communication verification
+    └── verify_can_win.py          # Windows CAN communication verification
 ```
 
 ## Installation
@@ -582,8 +656,11 @@ a1z/
 ### Prerequisites
 
 - Python >= 3.10
-- Linux + SocketCAN (hardware CAN interface required)
+- **Linux**: SocketCAN (hardware CAN interface required)
+- **macOS / Windows**: Connects via the HHS USB-CANFD adapter (VID:PID `a8fa:8598`); the SDK automatically uses the gs_usb userspace backend
 - URDF model files (bundled, see `a1z/robot_models/a1z/`; defaults to `A1Z_Flange.urdf`, use `A1Z_G1Z.urdf` with `with_gripper=True`)
+
+> See the [Cross-Platform CAN Configuration](#cross-platform-can-configuration) section for details.
 
 ### Install the SDK
 
@@ -592,6 +669,11 @@ a1z/
 git clone https://github.com/userguide-galaxea/GALAXEA-A1Z.git
 
 cd /path/to/GALAXEA-A1Z
+
+# A virtual environment is recommended to keep your system Python clean
+# The interpreter must be >= 3.10; the macOS system python3 is 3.9, so specify one explicitly, e.g. python3.10
+python3 -m venv .venv
+source .venv/bin/activate    # on Windows: .venv\Scripts\activate
 
 # Development mode (recommended)
 pip install -e .
@@ -602,9 +684,20 @@ pip install .
 
 Dependencies are installed automatically: `numpy`, `python-can>=4.0`, `pin` (Pinocchio), `pyyaml`.
 
+On macOS / Windows, install with the gs_usb extras instead (includes the gs_usb userspace backend + bundled libusb — no extra driver library needed):
+
+```bash
+pip install -e ".[gs_usb]"
+```
+
+> Note: zsh (the default macOS shell) treats `[...]` as a glob and fails with `no matches found` — the quotes are required.
+
 ### Configuration File (Optional)
 
-An example `a1z_config.yaml` is provided in the repo root. Put default robot parameters there once and reuse them across examples and tools. Command-line flags override config-file values.
+Two config files are provided in the repo root. Put default robot parameters there once and reuse them across examples and tools — every script that supports `--config` (examples, tools, a1zctl) reads it, and command-line flags override config-file values.
+
+- `a1z.yaml`: default config, no gripper (`with_gripper: false`)
+- `a1z_g1z.yaml`: use when a G1Z gripper is attached (`with_gripper: true`, automatically switches to A1Z_G1Z.urdf)
 
 ```yaml
 can_channel: can0
@@ -612,15 +705,16 @@ control_freq_hz: 250
 gravity_comp_factor: 1.0
 zero_gravity_mode: true
 with_gripper: false
-# Set with_gripper: true to use A1Z_G1Z.urdf automatically
 ```
 
 Example usage:
 
 ```bash
-python examples/position_hold.py --config a1z_config.yaml --with-gripper
-python tools/a1zctl serve --config a1z_config.yaml --with-gripper
-python tools/motor_diag.py --scan --config a1z_config.yaml
+python examples/position_hold.py --config a1z.yaml
+python examples/position_hold.py --config a1z_g1z.yaml   # with gripper
+python tools/a1zctl serve --config a1z_g1z.yaml
+python tools/motor_diag.py --scan --config a1z.yaml
+python tools/set_zero.py --all --config a1z.yaml
 ```
 
 ### Configure the CAN Bus (SocketCAN)
@@ -643,6 +737,51 @@ ip link show type can
 sudo ip link set can0 type can bitrate 1000000
 sudo ip link set can0 up
 ```
+
+#### macOS (gs_usb userspace mode)
+
+macOS has no SocketCAN. The SDK automatically detects the platform and uses the gs_usb userspace backend to connect to the HHS USB-CANFD adapter — **no manual CAN interface configuration is required**.
+
+```bash
+# 1. Install SDK + gs_usb extras (includes bundled libusb; usually no brew needed)
+pip install -e ".[gs_usb]"
+
+# 2. Verify CAN communication (optional)
+bash tools/verify_can_mac.sh
+```
+
+#### Windows (gs_usb userspace mode)
+
+Windows also uses the gs_usb userspace backend, but you must first install a WinUSB driver with **Zadig**:
+
+```powershell
+# 1. Use Zadig to replace the HHS adapter driver with WinUSB
+
+# 2. Install Pinocchio (no pip prebuilt package on Windows; conda is required)
+conda install -c conda-forge pin
+
+# 3. Install SDK + gs_usb extras
+pip install -e ".[gs_usb]"
+
+# 4. Verify CAN communication (optional)
+python tools\verify_can_win.py
+```
+
+> ⚠️ **The Zadig step is mandatory.** Windows will otherwise occupy the HHS device with the generic USB-serial driver, and libusb will report `Cannot find device 0`.
+
+#### Cross-Platform CAN Configuration
+
+The SDK automatically selects the CAN backend by platform:
+
+| Platform | Adapter | Install | Usage |
+|----------|---------|---------|-------|
+| Linux | SocketCAN kernel driver | `pip install -e .` | `--can can0` |
+| **macOS** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"` | (default) `gs_usb` |
+| **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB runtime | `--bustype pcan --can PCAN_USBBUS1` |
+| **Windows** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"` + Zadig WinUSB driver | (default) `gs_usb` |
+| **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK official driver | `--bustype pcan --can PCAN_USBBUS1` |
+
+When `--bustype` is omitted, the OS default is used: Linux defaults to `socketcan`/`can0`; macOS/Windows default to `gs_usb`/device index `0`.
 
 ## Quick Start
 
@@ -824,6 +963,7 @@ get_a1z_robot(
     default_kd=None,              # Override default velocity gains
     with_gripper=False,           # True=enable gripper (CAN ID 0x07)
     gripper_max_torque=2.0,       # Max gripping torque (Nm), default 2.0 Nm
+    bustype=None,                 # CAN backend (None=OS default: Linux→socketcan, macOS/Windows→gs_usb)
 ) -> ArmRobot
 ```
 

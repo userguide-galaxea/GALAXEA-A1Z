@@ -19,6 +19,8 @@ import time
 
 import can
 
+from a1z.config import add_config_argument, load_config
+from a1z.motor_drivers.can_backend import open_can_bus
 from a1z.motor_drivers.motor_b_driver import MotorB
 from a1z.robots.gripper import (
     GRIPPER_CAN_ID,
@@ -130,7 +132,10 @@ def test_torque_clamp(gripper: Gripper, motor: MotorB) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="力位混控夹爪测试")
-    parser.add_argument("--can", default="can0", help="CAN 通道，默认 can0")
+    parser.add_argument("--can", default=None, help="CAN 通道，默认 can0")
+    parser.add_argument("--bustype", default=None,
+                        help="python-can 后端: socketcan, gs_usb, pcan, slcan. "
+                             "默认: Linux 用 socketcan, macOS/Windows 用 gs_usb")
     parser.add_argument(
         "--torque", type=float, default=0.5,
         help=f"最大夹持力矩 (Nm)，默认 0.5，峰值 {MOTOR_PEAK_TORQUE_NM} Nm",
@@ -141,15 +146,22 @@ def main() -> None:
         default=["free", "clamp"],
         help="要运行的测试项，默认 free clamp",
     )
+    add_config_argument(parser)
     args = parser.parse_args()
+
+    config = load_config(args.config) if args.config else {}
+    channel = args.can or config.get("can_channel") or "can0"
+    bustype = args.bustype or config.get("bustype")
 
     run_free  = "free"  in args.tests
     run_clamp = "clamp" in args.tests
 
-    print(f"[hybrid] SocketCAN={args.can}  max_torque={args.torque:.1f} Nm"
+    if args.config:
+        print(f"[hybrid] Config={args.config}")
+    print(f"[hybrid] SocketCAN={channel}  max_torque={args.torque:.1f} Nm"
           f"  (i_des={args.torque / MOTOR_PEAK_TORQUE_NM:.4f})")
 
-    bus = can.interface.Bus(args.can, interface="socketcan")
+    bus = open_can_bus(channel=channel, bustype=bustype)
     motor = MotorB(motor_id=GRIPPER_CAN_ID, bus=bus, ranges=GRIPPER_MOTOR_RANGES)
     gripper = Gripper(motor, max_torque=args.torque)
 

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -89,8 +90,8 @@ class ArmRobot:
         temp_mos_estop_c: float = 85.0,
         temp_rotor_warn_c: float = 75.0,
         temp_rotor_estop_c: float = 90.0,
-        stale_feedback_warn_s: float = 0.05,
-        stale_feedback_estop_s: float = 0.2,
+        stale_feedback_warn_s: Any = 0.05,
+        stale_feedback_estop_s: Any = 0.2,
     ):
         self._motor_chain = motor_chain
         self._bus = bus
@@ -147,12 +148,42 @@ class ArmRobot:
             vel_limit.copy() if vel_limit is not None
             else np.array([12.0, 12.0, 12.0, 7.0, 20.0, 20.0])
         )
+        diag_vel_limit = os.getenv("A1Z_DIAG_VEL_LIMIT")
+        if diag_vel_limit:
+            limit = float(diag_vel_limit)
+            if not np.isfinite(limit) or limit <= 0:
+                raise ValueError(
+                    "A1Z_DIAG_VEL_LIMIT must be a positive finite value in rad/s"
+                )
+            self._vel_limit = np.minimum(self._vel_limit, limit)
+            logger.warning(
+                "Diagnostic joint velocity stop enabled: %.2f rad/s", limit
+            )
         self._temp_mos_warn_c = temp_mos_warn_c
         self._temp_mos_estop_c = temp_mos_estop_c
         self._temp_rotor_warn_c = temp_rotor_warn_c
         self._temp_rotor_estop_c = temp_rotor_estop_c
-        self._stale_warn_s = stale_feedback_warn_s
-        self._stale_estop_s = stale_feedback_estop_s
+        def _feedback_thresholds(value: Any, name: str) -> np.ndarray:
+            arr = np.asarray(value, dtype=np.float64)
+            if arr.ndim == 0:
+                arr = np.full(num_joints, float(arr))
+            if arr.shape != (num_joints,):
+                raise ValueError(f"{name} must be a scalar or length {num_joints}")
+            if np.any(~np.isfinite(arr)) or np.any(arr <= 0):
+                raise ValueError(f"{name} must contain positive finite values")
+            return arr
+
+        self._stale_warn_s = _feedback_thresholds(
+            stale_feedback_warn_s, "stale_feedback_warn_s"
+        )
+        self._stale_estop_s = _feedback_thresholds(
+            stale_feedback_estop_s, "stale_feedback_estop_s"
+        )
+        if np.any(self._stale_warn_s >= self._stale_estop_s):
+            raise ValueError(
+                "stale_feedback_warn_s must be less than "
+                "stale_feedback_estop_s for every joint"
+            )
         self._last_feedback_t: float = 0.0
         self._last_temp_warn_t: float = 0.0
         self._last_stale_warn_t: float = 0.0
@@ -162,10 +193,37 @@ class ArmRobot:
         # flood the log.
         self._last_limit_warn_t: float = 0.0
 
+        # Optional low-overhead timing diagnostics for the background control
+        # thread. cProfile only profiles the main thread by default, so enable
+        # this with A1Z_PROFILE_LOOP=1 when diagnosing loop-frequency issues.
+        self._profile_loop = os.getenv("A1Z_PROFILE_LOOP", "").lower() in ("1", "true", "yes")
+        self._profile_sums = np.zeros(5, dtype=np.float64)
+        self._profile_count = 0
+        self._trace_control = os.getenv("A1Z_TRACE_CONTROL") == "1"
+        self._trace_control_last_t = 0.0
+
     def num_dofs(self) -> int:
         return self._num_joints + (1 if self.gripper is not None else 0)
 
     def start(
+        self,
+        initial_kp: Optional[np.ndarray] = None,
+        initial_kd: Optional[np.ndarray] = None,
+    ) -> None:
+        """Enable the arm and guarantee cleanup if startup is interrupted."""
+        try:
+            self._start_impl(initial_kp=initial_kp, initial_kd=initial_kd)
+        except BaseException:
+            # enable_all() may have enabled only a subset before an exception,
+            # and Ctrl+C can arrive during any startup sleep/read. Never leave
+            # those motors powered merely because startup did not complete.
+            self._stop_event.set()
+            self._running = False
+            logger.exception("Robot startup failed; disabling all motors")
+            self._disable_motors_and_flush()
+            raise
+
+    def _start_impl(
         self,
         initial_kp: Optional[np.ndarray] = None,
         initial_kd: Optional[np.ndarray] = None,
@@ -193,8 +251,27 @@ class ArmRobot:
         self._motor_chain.send_commands(_zero, _zero, _zero, _probe_kd, _zero)
         time.sleep(0.05)
 
-        # Read initial state
-        self._read_state()
+        # Require valid feedback from every joint before using the initial
+        # positions. A missing joint otherwise remains at the zero-filled cache
+        # and can produce an unsafe first gravity/position command.
+        feedback_deadline = time.monotonic() + 0.5
+        while True:
+            self._read_state()
+            get_ages = getattr(self._motor_chain, "get_feedback_ages", None)
+            ages = get_ages() if get_ages is not None else np.zeros(self._num_joints)
+            if np.all(np.isfinite(ages)):
+                break
+            if time.monotonic() >= feedback_deadline:
+                missing = [
+                    f"joint{i + 1}" for i in np.flatnonzero(~np.isfinite(ages))
+                ]
+                self._motor_chain.disable_all()
+                raise RuntimeError(
+                    "Startup aborted: no valid CAN feedback from "
+                    + ", ".join(missing)
+                )
+            self._motor_chain.send_commands(_zero, _zero, _zero, _probe_kd, _zero)
+            time.sleep(0.01)
         logger.info(f"Initial joint positions: {np.round(self._state.pos, 3)} rad")
 
         if self._joint_limits is not None:
@@ -224,10 +301,31 @@ class ArmRobot:
         self._estop_latch.clear()
         # Initialize so the first control loop iteration doesn't immediately
         # flag the bus as stale before any messages have been drained.
-        self._last_feedback_t = time.time()
+        self._last_feedback_t = time.monotonic()
         self._thread = threading.Thread(target=self._control_loop, name="arm_control_loop", daemon=True)
         self._thread.start()
         logger.info(f"Control loop started at {self._control_freq_hz} Hz")
+
+    def _disable_motors_and_flush(self) -> bool:
+        """Disable every motor and wait for optional transport TX completion."""
+        disabled = self._motor_chain.disable_all()
+        success = disabled is not False
+        if not success:
+            logger.error("One or more motor disable commands failed")
+        flush_tx = getattr(self._bus, "flush_tx", None)
+        if flush_tx is not None:
+            try:
+                if not flush_tx(timeout=0.5):
+                    success = False
+                    logger.error(
+                        "Motor disable frames did not finish before CAN shutdown"
+                    )
+            except Exception:
+                success = False
+                logger.exception(
+                    "Failed while waiting for motor disable frames"
+                )
+        return success
 
     def stop(self) -> None:
         """Stop the control loop and disable all motors."""
@@ -240,10 +338,23 @@ class ArmRobot:
         self._running = False
         # Safety net: disable again from main thread in case the control thread
         # was killed before its own disable_all() completed (e.g. join timeout).
-        self._motor_chain.disable_all()
+        if self._disable_motors_and_flush():
+            logger.info("All motors disabled.")
+        else:
+            logger.error(
+                "Motor disable could not be confirmed; disconnect power before "
+                "approaching the robot"
+            )
         if self.gripper is not None:
-            self.gripper.disable()
-        logger.info("All motors disabled.")
+            try:
+                self.gripper.disable()
+            except Exception:
+                logger.exception("Failed to disable gripper")
+        # Shut down the CAN bus (robot owns the bus created by the factory)
+        try:
+            self._bus.shutdown()
+        except Exception:
+            pass
 
     def command_gripper(self, value: float) -> None:
         """Set gripper target position.
@@ -478,6 +589,8 @@ class ArmRobot:
         kp: Optional[np.ndarray] = None,
         kd: Optional[np.ndarray] = None,
         max_jump_rad: Optional[float] = None,
+        sync_to_measured: bool = False,
+        gain_ramp_s: float = 0.5,
     ) -> None:
         """Smoothly interpolate to target position at the given speed (rad/s).
 
@@ -495,10 +608,17 @@ class ArmRobot:
                 this from the target. Useful to reject far-away IK solutions
                 (e.g. elbow-flipped branches) that would sweep the arm across
                 the workspace.
+            sync_to_measured: When True, first ramp PD gains from their current
+                values while following the measured pose, so switching from
+                zero-gravity mode does not produce a sudden correction toward
+                a stale command position.
+            gain_ramp_s: Duration (s) of the gain ramp when
+                ``sync_to_measured`` is True.
 
         Raises:
             ValueError: If the target exceeds joint limits beyond tolerance,
-                or violates max_jump_rad.
+                or violates max_jump_rad, or ``sync_to_measured`` is used with
+                a non-positive gain_ramp_s.
         """
         if self._estop_latch.is_set():
             logger.warning("move_joints rejected: robot is in estop")
@@ -512,16 +632,72 @@ class ArmRobot:
                 f"move_joints speed {speed:.2f} rad/s exceeds feedforward "
                 f"cap: peak vel {speed * 1.875:.2f} > {_MAX_CMD_VEL_RAD_S} rad/s"
             )
+        if sync_to_measured and gain_ramp_s <= 0:
+            raise ValueError(
+                f"move_joints gain_ramp_s must be > 0, got {gain_ramp_s}"
+            )
+
         gripper_target: Optional[float] = None
         if self.gripper is not None and len(target_pos) == self._num_joints + 1:
             gripper_target = float(np.clip(target_pos[self._num_joints], 0.0, 1.0))
             target_pos = target_pos[:self._num_joints]
 
         target_pos = self._validate_joint_pos(target_pos)
+        kp = np.asarray(
+            kp if kp is not None else self._default_kp, dtype=np.float64
+        )
+        kd = np.asarray(
+            kd if kd is not None else self._default_kd, dtype=np.float64
+        )
+
+        if sync_to_measured:
+            # Zero-gravity mode keeps kp=0 and its command position does not
+            # follow manual motion. Switching directly to default kp would
+            # therefore apply a large correction toward that stale position.
+            # Follow the measured pose throughout the gain transition so the
+            # PD position error stays near zero, then start the trajectory from
+            # the latest measurement.
+            with self._command_lock:
+                start_kp = self._command.kp.copy()
+                start_kd = self._command.kd.copy()
+
+            ramp_steps = max(1, int(gain_ramp_s / self._control_period_s))
+            for step in range(1, ramp_steps + 1):
+                if self._estop_latch.is_set():
+                    logger.warning(
+                        "move_joints gain ramp aborted: estop engaged"
+                    )
+                    return
+                t = step / ramp_steps
+                alpha = 10*t**3 - 15*t**4 + 6*t**5
+                measured = self.get_joint_pos()[:self._num_joints]
+                with self._command_lock:
+                    self._command.pos = measured
+                    self._command.vel = np.zeros(self._num_joints)
+                    self._command.acc = np.zeros(self._num_joints)
+                    self._command.kp = start_kp + alpha * (kp - start_kp)
+                    self._command.kd = start_kd + alpha * (kd - start_kd)
+                time.sleep(self._control_period_s)
+
+            measured_pos = self.get_joint_pos()[:self._num_joints]
+            with self._command_lock:
+                self._command.pos = measured_pos.copy()
+                self._command.vel = np.zeros(self._num_joints)
+                self._command.acc = np.zeros(self._num_joints)
+                self._command.kp = kp.copy()
+                self._command.kd = kd.copy()
+            current_pos = measured_pos.copy()
+        else:
+            measured_pos = self.get_joint_pos()[:self._num_joints]
+            # Trajectory start uses the *last commanded* position so
+            # back-to-back move_joints calls keep command-space continuity.
+            # Using the measured position here would inject a backwards step
+            # equal to the PD tracking error between consecutive moves.
+            with self._command_lock:
+                current_pos = self._command.pos.copy()
+
         # Safety check uses the *measured* position — this is what max_jump_rad
         # actually protects (e.g. catching elbow-flipped IK against reality).
-        measured_pos = self.get_joint_pos()[:self._num_joints]
-
         if max_jump_rad is not None:
             jumps = np.abs(target_pos - measured_pos)
             if np.any(jumps > max_jump_rad):
@@ -533,16 +709,6 @@ class ArmRobot:
                     f"Target too far from current position "
                     f"(max_jump_rad={max_jump_rad}), refusing to move: {offenders}"
                 )
-
-        # Trajectory start uses the *last commanded* position so back-to-back
-        # move_joints calls keep command-space continuity. Using the measured
-        # position here would inject a backwards step equal to the PD tracking
-        # error between consecutive moves, which the PD loop sees as a jerk.
-        with self._command_lock:
-            current_pos = self._command.pos.copy()
-
-        kp = kp if kp is not None else self._default_kp
-        kd = kd if kd is not None else self._default_kd
 
         if gripper_target is not None:
             self.gripper.command(gripper_target)
@@ -705,12 +871,12 @@ class ArmRobot:
         _FREQ_CHECK_INTERVAL = 2.0  # check frequency every 2s
         _MAX_SLOW_PERIODS = 3  # emergency stop after 3 consecutive slow periods (6s)
 
-        last_check_time = time.time()
+        last_check_time = time.monotonic()
         iteration_count = 0
         consecutive_slow = 0
 
         while not self._stop_event.is_set():
-            loop_start = time.time()
+            loop_start = time.monotonic()
             try:
                 self._update()
             except Exception as e:
@@ -723,7 +889,7 @@ class ArmRobot:
                 return
 
             iteration_count += 1
-            now = time.time()
+            now = time.monotonic()
 
             # Frequency monitoring and protection
             elapsed_since_check = now - last_check_time
@@ -753,7 +919,7 @@ class ArmRobot:
                 last_check_time = now
                 iteration_count = 0
 
-            elapsed = time.time() - loop_start
+            elapsed = time.monotonic() - loop_start
             sleep_time = self._control_period_s - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
@@ -776,7 +942,11 @@ class ArmRobot:
 
     def _update(self) -> None:
         """Single control step: read state -> compute gravity -> send commands."""
-        t_now = time.time()
+        profile = self._profile_loop
+        if profile:
+            profile_start = time.perf_counter()
+
+        t_now = time.monotonic()
 
         # 1) Read current joint state
         self._read_state()
@@ -785,6 +955,9 @@ class ArmRobot:
         # try/except catches and triggers emergency disable. Warnings are
         # rate-limited and logged in-place.
         self._check_runtime_safety()
+
+        if profile:
+            profile_after_read = time.perf_counter()
 
         # 2) Sample for teaching recording
         if self._recording and t_now - self._record_last_t >= self._record_period:
@@ -829,7 +1002,13 @@ class ArmRobot:
         with self._state_lock:
             q = self._state.pos.copy()
 
+        if profile:
+            profile_before_dynamics = time.perf_counter()
+
         tau_id = self._gravity_model.compute_inverse_dynamics(q, cmd.vel, cmd.acc)
+
+        if profile:
+            profile_after_dynamics = time.perf_counter()
 
         # Safety check
         if np.any(np.abs(tau_id) > self._max_gravity_torque):
@@ -859,11 +1038,22 @@ class ArmRobot:
             else:
                 self.gripper.step()
 
+        if profile:
+            profile_end = time.perf_counter()
+            self._profile_sums += (
+                profile_after_read - profile_start,
+                profile_before_dynamics - profile_after_read,
+                profile_after_dynamics - profile_before_dynamics,
+                profile_end - profile_after_dynamics,
+                profile_end - profile_start,
+            )
+            self._profile_count += 1
+
     def _read_state(self) -> None:
         """Read all motor feedback and update internal state."""
         count = self._motor_chain.drain_and_update(self._bus)
         if count > 0:
-            self._last_feedback_t = time.time()
+            self._last_feedback_t = time.monotonic()
         temp_mos, temp_rotor = self._motor_chain.get_temperatures()
         with self._state_lock:
             self._state.pos = self._motor_chain.get_positions() * self._joint_sign
@@ -980,15 +1170,24 @@ class ArmRobot:
             )
 
     def _check_feedback_stale(self) -> None:
-        now = time.time()
+        now = time.monotonic()
         age = now - self._last_feedback_t
-        if age > self._stale_estop_s:
+        get_ages = getattr(self._motor_chain, "get_feedback_ages", None)
+        ages = get_ages() if get_ages is not None else np.full(self._num_joints, age)
+        estop_over = ages > self._stale_estop_s
+        if np.any(estop_over):
+            idx = int(np.argmax(ages - self._stale_estop_s))
             raise RuntimeError(
-                f"CAN feedback stale for {age * 1000:.0f}ms "
-                f"(limit {self._stale_estop_s * 1000:.0f}ms) — bus may be down"
+                f"CAN feedback stale for joint{idx + 1}: {ages[idx] * 1000:.0f}ms "
+                f"(limit {self._stale_estop_s[idx] * 1000:.0f}ms) — bus may be down"
             )
-        if age > self._stale_warn_s and now - self._last_stale_warn_t > 1.0:
-            logger.warning(f"CAN feedback stale: {age * 1000:.0f}ms")
+        warn_over = ages > self._stale_warn_s
+        if np.any(warn_over) and now - self._last_stale_warn_t > 1.0:
+            parts = "; ".join(
+                f"joint{i + 1}={ages[i] * 1000:.0f}ms"
+                for i in np.flatnonzero(warn_over)
+            )
+            logger.warning(f"CAN feedback stale: {parts}")
             self._last_stale_warn_t = now
 
     def _clip_joint_pos(

@@ -16,10 +16,12 @@ import time
 
 import can
 
+from a1z.config import add_config_argument, load_config
+from a1z.motor_drivers.can_backend import open_can_bus
+
 # ── Configuration ─────────────────────────────────────────
 
 CAN_CHANNEL = "can0"
-CAN_BUSTYPE = "socketcan"
 CAN_BITRATE = 1_000_000
 
 MOTOR_A_IDS = [0x01, 0x02, 0x03]
@@ -142,11 +144,19 @@ Examples:
     group.add_argument("--joints", type=int, nargs="+", metavar="J",
                        help="Calibrate specific joints (0-indexed: 0-5)")
 
-    parser.add_argument("--channel", default=CAN_CHANNEL, help=f"CAN channel (default: {CAN_CHANNEL})")
+    parser.add_argument("--channel", default=None, help=f"CAN channel (default: {CAN_CHANNEL})")
+    parser.add_argument("--bustype", default=None,
+                        help="python-can backend: socketcan, gs_usb, pcan, slcan. "
+                             "Default: socketcan on Linux, gs_usb on macOS/Windows.")
     parser.add_argument("--bitrate", type=int, default=CAN_BITRATE, help=f"CAN bitrate (default: {CAN_BITRATE})")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    add_config_argument(parser)
 
     args = parser.parse_args()
+
+    config = load_config(args.config) if args.config else {}
+    channel = args.channel or config.get("can_channel") or CAN_CHANNEL
+    bustype = args.bustype or config.get("bustype")
 
     if args.all:
         joints = list(range(6))
@@ -164,7 +174,9 @@ Examples:
     print("=" * 60)
     print("  A1Z Motor Zero Calibration")
     print("=" * 60)
-    print(f"\nCAN channel: {args.channel}  bitrate: {args.bitrate}")
+    if args.config:
+        print(f"\nConfig: {args.config}")
+    print(f"\nCAN channel: {channel}  bitrate: {args.bitrate}  backend: {bustype or 'auto'}")
     print(f"\nJoints to calibrate (current position -> zero):")
     for j in joints:
         print(f"  Joint {j}: {JOINT_NAMES[j]}")
@@ -184,12 +196,11 @@ Examples:
             print("Cancelled.")
             sys.exit(0)
 
-    print(f"\nOpening CAN bus ({args.channel})...")
+    print(f"\nOpening CAN bus ({channel})...")
     try:
-        bus = can.interface.Bus(channel=args.channel, bustype=CAN_BUSTYPE, bitrate=args.bitrate)
+        bus = open_can_bus(channel=channel, bitrate=args.bitrate, bustype=bustype)
     except Exception as e:
         print(f"Error: cannot open CAN bus: {e}")
-        print(f"Try: sudo ip link set {args.channel} up type can bitrate {args.bitrate}")
         sys.exit(1)
 
     results = {}

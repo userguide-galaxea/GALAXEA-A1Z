@@ -3,7 +3,7 @@
 A central YAML config lets you set default robot parameters (CAN channel,
 URDF, gripper, gains, ...) once and share them across examples and tools.
 
-Example ``a1z_config.yaml``::
+Example ``a1z.yaml`` (or ``a1z_g1z.yaml`` with ``with_gripper: true``)::
 
     can_channel: can0
     control_freq_hz: 250
@@ -13,6 +13,7 @@ Example ``a1z_config.yaml``::
     gripper_max_torque: 2.0
     # urdf_path: a1z/robot_models/a1z/A1Z_G1Z.urdf
     # motor_a_use_new_enable_protocol: false
+    # bustype: null
 
 Usage in a script::
 
@@ -47,6 +48,7 @@ _ROBOT_KWARGS = {
     "with_gripper",
     "gripper_max_torque",
     "motor_a_use_new_enable_protocol",
+    "bustype",
 }
 
 

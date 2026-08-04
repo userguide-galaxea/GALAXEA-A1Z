@@ -17,6 +17,7 @@ Usage
 """
 
 import argparse
+import logging
 import signal
 import threading
 import time
@@ -27,6 +28,8 @@ from a1z.robots.arm_robot import ArmRobot
 from a1z.robots.get_robot import get_a1z_robot
 from a1z.config import add_config_argument, load_config, config_to_robot_kwargs
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+
 
 def _build_robot_kwargs(args: argparse.Namespace) -> dict:
     """Merge config file and CLI arguments into get_a1z_robot kwargs."""
@@ -34,9 +37,35 @@ def _build_robot_kwargs(args: argparse.Namespace) -> dict:
     kwargs = config_to_robot_kwargs(config)
     if args.can is not None:
         kwargs["can_channel"] = args.can
+    if args.bustype is not None:
+        kwargs["bustype"] = args.bustype
     if args.with_gripper:
         kwargs["with_gripper"] = True
     return kwargs
+
+
+def _safe_stop_robot(robot, *, return_zero: bool, zero_gravity: bool) -> None:
+    """Return safely when requested, then perform an uninterruptible stop."""
+    try:
+        if robot.is_running and return_zero:
+            print("Returning to zero...")
+            robot.move_joints(
+                np.zeros(6),
+                speed=0.3,
+                sync_to_measured=zero_gravity,
+                gain_ramp_s=0.75,
+            )
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\nReturn-to-zero interrupted; disabling immediately...")
+    except Exception:
+        logging.exception("Return-to-zero failed; disabling immediately")
+    finally:
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            robot.stop()
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 def _wait_enter(prompt: str) -> None:
@@ -110,13 +139,13 @@ def cmd_record(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\n[record] Interrupted.")
     finally:
-        if robot.is_running:
-            if with_gripper:
-                robot.set_gripper_free_drive(False)
-            print("[record] Returning to zero...")
-            robot.move_joints(np.zeros(6), speed=0.3)
-            time.sleep(0.3)
-        robot.stop()
+        if with_gripper:
+            robot.set_gripper_free_drive(False)
+        _safe_stop_robot(
+            robot,
+            return_zero=robot.is_running,
+            zero_gravity=True,
+        )
         print("[record] Stopped.")
 
 
@@ -174,17 +203,20 @@ def cmd_play(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\n[play] Interrupted.")
     finally:
-        if robot.is_running:
-            print("[play] Returning to zero...")
-            robot.move_joints(np.zeros(6), speed=0.3)
-            time.sleep(0.3)
-        robot.stop()
+        _safe_stop_robot(
+            robot,
+            return_zero=robot.is_running,
+            zero_gravity=False,
+        )
         print("[play] Stopped.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A1Z teach-and-play")
     parser.add_argument("--can", default=None, help="CAN channel (default: can0)")
+    parser.add_argument("--bustype", default=None,
+                        help="python-can backend: socketcan, gs_usb, pcan, slcan. "
+                             "Default: socketcan on Linux, gs_usb on macOS/Windows.")
     parser.add_argument("--with-gripper", action="store_true",
                         help="Attach the G1Z gripper (record/play 7th DOF).")
     add_config_argument(parser)
