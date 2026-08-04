@@ -25,26 +25,20 @@ _MOTOR_B_IDS = [0x04, 0x05, 0x06]
 
 _JOINT_LIMITS = [
     (-2.094, 2.094),   # arm_joint1
-    (-3.142, 3.142),   # arm_joint2: allow full shoulder-pitch hemisphere; the
-                       # leader arm can command negative J2 when lifting from a
-                       # downward start pose, and the previous [0, pi] lower
-                       # bound rejected valid teleop commands.
+    (0.0,    3.142),   # arm_joint2
     (-3.142, 0.0),     # arm_joint3
     (-1.484, 1.484),   # arm_joint4
     (-1.484, 1.484),   # arm_joint5
     (-2.007, 2.007),   # arm_joint6
 ]
 
-# _DEFAULT_KP = np.array([100.0, 60.0, 40.0, 30.0, 10.0, 25.0])
+# _DEFAULT_KP = np.array([100.0, 60.0, 40.0, 120.0, 10.0, 25.0])
 # _DEFAULT_KD = np.array([4.9,  4.5,  5.0,  2.0,  0.5,  4])
 
-# _DEFAULT_KP = np.array([130.8931, 83.0542, 90.3748, 120.0, 30.0, 57.5026])
-# _DEFAULT_KD = np.array([5,  5,  5.0,  2.0776,  1,  1])
 
+_DEFAULT_KP = np.array([146.9, 62.95, 89.24, 120.0, 40.0, 100.0])
+_DEFAULT_KD = np.array([5.0, 5.0, 5.0, 2.078, 1.506, 1.255])
 
-
-_DEFAULT_KP = np.array([146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0])
-_DEFAULT_KD = np.array([5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553])
 
 _JOINT_SIGN = np.array([1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
 _GRAVITY_TORQUE_SCALE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
@@ -72,7 +66,8 @@ _TORQUE_CLIP = np.array([70.0, 70.0, 70.0, 27.0, 10.0, 10.0])
 # magnitude (coulomb_ff bound 1.5·τ̂_c, τ_I,max clamp), never β_v, and explicitly
 # does not need a Stribeck curve (devlog 2026-07-22 Q8(3)) — so a magnitude-correct
 # anchor is sufficient. Enable per-joint via a P0-7-style smoke test (SOP-09 §10.2).
-_TAU_C_HAT = np.array([0.3442, 0.3665, 0.6371, 0.66, 0.143, 0.13])
+_TAU_C_HAT = np.array([1.033, 0.3665, 0.6371, 0.66, 0.2355, 0.2925])
+
 
 # MotorA ranges
 _MOTOR_A_RANGES = MotorARanges(

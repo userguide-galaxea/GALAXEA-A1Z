@@ -356,7 +356,7 @@ class EETrackingRunner(_Base):
 
     def __init__(self, can_channel: str, *, q_nom_deg=(-20, 35, -25, -25, 0, 0),
                  ee_kind: str = "circle", plane: str = "xz", radius: float = 0.04,
-                 period: float = 8.0, cycles: int = 2,
+                 period: float = 8.0, cycles: int = 2, hold_s: float = 0.0,
                  pos_threshold: float = 1e-4, ori_threshold: float = 1e-3,
                  max_iters: int = 500, settle_s: float = 1.0, **base_kw):
         super().__init__(can_channel, **base_kw)
@@ -366,6 +366,7 @@ class EETrackingRunner(_Base):
         self.radius = radius
         self.period = period
         self.cycles = cycles
+        self.hold_s = hold_s
         self.pos_threshold = pos_threshold
         self.ori_threshold = ori_threshold
         self.max_iters = max_iters
@@ -377,7 +378,7 @@ class EETrackingRunner(_Base):
         t, T_ref = ee.build_reference(
             self.kin, self.q_nom, kind=self.ee_kind, plane=self.plane,
             radius=self.radius, period=self.period, cycles=self.cycles,
-            sample_hz=self.sample_hz)
+            sample_hz=self.sample_hz, hold_s=self.hold_s)
         q_ref, conv = ee.solve_ik_path(
             self.kin, T_ref, self.q_nom, pos_threshold=self.pos_threshold,
             ori_threshold=self.ori_threshold, max_iters=self.max_iters)
@@ -385,11 +386,14 @@ class EETrackingRunner(_Base):
                     urdf_lim=ee.urdf_limits(self.kin))
         return dict(t=t, T_ref=T_ref, q_ref=q_ref, converged=conv, gate=g)
 
-    def run(self, offline: dict) -> dict:
+    def run(self, offline: dict, watchdog=None) -> dict:
         """Stream the pre-solved q_ref and capture the joint response.
 
         Requires ``offline`` from :meth:`solve_offline` with a PASSED gate.
-        Returns dict with t, q_ref, q_resp, T_ref, T_resp.
+        Returns dict with t, q_ref, q_resp, T_ref, T_resp.  ``watchdog`` is an
+        optional tick-level checker forwarded to ``stream()`` (E-segment
+        refine sessions attach a MultiTickWatchdog as the vel_abs/pos/eff
+        backstop, SOP-11 §12.1); ``None`` preserves the legacy behaviour.
         """
         if not offline["gate"].passed:
             raise RuntimeError("EE gate not passed — refusing to drive hardware")
@@ -407,7 +411,8 @@ class EETrackingRunner(_Base):
             self.transit_to(self.q_nom)
             time.sleep(self.settle_s)
             print(f"[ee] track {t_ref[-1]:.1f}s ({self.ee_kind} r={self.radius*1000:.0f}mm)")
-            t, ref_q, resp_q, eff_q = self.stream(sample_fn, float(t_ref[-1]), kp, kd)
+            t, ref_q, resp_q, eff_q = self.stream(sample_fn, float(t_ref[-1]), kp, kd,
+                                                  watchdog=watchdog)
             time.sleep(self.settle_s)
         finally:
             print("[ee] return to zero")

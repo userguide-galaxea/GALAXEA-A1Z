@@ -9,6 +9,9 @@ Two joint-unit-test metric families plus Cartesian RMSE, all matching the
 * :func:`triangle_metrics` — error-trajectory range / std / jump statistics
   from a triangle sweep (the stick-slip signature, ODE B0).
 * :func:`rmse` / :func:`ee_rmse` — joint and end-effector RMSE.
+* :func:`ee_terminal_error` / :func:`ee_normal_jitter_std` /
+  :func:`ee_phase_lag` — the three J_ee terms of SOP-11 §2.2 (到位误差 /
+  法向抖动 / 相位滞后) for the EE-refine composite cost.
 
 Everything is computed in rad/m internally; callers convert to deg/mm for
 reporting.
@@ -16,7 +19,7 @@ reporting.
 from __future__ import annotations
 
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -759,6 +762,140 @@ def ee_rmse(T_ref: np.ndarray, T_resp: np.ndarray) -> dict:
             y=rmse(dp[:, 1]) * 1000.0,
             z=rmse(dp[:, 2]) * 1000.0,
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# End-effector refine metrics (SOP-11 §2.2 — the three J_ee terms)
+# ---------------------------------------------------------------------------
+def _xcorr_lag_samples(ref: np.ndarray, resp: np.ndarray,
+                       max_lag: int) -> Tuple[float, float]:
+    """Integer shift k maximising the normalised correlation between the
+    reference shifted *right* by k and the response.
+
+    Positive k means ``resp(t) ≈ ref(t − k)`` — the response *lags* the
+    reference.  Correlation is re-normalised on every overlap window so edge
+    effects do not bias toward large |k|.  Returns ``(k, peak_corr)`` with
+    parabolic sub-sample refinement on k.
+    """
+    r = np.asarray(ref, dtype=float)
+    s = np.asarray(resp, dtype=float)
+    n = len(r)
+    r = r - r.mean()
+    s = s - s.mean()
+    if n < 4 or float(np.sum(r * r)) <= 0.0 or float(np.sum(s * s)) <= 0.0:
+        return 0.0, 0.0
+    max_lag = int(min(max_lag, n // 4))  # keep ≥ 3/4 of the trace overlapping
+    corrs: List[float] = []
+    ks = list(range(-max_lag, max_lag + 1))
+    for k in ks:
+        if k >= 0:
+            a, b = r[: n - k] if k else r, s[k:]
+        else:
+            a, b = r[-k:], s[: n + k]
+        d = math.sqrt(float(np.sum(a * a)) * float(np.sum(b * b)))
+        corrs.append(float(np.sum(a * b) / d) if d > 0.0 else 0.0)
+    i_best = int(np.argmax(corrs))
+    k_best = ks[i_best]
+    k_sub = float(k_best)
+    if 0 < i_best < len(corrs) - 1:
+        y0, y1, y2 = corrs[i_best - 1], corrs[i_best], corrs[i_best + 1]
+        curvature = y0 - 2.0 * y1 + y2
+        if curvature < 0.0:  # genuine peak → parabolic vertex in [-0.5, 0.5]
+            k_sub = k_best + (y0 - y2) / (2.0 * curvature)
+    return k_sub, corrs[i_best]
+
+
+def ee_phase_lag(T_ref: np.ndarray, T_resp: np.ndarray, sample_hz: float,
+                 max_lag_s: float = 1.0) -> float:
+    """Phase lag (ms) of the EE response behind the reference.
+
+    相位滞后 (SOP-11 §2.2): per-axis normalised cross-correlation between the
+    ref/resp position traces, combined with weights ∝ per-axis reference
+    variance — static axes (e.g. the normal of a planar trajectory) drop out
+    automatically.  Positive = response lags reference.
+    """
+    p_ref = np.asarray(T_ref, dtype=float)[:, :3, 3]
+    p_resp = np.asarray(T_resp, dtype=float)[:, :3, 3]
+    max_lag = int(round(max_lag_s * sample_hz))
+    w_sum = 0.0
+    acc = 0.0
+    for a in range(3):
+        v = float(np.var(p_ref[:, a]))
+        if v <= 1e-12:
+            continue
+        k, _ = _xcorr_lag_samples(p_ref[:, a], p_resp[:, a], max_lag)
+        w_sum += v
+        acc += v * k
+    if w_sum <= 0.0:
+        return 0.0
+    return acc / w_sum / sample_hz * 1000.0
+
+
+def ee_normal_jitter_std(T_ref: np.ndarray, T_resp: np.ndarray,
+                         normal: np.ndarray, sample_hz: float,
+                         lag_ms: Optional[float] = None) -> float:
+    """Std (mm) of the normal-direction EE position error, lag-aligned.
+
+    法向抖动 std (SOP-11 §2.2): the phase lag is estimated (or passed in) and
+    removed by shifting the reference before projecting the residual onto
+    ``normal`` — a pure tracking delay must not count as jitter, the same
+    lag/jitter decoupling as the joint-level resid_std (SOP-08 §1.1).
+    ``normal`` need not be unit length (e.g. ``[0, 1, 0]`` for an xz-plane
+    circle).
+    """
+    n = np.asarray(normal, dtype=float)
+    norm = float(np.linalg.norm(n))
+    if norm <= 0.0:
+        raise ValueError("normal must be non-zero")
+    n = n / norm
+    if lag_ms is None:
+        lag_ms = ee_phase_lag(T_ref, T_resp, sample_hz)
+    k = int(round(lag_ms / 1000.0 * sample_hz))
+    p_ref = np.asarray(T_ref, dtype=float)[:, :3, 3]
+    p_resp = np.asarray(T_resp, dtype=float)[:, :3, 3]
+    n_samples = len(p_ref)
+    if abs(k) >= n_samples - 4:
+        return 0.0
+    if k >= 0:
+        a, b = p_resp[k:], p_ref[: n_samples - k]  # resp(t) vs ref(t−k)
+    else:
+        a, b = p_resp[: n_samples + k], p_ref[-k:]
+    e_n = (a - b) @ n
+    return float(np.std(e_n) * 1000.0)
+
+
+def ee_terminal_error(T_ref: np.ndarray, T_resp: np.ndarray,
+                      tail_frac: float = 0.1) -> dict:
+    """Terminal-window pose error: mean |dp| (mm) + mean geodesic angle (deg).
+
+    到位误差 (SOP-11 §2.2): with a dedicated terminal hold segment, pass a
+    ``tail_frac`` covering just the hold; without one, the last 10 % of the
+    trajectory is used.  Mean (not RMSE) keeps the metric linear in the
+    residual, matching the ess family on the joint side.
+    """
+    if not 0.0 < tail_frac <= 1.0:
+        raise ValueError(f"tail_frac must be in (0, 1], got {tail_frac}")
+    _, e_pos, e_ang = ee_errors(T_ref, T_resp)
+    n_tail = max(1, int(round(len(e_pos) * tail_frac)))
+    return dict(
+        pos_mm=float(np.mean(e_pos[-n_tail:]) * 1000.0),
+        ang_deg=float(np.mean(e_ang[-n_tail:]) * DEG),
+    )
+
+
+def ee_refine_metrics(T_ref: np.ndarray, T_resp: np.ndarray, sample_hz: float,
+                      normal: np.ndarray, max_lag_s: float = 1.0,
+                      tail_frac: float = 0.1) -> dict:
+    """All three J_ee terms of SOP-11 §2.2 in one call (lag computed once)."""
+    lag_ms = ee_phase_lag(T_ref, T_resp, sample_hz, max_lag_s=max_lag_s)
+    term = ee_terminal_error(T_ref, T_resp, tail_frac=tail_frac)
+    return dict(
+        terminal_pos_mm=term["pos_mm"],
+        terminal_ang_deg=term["ang_deg"],
+        normal_jitter_std_mm=ee_normal_jitter_std(
+            T_ref, T_resp, normal, sample_hz, lag_ms=lag_ms),
+        phase_lag_ms=lag_ms,
     )
 
 

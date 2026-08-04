@@ -3,6 +3,7 @@
 
 Usage:
     python -m a1z.analysis.script.run_optimize --joint 6 --name phaseA-J6 --n-trials 40
+    python -m a1z.analysis.script.run_optimize --joints 4,5,6 --name eeRefine-J456 --n-trials 20
     python -m a1z.analysis.script.run_optimize --resume /path/to/session-dir
 """
 from __future__ import annotations
@@ -19,6 +20,10 @@ def _parse_args() -> argparse.Namespace:
         description="BO-based MIT controller parameter optimisation (SOP-11)")
     ap.add_argument("--joint", type=int, choices=range(1, 7), metavar="1-6",
                     help="Joint to optimise (1-based, Phase A)")
+    ap.add_argument("--joints", type=str, default=None, metavar="4,5,6",
+                    help="Comma-separated 1-based joint subset for the "
+                         "E-segment multi-joint refine (SOP-11 §6.3). "
+                         "Mutually exclusive with --joint.")
     ap.add_argument("--name", type=str, default=None,
                     help="Session name (used in output dir)")
     ap.add_argument("--n-trials", type=int, default=40,
@@ -61,6 +66,24 @@ def main() -> None:
     opt_root = Path(test_log_root) / "02-a1z" / "02-para-opt"
     opt_root.mkdir(parents=True, exist_ok=True)
 
+    # Joint subset (E-segment refine) parsing
+    joints1 = None
+    if args.joints:
+        try:
+            joints1 = sorted({int(x) for x in args.joints.split(",") if x.strip()})
+        except ValueError:
+            print(f"ERROR: --joints must be comma-separated ints, got "
+                  f"{args.joints!r}", file=sys.stderr)
+            sys.exit(1)
+        if len(joints1) < 2 or any(j < 1 or j > 6 for j in joints1):
+            print("ERROR: --joints needs >=2 joints in 1..6 "
+                  "(use --joint for a single joint)", file=sys.stderr)
+            sys.exit(1)
+    if args.joint is not None and joints1 is not None:
+        print("ERROR: --joint and --joints are mutually exclusive",
+              file=sys.stderr)
+        sys.exit(1)
+
     if args.resume:
         session_dir = Path(args.resume)
         if not session_dir.exists():
@@ -73,24 +96,29 @@ def main() -> None:
             with open(study_json) as f:
                 info = json.load(f)
             joint1 = info.get("joint", args.joint)
+            joints1 = joints1 or info.get("joints")
             phase = info.get("phase", args.phase)
             vel_ff = info.get("vel_ff", args.vel_ff)
         else:
-            if args.joint is None:
-                print("ERROR: --joint required when resuming without study.json",
-                      file=sys.stderr)
+            if args.joint is None and joints1 is None:
+                print("ERROR: --joint/--joints required when resuming without "
+                      "study.json", file=sys.stderr)
                 sys.exit(1)
             joint1 = args.joint
             phase = args.phase
             vel_ff = args.vel_ff
     else:
-        if args.joint is None:
-            print("ERROR: --joint is required for new sessions", file=sys.stderr)
+        if args.joint is None and joints1 is None:
+            print("ERROR: --joint or --joints is required for new sessions",
+                  file=sys.stderr)
             sys.exit(1)
         joint1 = args.joint
         phase = args.phase
         vel_ff = args.vel_ff
-        name = args.name or f"phase{phase}-J{joint1}"
+        if joints1:
+            name = args.name or f"phaseE-J{''.join(str(j) for j in joints1)}"
+        else:
+            name = args.name or f"phase{phase}-J{joint1}"
         date = datetime.now().strftime("%Y-%m-%d")
         session_dir = opt_root / f"{date}-run-opt-{name}"
 
@@ -115,8 +143,8 @@ def main() -> None:
             watchdog_calib_path = default_wd
 
     print(f"[run_optimize] Session: {session_dir}")
-    print(f"[run_optimize] Joint={joint1}  Phase={phase}  n_trials={args.n_trials}  "
-          f"vel_ff={vel_ff}")
+    print(f"[run_optimize] Joint={joint1}  Joints={joints1}  Phase={phase}  "
+          f"n_trials={args.n_trials}  vel_ff={vel_ff}")
     if watchdog_calib_path:
         print(f"[run_optimize] Watchdog calib: {watchdog_calib_path}")
 
@@ -125,6 +153,7 @@ def main() -> None:
     study = OptStudy(
         session_dir=session_dir,
         joint1=joint1,
+        joints1=joints1,
         n_trials=args.n_trials,
         phase=phase,
         vel_ff=vel_ff,

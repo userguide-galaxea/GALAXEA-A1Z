@@ -17,6 +17,11 @@ a3_groups.csv 格式 (每行一个参数组):
     P_bad,/path/to/run-opt-Pbad,0.80,12.5
     P_default,/path/to/run-opt-Pdef,0.40,6.0
     ...
+
+可选列:
+    run_dir_square  — verify.sh 的 step 腿 run 目录（L0 两腿拆开的组）
+    run_dir_ee      — EE 跟踪 run 目录（含 ee-traj-{ref,response}.csv）；
+                      提供后启用 J_ee 通道与真实 A3-2 判定（G6，2026-08-03 F1）
 """
 from __future__ import annotations
 
@@ -203,6 +208,56 @@ def load_cost_from_run(run_dir: Path, square_run_dir: Optional[Path] = None) -> 
 
 
 # ---------------------------------------------------------------------------
+# J_ee channel (G6, 2026-08-03 F1): cost from an EE tracking run's archives
+# ---------------------------------------------------------------------------
+_PLANE_NORMAL = {"xz": (0.0, 1.0, 0.0), "yz": (1.0, 0.0, 0.0),
+                 "xy": (0.0, 0.0, 1.0)}
+
+
+def load_ee_cost_from_run(ee_run_dir: Path) -> Optional[Dict]:
+    """Compute J_ee (cost_spec compute_ee_cost) from an EE run's archived
+    ``ee-traj-{ref,response}.csv``.  Returns ``{"cost", "metrics", "source"}``
+    or None when the archives are missing.
+
+    The trajectory plane (for the jitter-projection normal) is read from the
+    run's meta.json (``ee_traj.plane``), default xz.  tail_frac=0.1 matches
+    the no-hold archive口径 (devlog 2026-08-01 E1 smoke / E5 replay).
+    """
+    import numpy as np
+
+    from a1z.analysis.metrics import ee_refine_metrics
+    from a1z.analysis.optimize.cost_spec import compute_ee_cost
+    from a1z.analysis.report import read_ee_pose_csv
+
+    ref_csv = ee_run_dir / "ee-traj-ref.csv"
+    resp_csv = ee_run_dir / "ee-traj-response.csv"
+    if not ref_csv.exists() or not resp_csv.exists():
+        return None
+
+    plane = "xz"
+    meta_path = ee_run_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            plane = (meta.get("ee_traj") or {}).get("plane", plane)
+        except Exception:
+            pass
+    normal = np.array(_PLANE_NORMAL.get(plane, (0.0, 1.0, 0.0)), dtype=float)
+
+    t_ref, T_ref = read_ee_pose_csv(ref_csv)
+    t_resp, T_resp = read_ee_pose_csv(resp_csv)
+    n = min(len(T_ref), len(T_resp))
+    if n < 10:
+        return None
+    T_ref, T_resp = T_ref[:n], T_resp[:n]
+    fs = 1.0 / float(np.median(np.diff(t_ref[:n])))
+    m = ee_refine_metrics(T_ref, T_resp, fs, normal, tail_frac=0.1)
+    cost, _ = compute_ee_cost(m)
+    return {"cost": cost, "metrics": m, "source": "ee-traj CSV"}
+
+
+# ---------------------------------------------------------------------------
 # Main gate logic
 # ---------------------------------------------------------------------------
 def _parse_args() -> argparse.Namespace:
@@ -238,10 +293,15 @@ def main() -> None:
                 g["run_dir"], Path(sq_dir) if sq_dir else None)
             g["j_joint"] = cost_data["cost"] if cost_data else None
             g["breakdown"] = cost_data.get("breakdown", {}) if cost_data else {}
+            # J_ee channel (G6): optional run_dir_ee column with EE archives
+            ee_dir = row.get("run_dir_ee") or None
+            ee_data = load_ee_cost_from_run(Path(ee_dir)) if ee_dir else None
+            g["j_ee"] = ee_data["cost"] if ee_data else None
             groups.append(g)
 
     names = [g["name"] for g in groups]
     j_joint_vals = [g["j_joint"] for g in groups]
+    j_ee_vals = [g.get("j_ee") for g in groups]
     fail_rates = [g["l2_fail_rate"] for g in groups]
 
     # --- A3-1: Spearman(J_joint, fail_rate) ≥ 0.8 ---
@@ -252,9 +312,21 @@ def main() -> None:
         rho_joint = spearman_rho([x[0] for x in valid_jf], [x[1] for x in valid_jf])
     a3_1_pass = (rho_joint is not None and rho_joint >= A3_1_RHO_MIN)
 
-    # --- A3-2: ρ(J_ee, task) > ρ(J_joint, task) (placeholder — J_ee not yet available) ---
+    # --- A3-2: ρ(J_ee, task) > ρ(J_joint, task) ---
+    # Fair comparison: both rhos computed on the SAME groups (those carrying
+    # j_joint + j_ee + L2 truth).  PENDING when fewer than 3 complete groups.
+    both = [(jj, je, fr) for jj, je, fr in zip(j_joint_vals, j_ee_vals, fail_rates)
+            if jj is not None and je is not None and fr is not None]
     rho_ee = None
-    a3_2_pass = False  # default fail until J_ee data is available
+    rho_joint_paired = None
+    a3_2_pass = False
+    a3_2_pending = True
+    if len(both) >= 3:
+        rho_ee = spearman_rho([b[1] for b in both], [b[2] for b in both])
+        rho_joint_paired = spearman_rho([b[0] for b in both], [b[2] for b in both])
+        if rho_ee is not None and rho_joint_paired is not None:
+            a3_2_pass = rho_ee > rho_joint_paired
+            a3_2_pending = False
 
     # --- A3-3: no anti-correlated cost component ---
     # Check each breakdown term against fail_rate
@@ -300,13 +372,14 @@ def main() -> None:
     W("")
     W("## Parameter Groups")
     W("")
-    W("| Group | J_joint | L2 fail_rate | L2 insert_time_s |")
-    W("|---|---|---|---|")
+    W("| Group | J_joint | J_ee | L2 fail_rate | L2 insert_time_s |")
+    W("|---|---|---|---|---|")
     def _fmt(v, spec):
         return f"{v:{spec}}" if v is not None else "N/A"
 
     for g in groups:
         W(f"| {g['name']} | {_fmt(g['j_joint'], '.4f')} "
+          f"| {_fmt(g.get('j_ee'), '.4f')} "
           f"| {_fmt(g['l2_fail_rate'], '.2f')} "
           f"| {_fmt(g['l2_insert_time_s'], '.1f')} |")
     W("")
@@ -317,9 +390,12 @@ def main() -> None:
     W(f"| A3-1 | ρ(J_joint, fail_rate) | "
       f"{_fmt(rho_joint, '.3f')} | "
       f"{'PASS' if a3_1_pass else 'FAIL'} | ≥{A3_1_RHO_MIN} |")
-    W(f"| A3-2 | ρ(J_ee) > ρ(J_joint) | "
-      f"rho_ee={'N/A' if rho_ee is None else f'{rho_ee:.3f}'} | "
-      f"{'PASS' if a3_2_pass else 'FAIL/PENDING'} | hard |")
+    a3_2_status = ("PENDING" if a3_2_pending
+                   else ("PASS" if a3_2_pass else "FAIL"))
+    W(f"| A3-2 | ρ(J_ee, task) > ρ(J_joint, task) | "
+      f"rho_ee={'N/A' if rho_ee is None else f'{rho_ee:.3f}'} vs "
+      f"rho_joint={_fmt(rho_joint_paired, '.3f')} (同组配对) | "
+      f"{a3_2_status} | hard |")
     W(f"| A3-3 | No anti-correlated terms | "
       f"{'none' if not anti_corr_items else ','.join(anti_corr_items)} | "
       f"{'PASS' if a3_3_pass else 'FAIL'} | hard |")
@@ -332,8 +408,11 @@ def main() -> None:
     W("")
     if a3_1_pass and a3_2_pass:
         W("**A3-1 + A3-2 PASS** → EE 权重 > 关节权重成立，按 §2.3 合成代价冻结，进 Phase A。")
+    elif a3_1_pass and a3_2_pending:
+        W("**A3-1 PASS, A3-2 PENDING** → 完整配对（J_joint + J_ee + L2 真值）的组 <3；"
+          "补齐 `run_dir_ee` 与 L0 双腿 run 后重跑本脚本方可判定 EE 权重前提。")
     elif a3_1_pass and not a3_2_pass:
-        W("**A3-1 PASS, A3-2 FAIL/PENDING** → 退回 Q4 原设计：EE 降为 L1/L2 验证、关节代价主导内环。")
+        W("**A3-1 PASS, A3-2 FAIL** → 退回 Q4 原设计：EE 降为 L1/L2 验证、关节代价主导内环。")
     elif not a3_1_pass:
         W("**A3-1 FAIL** → 代理设计错误，回 Q3/§2 重设 EE 测试。")
     if anti_corr_items:
@@ -349,11 +428,12 @@ def main() -> None:
     csv_path = out_dir / "a3-summary.csv"
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["group", "j_joint", "l2_fail_rate", "l2_insert_time_s"])
+        w.writerow(["group", "j_joint", "j_ee", "l2_fail_rate", "l2_insert_time_s"])
         for g in groups:
             w.writerow([
                 g["name"],
                 f"{g['j_joint']:.6f}" if g["j_joint"] is not None else "",
+                f"{g.get('j_ee'):.6f}" if g.get("j_ee") is not None else "",
                 f"{g['l2_fail_rate']:.4f}" if g["l2_fail_rate"] is not None else "",
                 f"{g['l2_insert_time_s']:.2f}" if g["l2_insert_time_s"] is not None else "",
             ])
@@ -362,7 +442,7 @@ def main() -> None:
     # Overall verdict
     overall = "PASS" if (a3_1_pass and a3_3_pass) else "FAIL"
     print(f"[a3_gate] Overall: {overall} (A3-1={'P' if a3_1_pass else 'F'} "
-          f"A3-2={'P' if a3_2_pass else 'F/pending'} "
+          f"A3-2={a3_2_status} "
           f"A3-3={'P' if a3_3_pass else 'F'} "
           f"A3-4={'P' if a3_4_pass else 'F'})")
 

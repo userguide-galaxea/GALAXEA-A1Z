@@ -37,6 +37,11 @@ JOINT=""
 GAINS_FILE=""
 KP=""
 KD=""
+COULOMB_FF=""
+KI_LEVEL=""
+INTEGRAL_JOINTS=""
+T_WIND_S=""
+CLAMP_SCALE=""
 NO_VEL_FF=0
 RUN_PREFIX=""
 REPEAT=1
@@ -62,6 +67,12 @@ Optional:
   --repeat N                     Number of repeats (default 1; use 3 for SOP-11 L1x3)
   --no-vel-ff                    Triangle leg without vel-ff (A3 P_bad; step leg
                                  never uses vel-ff)
+  --coulomb-ff SPEC              Coulomb FF forwarded to run_test.py (SOP-11 §7.2;
+                                 'hat', 'hat:1.2', or 6-vector literal) — B1 G0-ext
+  --ki-level LVL                 Integral level K0/K1/K2/K3 (SOP-09) — B1 G0-ext
+  --integral-joints LIST         Comma-separated 1-based joints for integral
+  --t-wind-s S                   Integral wind-up time override (SOP-11 §7.3)
+  --clamp-scale S                Integral clamp_scale override
   --can CHANNEL                  CAN channel (default can0)
   --dry-run                      Forward to run_test.py (IK gate / joint windows only)
   --output-format {text,json,csv}  Summary format (default text)
@@ -100,6 +111,26 @@ while [[ $# -gt 0 ]]; do
     --no-vel-ff)
       NO_VEL_FF=1
       shift
+      ;;
+    --coulomb-ff)
+      COULOMB_FF="$2"
+      shift 2
+      ;;
+    --ki-level)
+      KI_LEVEL="$2"
+      shift 2
+      ;;
+    --integral-joints)
+      INTEGRAL_JOINTS="$2"
+      shift 2
+      ;;
+    --t-wind-s)
+      T_WIND_S="$2"
+      shift 2
+      ;;
+    --clamp-scale)
+      CLAMP_SCALE="$2"
+      shift 2
       ;;
     --run)
       RUN_PREFIX="$2"
@@ -178,6 +209,15 @@ if [[ "$NO_VEL_FF" == "1" ]]; then
   VEL_FF_ARGS=()
 fi
 
+# Feedforward mechanism flags (B1 G0-ext mechanism pairs, SOP-11 §7.4) —
+# forwarded verbatim to every leg's run_test.py call.
+MECH_ARGS=()
+[[ -z "$COULOMB_FF" ]] || MECH_ARGS+=("--coulomb-ff" "$COULOMB_FF")
+[[ -z "$KI_LEVEL" ]] || MECH_ARGS+=("--ki-level" "$KI_LEVEL")
+[[ -z "$INTEGRAL_JOINTS" ]] || MECH_ARGS+=("--integral-joints" "$INTEGRAL_JOINTS")
+[[ -z "$T_WIND_S" ]] || MECH_ARGS+=("--t-wind-s" "$T_WIND_S")
+[[ -z "$CLAMP_SCALE" ]] || MECH_ARGS+=("--clamp-scale" "$CLAMP_SCALE")
+
 run_dirs=()
 
 for i in $(seq 1 "$REPEAT"); do
@@ -194,6 +234,7 @@ for i in $(seq 1 "$REPEAT"); do
               --hold-pre 0.5 --hold-post 0.5 \
               "${VEL_FF_ARGS[@]}" \
               "${GAINS_ARGS[@]}" \
+              "${MECH_ARGS[@]}" \
               --can "$CAN" \
               --run "$tri_run" \
               "${DRY_RUN[@]}"
@@ -207,6 +248,7 @@ for i in $(seq 1 "$REPEAT"); do
               --amp-deg 2 --period 4 --cycles 1 \
               --hold-pre 0.5 --hold-post 0.5 \
               "${GAINS_ARGS[@]}" \
+              "${MECH_ARGS[@]}" \
               --can "$CAN" \
               --run "$step_run" \
               "${DRY_RUN[@]}"
@@ -219,6 +261,7 @@ for i in $(seq 1 "$REPEAT"); do
     echo "[verify] EE tracking leg: $ee_run"
     ./a1z/analysis/test.sh --mode ee \
               "${GAINS_ARGS[@]}" \
+              "${MECH_ARGS[@]}" \
               --can "$CAN" \
               --run "$ee_run" \
               "${DRY_RUN[@]}"

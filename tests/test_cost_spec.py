@@ -10,17 +10,27 @@ import numpy as np
 import pytest
 
 from a1z.analysis.optimize.cost_spec import (
+    BASELINE_EE_JITTER_STD_MM,
+    BASELINE_EE_PHASE_LAG_MS,
+    BASELINE_EE_TERMINAL_ANG_DEG,
+    BASELINE_EE_TERMINAL_POS_MM,
     BASELINE_ESS_DEG,
     BASELINE_LAG_DEG,
     BASELINE_OVERSHOOT_PCT,
     BASELINE_RESID_STD_DEG,
     BASELINE_TS_MS,
+    BASE_TOTAL_EE,
+    BASE_TOTAL_JT,
     COST_SPEC_VERSION,
     DEFAULT_KD,
     DEFAULT_KP,
     I_HAT,
     KD_CAP,
     L0,
+    NORM_FLOOR_EE_JITTER_STD_MM,
+    NORM_FLOOR_EE_PHASE_LAG_MS,
+    NORM_FLOOR_EE_TERMINAL_ANG_DEG,
+    NORM_FLOOR_EE_TERMINAL_POS_MM,
     NORM_FLOOR_ESS_DEG,
     NORM_FLOOR_K,
     NORM_FLOOR_LAG_DEG,
@@ -31,11 +41,16 @@ from a1z.analysis.optimize.cost_spec import (
     TAU_C_HAT,
     TERM_CLIP,
     TORQUE_CLIP,
+    WEIGHTS_EE,
     WEIGHTS_JOINT,
+    W_EE_TOTAL,
+    W_JT_TOTAL,
     _phase_a_kp_range,
     _phase_a_zeta_range,
     _phase_b_coulomb_range,
+    compute_ee_cost,
     compute_joint_cost,
+    compute_total_cost,
     cost_spec_snapshot,
     violation_surrogate,
 )
@@ -229,6 +244,116 @@ def test_l0_preset_values():
     assert L0.tri_vel_ff is True
     assert L0.tri_period > 0
     assert L0.step_amp_deg > 0
+
+
+# --- EE cost (SOP-11 §2.2/§2.3, v10) -------------------------------------------
+
+def _pdef_metrics():
+    """A3 Pdef run (old SDK defaults) measured EE metrics — the baselines."""
+    return dict(terminal_pos_mm=17.42, terminal_ang_deg=2.00,
+                normal_jitter_std_mm=1.395, phase_lag_ms=166.5)
+
+
+def _ppha_metrics():
+    """A3 PphA run (Phase A BO best = frozen defaults) measured EE metrics."""
+    return dict(terminal_pos_mm=10.47, terminal_ang_deg=1.21,
+                normal_jitter_std_mm=1.260, phase_lag_ms=110.2)
+
+
+def test_weights_ee_sum_to_one():
+    assert float(np.sum(WEIGHTS_EE)) == pytest.approx(1.0)
+    assert W_EE_TOTAL + W_JT_TOTAL == pytest.approx(1.0)
+
+
+def test_ee_floors_positive_and_below_baselines():
+    for base, floor in (
+        (BASELINE_EE_TERMINAL_POS_MM, NORM_FLOOR_EE_TERMINAL_POS_MM),
+        (BASELINE_EE_TERMINAL_ANG_DEG, NORM_FLOOR_EE_TERMINAL_ANG_DEG),
+        (BASELINE_EE_JITTER_STD_MM, NORM_FLOOR_EE_JITTER_STD_MM),
+        (BASELINE_EE_PHASE_LAG_MS, NORM_FLOOR_EE_PHASE_LAG_MS),
+    ):
+        assert floor > 0
+        assert floor < base
+
+
+def test_ee_cost_at_baseline_is_one():
+    """Pdef metrics = the baselines → every normalised term is 1 → J_ee = 1."""
+    cost, bd = compute_ee_cost(_pdef_metrics())
+    assert cost == pytest.approx(1.0, rel=1e-9)
+    assert sum(bd.values()) == pytest.approx(cost, rel=1e-9)
+
+
+def test_ee_cost_breakdown_keys_and_sum():
+    cost, bd = compute_ee_cost(dict(terminal_pos_mm=8.0, terminal_ang_deg=1.0,
+                                    normal_jitter_std_mm=0.7, phase_lag_ms=80.0))
+    assert set(bd.keys()) == {"terminal_pos", "terminal_ang", "jitter", "lag"}
+    assert sum(bd.values()) == pytest.approx(cost, rel=1e-9)
+    # Weight structure at baseline inputs (all normalised terms = 1):
+    # terminal splits 0.40 into 0.20 pos + 0.20 ang; jitter/lag 0.30 each.
+    _, bd1 = compute_ee_cost(_pdef_metrics())
+    assert bd1["terminal_pos"] == pytest.approx(0.20)
+    assert bd1["terminal_ang"] == pytest.approx(0.20)
+    assert bd1["jitter"] == pytest.approx(0.30)
+    assert bd1["lag"] == pytest.approx(0.30)
+
+
+def test_ee_cost_ppha_beats_pdef():
+    """E5 core sanity at cost level: the frozen Phase A gains must score
+    strictly better than the old defaults on J_ee (devlog 2026-08-01 E1/E5)."""
+    cost_pdef, _ = compute_ee_cost(_pdef_metrics())
+    cost_ppha, _ = compute_ee_cost(_ppha_metrics())
+    assert cost_ppha < cost_pdef
+    # and the margin is substantial (~40% on the dominant terminal term)
+    assert cost_ppha < 0.8 * cost_pdef
+
+
+def test_ee_cost_term_clip():
+    """An extreme metric cannot exceed TERM_CLIP after normalisation."""
+    cost, bd = compute_ee_cost(dict(terminal_pos_mm=1e6, terminal_ang_deg=1e6,
+                                    normal_jitter_std_mm=1e6, phase_lag_ms=1e6))
+    for v in bd.values():
+        assert v <= WEIGHTS_EE[0] * TERM_CLIP
+    assert cost == pytest.approx(float(np.sum(WEIGHTS_EE)) * TERM_CLIP)
+
+
+def test_ee_cost_zero_inputs():
+    cost, _ = compute_ee_cost(dict(terminal_pos_mm=0.0, terminal_ang_deg=0.0,
+                                   normal_jitter_std_mm=0.0, phase_lag_ms=0.0))
+    assert cost == 0.0
+
+
+def test_total_cost_weights():
+    """At J_joint = J_ee = base, J_total = w_ee + w_jt = 1 (§2.3)."""
+    cost, bd = compute_total_cost(BASE_TOTAL_JT, BASE_TOTAL_EE)
+    assert cost == pytest.approx(1.0, rel=1e-9)
+    assert bd["ee"] == pytest.approx(W_EE_TOTAL)
+    assert bd["joint"] == pytest.approx(W_JT_TOTAL)
+    assert sum(bd.values()) == pytest.approx(cost, rel=1e-9)
+
+
+def test_total_cost_ee_dominant():
+    """Equal relative improvement on both legs moves J_total mostly via EE."""
+    cost, bd = compute_total_cost(0.5 * BASE_TOTAL_JT, 0.5 * BASE_TOTAL_EE)
+    assert cost == pytest.approx(0.5, rel=1e-9)
+    assert bd["ee"] > bd["joint"]
+
+
+def test_snapshot_has_ee_fields():
+    snap = cost_spec_snapshot()
+    assert snap["weights_ee"] == WEIGHTS_EE.tolist()
+    assert snap["baselines_ee"]["terminal_pos_mm"] == BASELINE_EE_TERMINAL_POS_MM
+    assert snap["norm_floors_ee"]["phase_lag_ms"] == NORM_FLOOR_EE_PHASE_LAG_MS
+    assert snap["w_total"] == {"ee": W_EE_TOTAL, "jt": W_JT_TOTAL}
+    assert snap["base_total"] == {"ee": BASE_TOTAL_EE, "jt": BASE_TOTAL_JT}
+
+
+def test_defaults_synced_with_frozen_phase_a_gains():
+    """cost_spec DEFAULT_KP/KD mirror get_robot.py frozen SDK defaults
+    (Phase A 收官 2026-08-01) — the anchor and search ranges key off these."""
+    assert DEFAULT_KP.tolist() == pytest.approx(
+        [146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0])
+    assert DEFAULT_KD.tolist() == pytest.approx(
+        [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553])
 
 
 if __name__ == "__main__":

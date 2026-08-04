@@ -68,14 +68,26 @@ class GateResult:
 
 def build_reference(kin: Kinematics, q_nom: np.ndarray, *, kind: str, plane: str,
                     radius: float, period: float, cycles: int,
-                    sample_hz: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (t (N,), T_ref (N,4,4)) sampled at ``sample_hz``, anchored at FK(q_nom)."""
+                    sample_hz: int, hold_s: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (t (N,), T_ref (N,4,4)) sampled at ``sample_hz``, anchored at FK(q_nom).
+
+    ``hold_s`` > 0 appends a terminal hold at the final pose (circle/line
+    trajectories end back at the anchor with zero velocity): the refine EE
+    leg uses it so ``ee_terminal_error`` measures true terminal accuracy
+    instead of a trailing-window average (SOP-11 §12.1, devlog 2026-08-01
+    关键设计约束 3).
+    """
     T_anchor = kin.fk(np.asarray(q_nom, dtype=float))
     traj = make_ee_traj(kind, T_anchor, plane=plane, radius=radius,
                         period=period, cycles=cycles)
     n = int(round(traj.duration * sample_hz)) + 1
     t = np.arange(n) / sample_hz
     T_ref = np.array([traj.sample(float(tt)) for tt in t])
+    if hold_s > 0.0:
+        n_hold = int(round(hold_s * sample_hz))
+        t_hold = t[-1] + np.arange(1, n_hold + 1) / sample_hz
+        t = np.concatenate([t, t_hold])
+        T_ref = np.concatenate([T_ref, np.repeat(T_ref[-1:], n_hold, axis=0)])
     return t, T_ref
 
 

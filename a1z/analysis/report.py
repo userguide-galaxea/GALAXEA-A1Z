@@ -10,7 +10,7 @@ import csv
 import json
 import math
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -118,6 +118,34 @@ def write_ee_pose_csv(path: Path, t: np.ndarray, T: np.ndarray) -> None:
         for k in range(len(t)):
             row = _pose_row(T[k])
             w.writerow([f"{t[k]:.6f}"] + [f"{v:.6f}" for v in row])
+
+
+def read_ee_pose_csv(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Inverse of :func:`write_ee_pose_csv`: read ``(t (N,), T (N,4,4))`` back.
+
+    Used by offline replay tools (E5 A3 archive self-test) that recompute EE
+    metrics from archived trajectories without hardware.
+    """
+    ts: list = []
+    Ts: list = []
+    with open(path, newline="") as fp:
+        for row in csv.DictReader(fp):
+            ts.append(float(row["t"]))
+            qw, qx, qy, qz = (float(row[k]) for k in ("qw", "qx", "qy", "qz"))
+            n = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
+            qw, qx, qy, qz = qw / n, qx / n, qy / n, qz / n
+            T = np.eye(4)
+            T[:3, :3] = np.array([
+                [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qw * qz),
+                 2 * (qx * qz + qw * qy)],
+                [2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz),
+                 2 * (qy * qz - qw * qx)],
+                [2 * (qx * qz - qw * qy), 2 * (qy * qz + qw * qx),
+                 1 - 2 * (qx * qx + qy * qy)],
+            ])
+            T[:3, 3] = [float(row["px"]), float(row["py"]), float(row["pz"])]
+            Ts.append(T)
+    return np.array(ts), np.array(Ts)
 
 
 def write_ee_error_csv(path: Path, t: np.ndarray, dp: np.ndarray,

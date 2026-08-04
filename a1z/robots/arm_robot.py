@@ -1642,6 +1642,24 @@ class ArmRobot:
             )
         self._reset_integral_state()
 
+    def set_coulomb_config(self, cfg) -> None:
+        """Atomically swap the Coulomb feedforward config (or disable with None).
+
+        Same command-lock discipline as :meth:`set_integral_config` — the
+        config is read on every command cycle (see command_joint_state), so a
+        mid-run switch (Phase B per-trial injection, SOP-11 §7.2) must never
+        mix a partially-updated config into a command.  Accepts a
+        ``CoulombConfig`` (tanh-smoothed path) or None; the legacy bare-array
+        hard-sign path is NOT switched at runtime (constructor-only).
+        """
+        from a1z.analysis.optimize.friction import CoulombConfig as _CoulombCfg
+        if cfg is not None and not isinstance(cfg, _CoulombCfg):
+            raise TypeError(f"set_coulomb_config expects CoulombConfig or None, "
+                            f"got {type(cfg).__name__}")
+        with self._command_lock:
+            self._coulomb_config = cfg
+            self._coulomb_ff = None
+
     def reset_integral(self) -> None:
         """Public: zero the integral accumulator without changing config."""
         self._reset_integral_state()

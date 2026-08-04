@@ -13,11 +13,47 @@ import pytest
 
 from a1z.analysis.optimize.watchdog import (
     AnchorMonitor,
+    MultiTickWatchdog,
     TickWatchdog,
     TrialChecker,
     TrialVerdict,
     WatchdogViolation,
 )
+
+
+# --- MultiTickWatchdog (E-segment EE leg fan-out, SOP-11 §12.1) ---------------
+
+def test_multi_ok_when_all_children_ok():
+    mwd = MultiTickWatchdog([TickWatchdog(j) for j in range(6)])
+    ok, reason = mwd.check(0.0, _zeros6(), _zeros6(), _zeros6())
+    assert ok is True
+    assert reason == ""
+    assert mwd.tripped is False
+
+
+def test_multi_trips_on_first_child_violation():
+    mwd = MultiTickWatchdog([TickWatchdog(j, theta_pos_deg=10.0) for j in range(6)])
+    resp = _zeros6()
+    resp[3] = math.radians(20.0)   # J4 diverges
+    ok, reason = mwd.check(0.0, _zeros6(), resp, _zeros6())
+    assert ok is False
+    assert mwd.tripped is True
+    assert reason.startswith("J4:")
+    assert "pos_diverge" in reason
+
+
+def test_multi_reset_clears_children():
+    mwd = MultiTickWatchdog([TickWatchdog(j, theta_pos_deg=10.0) for j in range(6)])
+    resp = _zeros6()
+    resp[5] = math.radians(30.0)
+    mwd.check(0.0, _zeros6(), resp, _zeros6())
+    assert mwd.tripped is True
+    mwd.reset()
+    assert mwd.tripped is False
+    assert mwd.reason == ""
+    assert all(not wd.tripped for wd in mwd._wds)
+    ok, _ = mwd.check(0.0, _zeros6(), _zeros6(), _zeros6())
+    assert ok is True
 
 
 # --- TickWatchdog -------------------------------------------------------------
@@ -142,6 +178,69 @@ def test_tick_reset_clears_state():
     wd.reset()
     assert wd.tripped is False
     assert wd.reason == ""
+
+
+def test_tick_hf_step_edge_exempt():
+    """2026-08-01 v9: a square-edge torque transient must NOT trip hf_osc;
+    oscillation sustained past the exemption window still must."""
+    dt = 0.01
+
+    def fresh():
+        wd = _make_wd(hf_window=10, hf_confirm_ticks=3,
+                      hf_step_exempt_deg=1.0, hf_step_exempt_s=0.5)
+        wd.set_hf_baseline(0.01)  # theta_hf = 4.0 * 0.01 = 0.04
+        ref = _zeros6()
+        resp = _zeros6()
+        for k in range(12):  # fill the window quietly
+            wd.check(k * dt, ref, resp, _zeros6())
+        ref[5] = math.radians(2.0)  # square edge at t_edge
+        return wd, ref, resp, 12 * dt
+
+    # Case 1: hard ringing for 0.2 s after the edge, then quiet → no trip.
+    wd, ref, resp, t_edge = fresh()
+    tripped = False
+    for k in range(20):
+        eff = _zeros6()
+        eff[5] = 2.0 * ((-1) ** k)
+        ok, _ = wd.check(t_edge + k * dt, ref, resp, eff)
+        tripped |= not ok
+    for k in range(60):  # quiet, well past the 0.5 s exemption
+        ok, _ = wd.check(t_edge + (20 + k) * dt, ref, resp, _zeros6())
+        tripped |= not ok
+    assert not tripped
+
+    # Case 2: ringing persists past the exemption → must trip.
+    wd, ref, resp, t_edge = fresh()
+    for k in range(200):
+        eff = _zeros6()
+        eff[5] = 2.0 * ((-1) ** k)
+        ok, _ = wd.check(t_edge + k * dt, ref, resp, eff)
+        if not ok:
+            assert "hf_osc" in wd.reason
+            break
+    else:
+        pytest.fail("sustained post-edge oscillation did not trip hf_osc")
+
+
+def test_tick_hf_step_exempt_disabled_legacy():
+    """hf_step_exempt_deg=None restores legacy behaviour: an edge transient
+    trips hf_osc immediately (3 consecutive confirms)."""
+    wd = _make_wd(hf_window=10, hf_confirm_ticks=3, hf_step_exempt_deg=None)
+    wd.set_hf_baseline(0.01)
+    ref = _zeros6()
+    resp = _zeros6()
+    dt = 0.01
+    for k in range(12):
+        wd.check(k * dt, ref, resp, _zeros6())
+    ref[5] = math.radians(2.0)
+    for k in range(30):
+        eff = _zeros6()
+        eff[5] = 2.0 * ((-1) ** k)
+        ok, _ = wd.check(0.12 + k * dt, ref, resp, eff)
+        if not ok:
+            assert "hf_osc" in wd.reason
+            return
+    pytest.fail("legacy (exemption disabled) hf_osc did not trip")
 
 
 def test_as_violation_returns_exception():

@@ -82,6 +82,8 @@ class TickWatchdog:
         theta_vel_abs_deg_s: Optional[float] = None,
         kin_window: int = 5,
         hf_confirm_ticks: int = 3,
+        hf_step_exempt_deg: Optional[float] = 1.0,
+        hf_step_exempt_s: float = 0.6,
     ):
         self.j = int(joint)
         self.theta_pos = math.radians(theta_pos_deg)
@@ -94,6 +96,21 @@ class TickWatchdog:
         # oscillation) before tripping.  1 = legacy single-window behaviour.
         self.hf_confirm_ticks = max(1, int(hf_confirm_ticks))
         self._hf_over_ticks = 0
+
+        # HF step-edge exemption (devlog 2026-08-01 归因分析): the eff-diff
+        # RMS channel cannot distinguish a sharp-but-safe torque transient at
+        # a square-wave ref edge from genuine sustained oscillation — all four
+        # hf_osc violations in session 2026-08-01-run-opt-phaseA-J6 were edge
+        # transients.  When |Δref_j| exceeds ``hf_step_exempt_deg``, skip HF
+        # over-threshold counting for ``hf_step_exempt_s`` seconds (must be
+        # ≥ hf_window × tick period = 0.5 s at 100 Hz so the transient fully
+        # flushes out of the sliding window before judging resumes).
+        # ``hf_step_exempt_deg=None`` disables the exemption (legacy).
+        self.hf_step_exempt = (math.radians(hf_step_exempt_deg)
+                               if hf_step_exempt_deg is not None else None)
+        self.hf_step_exempt_s = float(hf_step_exempt_s)
+        self._prev_ref_j: Optional[float] = None
+        self._hf_exempt_until: float = 0.0
 
         # Kinematic channels (SOP-11 §4.1 / devlog 2026-07-29)
         self.theta_vel = _deg_to_rad(theta_vel_deg_s)
@@ -194,6 +211,15 @@ class TickWatchdog:
             return self._trip(kin_reason, t, snapshot)
 
         # 4) HF oscillation (difference-RMS over sliding window)
+        # Step-edge exemption: a ref jump marks the start of a transient;
+        # suppress HF judging until the spike has flushed out of the window.
+        ref_j = float(ref[j])
+        if (self.hf_step_exempt is not None
+                and self._prev_ref_j is not None
+                and abs(ref_j - self._prev_ref_j) > self.hf_step_exempt):
+            self._hf_exempt_until = t + self.hf_step_exempt_s
+        self._prev_ref_j = ref_j
+
         eff_j = float(eff[j])
         if self._prev_eff is not None:
             self._eff_buf.append(eff_j - self._prev_eff)
@@ -206,7 +232,9 @@ class TickWatchdog:
                 and self._hf_baseline_rms > 0):
             hf_rms = math.sqrt(sum(d * d for d in self._eff_buf) / len(self._eff_buf))
             theta_hf = self.theta_hf_scale * self._hf_baseline_rms
-            if hf_rms > theta_hf:
+            if t < self._hf_exempt_until:
+                self._hf_over_ticks = 0
+            elif hf_rms > theta_hf:
                 self._hf_over_ticks += 1
             else:
                 self._hf_over_ticks = 0
@@ -301,9 +329,55 @@ class TickWatchdog:
         self.reason = ""
         self._eff_buf.clear()
         self._prev_eff = None
+        self._prev_ref_j = None
+        self._hf_exempt_until = 0.0
         self._kin_buf.clear()
         self._vel_err_buf.clear()
         self._resp_acc_buf.clear()
+
+
+# ---------------------------------------------------------------------------
+# Multi-joint fan-out (E-segment EE leg, SOP-11 §12.1)
+# ---------------------------------------------------------------------------
+class MultiTickWatchdog:
+    """Check every child ``TickWatchdog`` per tick; trip on the first violation.
+
+    The EE leg streams all six joints at once, so the single-joint
+    ``TickWatchdog`` cannot monitor it directly.  This wrapper fans one
+    ``check()`` call out to per-joint children (built via
+    ``make_tick_watchdog`` so the B1 v4 active-table per-joint channel
+    enables/thresholds apply verbatim) and exposes the same
+    ``tripped`` / ``reason`` / ``reset()`` surface ``stream()`` and the
+    eval loop already use.
+    """
+
+    def __init__(self, watchdogs: List[TickWatchdog]):
+        self._wds = list(watchdogs)
+        self.tripped = False
+        self.reason = ""
+
+    def check(
+        self,
+        t: float,
+        ref: np.ndarray,
+        resp: np.ndarray,
+        eff: np.ndarray,
+        *,
+        vel: Optional[np.ndarray] = None,
+    ) -> Tuple[bool, str]:
+        for wd in self._wds:
+            ok, reason = wd.check(t, ref, resp, eff, vel=vel)
+            if not ok:
+                self.tripped = True
+                self.reason = f"J{wd.j + 1}:{reason}"
+                return False, self.reason
+        return True, ""
+
+    def reset(self) -> None:
+        self.tripped = False
+        self.reason = ""
+        for wd in self._wds:
+            wd.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +396,8 @@ def make_tick_watchdog(
     theta_vel_abs_deg_s: Optional[float] = None,
     kin_window: int = 5,
     hf_confirm_ticks: int = 3,
+    hf_step_exempt_deg: Optional[float] = 1.0,
+    hf_step_exempt_s: float = 0.6,
 ) -> TickWatchdog:
     """Build a ``TickWatchdog`` with optional per-joint B1 calibration JSON.
 
@@ -359,6 +435,8 @@ def make_tick_watchdog(
     kin_window = jcal.get("kin_window", kin_window)
     hf_window = jcal.get("window_ticks", hf_window)
     hf_confirm_ticks = jcal.get("hf_confirm_ticks", hf_confirm_ticks)
+    hf_step_exempt_deg = jcal.get("hf_step_exempt_deg", hf_step_exempt_deg)
+    hf_step_exempt_s = jcal.get("hf_step_exempt_s", hf_step_exempt_s)
 
     wd = TickWatchdog(
         joint,
@@ -371,6 +449,8 @@ def make_tick_watchdog(
         theta_vel_abs_deg_s=theta_vel_abs_deg_s,
         kin_window=kin_window,
         hf_confirm_ticks=hf_confirm_ticks,
+        hf_step_exempt_deg=hf_step_exempt_deg,
+        hf_step_exempt_s=hf_step_exempt_s,
     )
 
     # HF channel: calibration gives absolute theta_hf + baseline; convert to

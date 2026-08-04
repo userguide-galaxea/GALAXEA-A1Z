@@ -10,6 +10,7 @@ import csv
 import optuna
 import pytest
 
+from a1z.analysis.optimize.cost_spec import KD_MIN
 from a1z.analysis.optimize.search_space import build_optuna_space
 from a1z.analysis.optimize.study import OptStudy
 
@@ -34,7 +35,7 @@ def _fresh_study():
 def test_inject_ok_violation_and_unusable_rows(tmp_path):
     csv_path = tmp_path / "relabel.csv"
     _write_csv(csv_path, [
-        {"trial_id": 0, "theta_kp": 30.0, "theta_zeta": 0.8,
+        {"trial_id": 0, "theta_kp": 35.0, "theta_zeta": 0.8,
          "cost_new": 1.5, "watchdog_ok": "1"},
         {"trial_id": 1, "theta_kp": 40.0, "theta_zeta": 0.9,
          "cost_new": 1.2, "watchdog_ok": "1"},
@@ -58,8 +59,8 @@ def test_inject_ok_violation_and_unusable_rows(tmp_path):
     assert vals == pytest.approx([1.2, 1.5, surrogate, surrogate])
     # feasibility travels via the constraint channel
     by_kp = {t.params["kp"]: t for t in study.trials}
-    assert by_kp[30.0].user_attrs["wd_ok"] == 1
-    assert by_kp[30.0].system_attrs["constraints"] == (0.0,)
+    assert by_kp[35.0].user_attrs["wd_ok"] == 1
+    assert by_kp[35.0].system_attrs["constraints"] == (0.0,)
     assert by_kp[90.0].user_attrs["wd_ok"] == 0
     assert by_kp[90.0].system_attrs["constraints"] == (1.0,)
     # best_trial must see the injected historic optimum
@@ -72,7 +73,7 @@ def test_rows_without_theta_are_skipped(tmp_path):
     _write_csv(csv_path, [
         {"trial_id": 0, "theta_kp": "", "theta_zeta": "",
          "cost_new": "", "watchdog_ok": "0"},
-        {"trial_id": 1, "theta_kp": 30.0, "theta_zeta": 0.8,
+        {"trial_id": 1, "theta_kp": 60.0, "theta_zeta": 0.8,
          "cost_new": 2.0, "watchdog_ok": "1"},
     ])
     opt = OptStudy(session_dir=tmp_path / "sess", joint1=6,
@@ -84,20 +85,23 @@ def test_rows_without_theta_are_skipped(tmp_path):
     assert len(study.trials) == 1
 
 
-def test_injected_params_land_inside_search_space(tmp_path):
-    """create_trial with out-of-space params would raise; real relabel CSVs
-    come from the same space so this must pass for every row."""
+def test_out_of_space_rows_are_skipped(tmp_path):
+    """v10 space change (DEFAULT_KP/KD synced to the frozen gains): historic
+    relabel rows can fall outside the new per-joint ranges.  They must be
+    skipped — not abort the injection, never clamped into the space."""
     csv_path = tmp_path / "relabel.csv"
     _write_csv(csv_path, [
         {"trial_id": i, "theta_kp": kp, "theta_zeta": z,
          "cost_new": 1.0, "watchdog_ok": "1"}
+        # J6 v10 kp range is [50, 200]: 12.5 / 25.0 are out, 100.0 is in.
         for i, (kp, z) in enumerate([(12.5, 0.4), (25.0, 0.8), (100.0, 1.2)])
     ])
     opt = OptStudy(session_dir=tmp_path / "sess", joint1=6,
                    warm_start_path=csv_path)
     study = _fresh_study()
     space = build_optuna_space(5, phase="A")
-    assert opt._inject_warm_start(study, space) == 3
+    assert opt._inject_warm_start(study, space) == 1
+    assert [t.params["kp"] for t in study.trials] == [100.0]
 
 
 def test_injected_count_persists_for_resume_accounting(tmp_path):
@@ -108,7 +112,7 @@ def test_injected_count_persists_for_resume_accounting(tmp_path):
 
     csv_path = tmp_path / "relabel.csv"
     _write_csv(csv_path, [
-        {"trial_id": i, "theta_kp": 30.0 + i, "theta_zeta": 0.8,
+        {"trial_id": i, "theta_kp": 60.0 + i, "theta_zeta": 0.8,
          "cost_new": 1.0 + 0.1 * i, "watchdog_ok": "1"}
         for i in range(5)
     ])
@@ -146,8 +150,9 @@ def test_inject_into_degenerate_joint_kd_space(tmp_path):
     assert n == 2
     for t in study.trials:
         assert set(t.params.keys()) == {"kp", "kd"}
-        # historic kd always clamped to KD_MIN(J5)=0.3 (Q16 measurement)
-        assert t.params["kd"] == pytest.approx(0.3)
+        # historic kd always clamped to KD_MIN(J5) (Q16 measurement; v10
+        # KD_MIN follows the frozen default kd = 1.5059 -> 0.3765)
+        assert t.params["kd"] == pytest.approx(float(KD_MIN[4]))
     by_kp = {t.params["kp"]: t for t in study.trials}
     assert by_kp[40.0].system_attrs["constraints"] == (1.0,)
     assert by_kp[40.0].value == pytest.approx(1.2)  # surrogate = max(feasible)
