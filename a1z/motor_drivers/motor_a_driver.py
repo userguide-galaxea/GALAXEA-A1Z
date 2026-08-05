@@ -58,6 +58,9 @@ class MotorAFeedback:
     error: int = 0
     temperature: float = 0.0      # motor coil temperature (°C)
     temperature_mos: float = 0.0  # MOS temperature (°C)
+    # False 表示该帧不是类型 1 返回报文(错误上报/配置/查询/抱闸返回),
+    # payload 不是 uint16 位置,position/velocity/current/temperature 均不可信。
+    valid_position: bool = True
 
 
 # ENCOS feedback "motor error information" field (uint5).
@@ -120,6 +123,9 @@ class MotorA:
         self.bus = bus
         self.ranges = ranges or MotorARanges()
         self.last_feedback: Optional[MotorAFeedback] = None
+        # 非类型 1 返回报文(错误上报等)携带的错误码,由 MixedMotorChain 分发时
+        # 写入;此类帧 payload 布局不同,不允许覆盖 last_feedback。
+        self.last_reported_error: int = 0
 
     def enable(self) -> None:
         """Send motor enable command via 0x7FF config frame (cmd=0x01)."""
@@ -193,7 +199,19 @@ class MotorA:
         r = self.ranges
 
         frame = int.from_bytes(data, byteorder="big", signed=False)
+        report_type = (frame >> 61) & 0x7
         error_code = (frame >> 56) & 0x1F
+        if report_type != 0x1:
+            # ENCOS 问答模式返回报文共 6 种(手册 V1.12 §10),只有类型 1 的
+            # payload 是 uint16 位置/速度/电流;类型 2/3 是 float32 布局,
+            # 类型 0/4/5/6 是保留/配置/查询/抱闸返回。这些帧只取错误码,
+            # 绝不当位置解 —— 否则位置会被解到量程端点附近(反馈跳变)。
+            return MotorAFeedback(
+                motor_id=msg.arbitration_id,
+                error=error_code,
+                valid_position=False,
+            )
+
         pos_raw = (frame >> 40) & 0xFFFF
         vel_raw = (frame >> 28) & 0xFFF
         curr_raw = (frame >> 16) & 0xFFF

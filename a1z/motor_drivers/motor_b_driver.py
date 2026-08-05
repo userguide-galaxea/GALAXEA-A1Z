@@ -203,12 +203,19 @@ class MotorB:
         self.bus.send(msg, timeout=_CAN_SEND_TIMEOUT_S)
 
     def parse_feedback(self, msg: can.Message) -> Optional[MotorBFeedback]:
-        """Parse MotorB feedback CAN frame."""
+        """Parse MotorB feedback CAN frame.
+
+        byte0 低半字节必须是本电机 ID(达妙布局 ID | ERR<<4);不匹配的帧
+        (如命令帧回显、未定义的 0x7F 告警帧)直接拒绝,防止 payload 被
+        误当位置解出量程端点值(反馈跳变/伪错误码)。"""
         if msg is None or len(msg.data) < 8:
             return None
 
         data = msg.data
         r = self.ranges
+
+        if (data[0] & 0x0F) != (self.motor_id & 0x0F):
+            return None
 
         error_int = (data[0] & 0xF0) >> 4
         error_message = MOTOR_B_ERROR_CODES.get(error_int, f"unknown({error_int})")
@@ -409,18 +416,30 @@ class MixedMotorChain:
 
     def _dispatch_feedback(self, msg: can.Message) -> None:
         """Route a CAN message to the correct motor parser."""
+        # SocketCAN 回显的自己发送的命令帧(is_rx=False)不是反馈,直接丢弃 —
+        # 命令帧与反馈同 CAN ID,误当反馈解会污染位置/错误码。
+        if not getattr(msg, "is_rx", True):
+            return
         mid = int(msg.arbitration_id)
         entry = self._motor_id_map.get(mid)
         if entry is None:
             return
         motor_type, motor, joint_idx = entry
         fb = motor.parse_feedback(msg)
-        if fb is not None:
-            motor.last_feedback = fb
-            if joint_idx >= 0:
-                with self._feedback_time_lock:
-                    self._feedback_seen[joint_idx] = True
-                    self._last_feedback_monotonic[joint_idx] = time.monotonic()
+        if fb is None:
+            return
+        if isinstance(motor, MotorA) and not fb.valid_position:
+            # 非类型 1 返回报文(错误上报/配置/查询/抱闸):只取错误码,
+            # 不覆盖 last_feedback(位置/温度保持上一帧有效值),也不刷新
+            # 反馈新鲜度 —— 它不是有效的位置反馈。
+            if fb.error:
+                motor.last_reported_error = fb.error
+            return
+        motor.last_feedback = fb
+        if joint_idx >= 0:
+            with self._feedback_time_lock:
+                self._feedback_seen[joint_idx] = True
+                self._last_feedback_monotonic[joint_idx] = time.monotonic()
 
     def register_external_motor(self, motor: "MotorB") -> None:
         """Register a motor for CAN feedback routing without adding it to the joint chain.
@@ -513,6 +532,9 @@ class MixedMotorChain:
             fb = motor.last_feedback
             if fb is not None:
                 out[idx] = int(fb.error)
+            # 错误上报帧(非类型 1)的错误码单独锁存,优先于常规反馈帧里的值
+            if motor.last_reported_error:
+                out[idx] = int(motor.last_reported_error)
         for i, motor in enumerate(self._motor_b_list):
             idx = self._motor_b_joint_indices[i]
             fb = motor.last_feedback
