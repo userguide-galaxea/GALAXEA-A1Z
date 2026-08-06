@@ -39,6 +39,8 @@ from typing import Deque, List, Optional, Tuple
 
 import can
 
+from a1z.motor_drivers.command_image import PAYLOAD_SIZE, CommandImage
+
 logger = logging.getLogger(__name__)
 
 # --- G4 frame protocol constants (mirror lemo_main_board src/g4spi.h) ---
@@ -50,15 +52,6 @@ _POLL_CHUNK_SIZE = 256  # dummy-clock bytes per poll transfer (as g4spi.cpp)
 
 CMD_LEFT_A1Z_DATA = 0x11
 CMD_RIGHT_A1Z_DATA = 0x12
-
-# --- 56-byte A1Z payload layout ---
-_NUM_ARM_MOTORS = 6
-_GRIPPER_CAN_ID = 7
-_HYBRID_CMD_ID_BASE = 0x300
-_CLAW_SLOT = 6
-_PAYLOAD_SIZE = 7 * 8
-
-_ARM_SLOTS_MASK = (1 << _NUM_ARM_MOTORS) - 1
 
 
 def crc16_ccitt_false(data: bytes) -> int:
@@ -194,10 +187,8 @@ class G4SpiBus:
         self._rx_queue: Deque[can.Message] = deque()
         self._parser = G4FrameParser()
 
-        self._tx_payload = bytearray(_PAYLOAD_SIZE)
-        self._tx_dirty = 0  # bitmask of slots written since last flush
+        self._tx = CommandImage()
         self._send_index = 0
-        self._warned_ids: set = set()
 
         self._stop = threading.Event()
         self._poller = threading.Thread(
@@ -220,39 +211,8 @@ class G4SpiBus:
 
     def send(self, msg: can.Message, timeout: Optional[float] = None) -> None:
         """Buffer one CAN payload into the command image; flush when full."""
-        arb = int(msg.arbitration_id)
-        data = bytes(msg.data)
-
-        if 1 <= arb <= _NUM_ARM_MOTORS:
-            slot = arb - 1
-        elif arb == _GRIPPER_CAN_ID or arb == _HYBRID_CMD_ID_BASE + _GRIPPER_CAN_ID:
-            slot = _CLAW_SLOT
-        else:
-            # Management frames (0x7FF broadcast enable/disable/set-zero,
-            # 0x55 register writes such as the gripper mode-4 switch) have no
-            # slot in the 56-byte channel; the G4 firmware owns motor enable
-            # and mode setup. Drop rather than fail so startup sequences run.
-            if arb not in self._warned_ids:
-                self._warned_ids.add(arb)
-                logger.warning(
-                    "[g4spi] CAN ID 0x%03x is not transportable over the G4 SPI "
-                    "channel; dropping (firmware must handle it)", arb
-                )
-            return
-
-        if len(data) != 8:
-            if arb not in self._warned_ids:
-                self._warned_ids.add(arb)
-                logger.warning(
-                    "[g4spi] dropping %d-byte frame on CAN ID 0x%03x; channel is 8-byte slots",
-                    len(data), arb,
-                )
-            return
-
         with self._lock:
-            self._tx_payload[slot * 8 : slot * 8 + 8] = data
-            self._tx_dirty |= 1 << slot
-            if (self._tx_dirty & _ARM_SLOTS_MASK) == _ARM_SLOTS_MASK:
+            if self._tx.write(msg.arbitration_id, bytes(msg.data)):
                 self._flush_locked()
 
     def recv(self, timeout: Optional[float] = 0.0) -> Optional[can.Message]:
@@ -307,9 +267,9 @@ class G4SpiBus:
 
     def _flush_locked(self) -> None:
         """Transmit the 56-byte command image as one G4 frame. Caller holds lock."""
-        frame = build_frame(self._cmd_id, bytes(self._tx_payload), self._send_index)
+        frame = build_frame(self._cmd_id, bytes(self._tx.payload), self._send_index)
         self._send_index += 1
-        self._tx_dirty = 0
+        self._tx.reset()
         try:
             rx = self._spi.xfer2(list(frame))
         except OSError as exc:
@@ -326,11 +286,11 @@ class G4SpiBus:
         messages: List[can.Message] = []
         while self._parser.frames:
             cmd_id, _index, param = self._parser.frames.popleft()
-            if cmd_id != self._cmd_id or len(param) != _PAYLOAD_SIZE:
+            if cmd_id != self._cmd_id or len(param) != PAYLOAD_SIZE:
                 # Servo-state / leader / other-arm traffic is not ours.
                 continue
             stamp = time.time()
-            for slot in range(_NUM_ARM_MOTORS + 1):
+            for slot in range(PAYLOAD_SIZE // 8):
                 arb = slot + 1  # slots 0..5 -> IDs 1..6, slot 6 (claw) -> ID 7
                 messages.append(
                     can.Message(

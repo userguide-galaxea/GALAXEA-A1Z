@@ -156,17 +156,23 @@ def get_a1z_robot(
 
     Args:
         can_channel: CAN interface name (e.g. 'can0'). SocketCAN transport only.
-        transport: Low-level command transport: "socketcan" (default, direct
-                   CAN via python-can) or "g4spi" (lemo main board: commands
-                   and feedback bridged through the G4 MCU over spidev; the
-                   SDK must run on the board itself). With "g4spi",
-                   CAN-ID-0x7FF management frames (MotorA enable/disable/
-                   set-zero, gripper mode-4 register write) are NOT
-                   transportable and are dropped — the G4 firmware must own
-                   motor enable and gripper mode setup.
+        transport: Low-level command transport:
+                   "socketcan" (default, direct CAN via python-can);
+                   "g4ros" (lemo main board, via the embedded g4spi_node's
+                   ROS2 topics — requires rclpy, the lemo_main_board message
+                   package, and the node running; keeps leader-arm topics
+                   available);
+                   "g4spi" (lemo main board, direct spidev bridge — no ROS
+                   needed, but conflicts with a running g4spi_node on the
+                   same spidev). With both lemo transports, CAN-ID-0x7FF
+                   management frames (MotorA enable/disable/set-zero, gripper
+                   mode-4 register write) are NOT transportable and are
+                   dropped — the G4 firmware must own motor enable and
+                   gripper mode setup.
         spi_device: g4spi transport only: spidev node, e.g. '/dev/spidev0.0'.
         spi_speed_hz: g4spi transport only: SPI clock in Hz (board default 10 MHz).
-        arm_side: g4spi transport only: 'left' (CMD 0x11) or 'right' (CMD 0x12).
+        arm_side: lemo transports only: 'left' or 'right' arm
+                  (G4 CMD 0x11 / 0x12, or the left_*/right_* topic prefix).
         gravity_comp_factor: Gravity compensation scale (0=off, 1=full).
         zero_gravity_mode: True for zero-gravity (floating) mode, False for
                            position hold with PD + gravity comp.
@@ -227,6 +233,10 @@ def get_a1z_robot(
             spi_speed_hz=spi_speed_hz,
             arm_side=arm_side,
         )
+    elif transport == "g4ros":
+        from a1z.motor_drivers.ros_topic_bus import RosTopicBus
+
+        bus = RosTopicBus(arm_side=arm_side)
     elif transport == "socketcan":
         bus = can.interface.Bus(
             channel=can_channel,
@@ -234,7 +244,9 @@ def get_a1z_robot(
             bitrate=1_000_000,
         )
     else:
-        raise ValueError(f"transport must be 'socketcan' or 'g4spi', got {transport!r}")
+        raise ValueError(
+            f"transport must be 'socketcan', 'g4ros' or 'g4spi', got {transport!r}"
+        )
 
     # Create MotorA motors
     motor_a_list = [
