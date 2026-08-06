@@ -133,6 +133,10 @@ def _resolve_inter_cmd_gap_us(param: Optional[float]) -> float:
 
 def get_a1z_robot(
     can_channel: str = "can0",
+    transport: str = "socketcan",
+    spi_device: str = "/dev/spidev0.0",
+    spi_speed_hz: int = 10_000_000,
+    arm_side: str = "left",
     gravity_comp_factor: float = 1.0,
     zero_gravity_mode: bool = True,
     control_freq_hz: int = 250,
@@ -151,7 +155,18 @@ def get_a1z_robot(
     """Create and return a configured A1Z ArmRobot.
 
     Args:
-        can_channel: CAN interface name (e.g. 'can0').
+        can_channel: CAN interface name (e.g. 'can0'). SocketCAN transport only.
+        transport: Low-level command transport: "socketcan" (default, direct
+                   CAN via python-can) or "g4spi" (lemo main board: commands
+                   and feedback bridged through the G4 MCU over spidev; the
+                   SDK must run on the board itself). With "g4spi",
+                   CAN-ID-0x7FF management frames (MotorA enable/disable/
+                   set-zero, gripper mode-4 register write) are NOT
+                   transportable and are dropped — the G4 firmware must own
+                   motor enable and gripper mode setup.
+        spi_device: g4spi transport only: spidev node, e.g. '/dev/spidev0.0'.
+        spi_speed_hz: g4spi transport only: SPI clock in Hz (board default 10 MHz).
+        arm_side: g4spi transport only: 'left' (CMD 0x11) or 'right' (CMD 0x12).
         gravity_comp_factor: Gravity compensation scale (0=off, 1=full).
         zero_gravity_mode: True for zero-gravity (floating) mode, False for
                            position hold with PD + gravity comp.
@@ -203,12 +218,23 @@ def get_a1z_robot(
             **(integral_overrides or {}),
         )
 
-    # Open CAN bus
-    bus = can.interface.Bus(
-        channel=can_channel,
-        bustype="socketcan",
-        bitrate=1_000_000,
-    )
+    # Open command transport
+    if transport == "g4spi":
+        from a1z.motor_drivers.spi_bus import G4SpiBus
+
+        bus = G4SpiBus(
+            spi_device=spi_device,
+            spi_speed_hz=spi_speed_hz,
+            arm_side=arm_side,
+        )
+    elif transport == "socketcan":
+        bus = can.interface.Bus(
+            channel=can_channel,
+            bustype="socketcan",
+            bitrate=1_000_000,
+        )
+    else:
+        raise ValueError(f"transport must be 'socketcan' or 'g4spi', got {transport!r}")
 
     # Create MotorA motors
     motor_a_list = [

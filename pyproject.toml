@@ -18,6 +18,9 @@ dependencies = [
 dev = [
     "pytest",
 ]
+g4spi = [
+    "spidev",
+]
 
 [tool.flit.module]
 name = "a1z"
