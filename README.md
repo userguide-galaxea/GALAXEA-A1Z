@@ -24,6 +24,7 @@ a1z/
 │   │   ├── can_interface.py       # CAN 总线封装
 │   │   ├── motor_a_driver.py      # MotorA 驱动 (MIT 混控)
 │   │   ├── motor_b_driver.py      # MotorB 驱动 + MixedMotorChain
+│   │   ├── ros_topic_bus.py       # LEMO 主板 ROS2 topic 传输 (g4ros)
 │   │   └── utils.py               # 数据结构, float↔uint 转换
 │   ├── robots/
 │   │   ├── robot.py               # Robot Protocol (抽象接口)
@@ -256,6 +257,9 @@ cansend can0 006#FFFFFFFFFFFFFFFD
 ```python
 get_a1z_robot(
     can_channel="can0",           # CAN 通道名
+    transport="socketcan",        # 传输层: "socketcan" (默认, USB-CAN 直连)
+                                  # 或 "g4ros" (LEMO 主板, 经 g4spi_node 的 ROS2 topic)
+    arm_side="left",              # 仅 g4ros: "left"/"right"，选 left_*/right_* topic 前缀
     gravity_comp_factor=1.0,      # 重力补偿比例 (0=关闭, 1=全补偿)
     zero_gravity_mode=True,       # True=零力漂浮, False=位置保持
     control_freq_hz=250,          # 控制回路频率 (Hz)
@@ -267,6 +271,11 @@ get_a1z_robot(
     inter_cmd_gap_us=None,        # CAN 命令间隔 (µs)，None=默认 250 µs
 ) -> ArmRobot
 ```
+
+**LEMO 主板（RK3588）接入**：在 LEMO 主板上指令/反馈不经过 USB-CAN 适配器，
+而是经板载 G4 MCU 做 SPI↔CAN 透传，SDK 通过嵌入式 `g4spi_node` 的 ROS2 topic
+（`<side>_motor_send` / `<side>_motor_data`，逐帧 `CanFrame{header, uint16 id,
+uint8[8] data}`）收发。使用 `transport="g4ros"`，详见 [sdk_lemo_rk3588.md](sdk_lemo_rk3588.md)。
 
 **CAN 命令间隔（command pacing）**：每个控制周期内的命令帧突发之间插入间隔，
 让最后发送的电机的应答槽不被前一个电机的应答占据，消除 J6 反馈/目标锁存饥饿
@@ -527,6 +536,7 @@ a1z/
 │   │   ├── can_interface.py       # CAN bus wrapper
 │   │   ├── motor_a_driver.py      # MotorA driver (MIT mixed control)
 │   │   ├── motor_b_driver.py      # MotorB driver + MixedMotorChain
+│   │   ├── ros_topic_bus.py       # LEMO main board ROS2 topic transport (g4ros)
 │   │   └── utils.py               # Data structures, float↔uint conversion
 │   ├── robots/
 │   │   ├── robot.py               # Robot Protocol (abstract interface)
@@ -757,6 +767,9 @@ Factory function that creates a configured `ArmRobot` instance:
 ```python
 get_a1z_robot(
     can_channel="can0",           # CAN channel name
+    transport="socketcan",        # Transport: "socketcan" (default, direct USB-CAN)
+                                  # or "g4ros" (LEMO main board, via g4spi_node ROS2 topics)
+    arm_side="left",              # g4ros only: "left"/"right", selects left_*/right_* topic prefix
     gravity_comp_factor=1.0,      # Gravity compensation scale (0=off, 1=full)
     zero_gravity_mode=True,       # True=zero-force float, False=position hold
     control_freq_hz=250,          # Control loop frequency (Hz)
@@ -768,6 +781,13 @@ get_a1z_robot(
     inter_cmd_gap_us=None,        # CAN command pacing gap (µs), None=250 µs default
 ) -> ArmRobot
 ```
+
+**LEMO main board (RK3588)**: on the LEMO board, commands and feedback do not go
+through a USB-CAN adapter; the onboard G4 MCU bridges SPI↔CAN and the SDK talks
+to the embedded `g4spi_node` over ROS2 topics (`<side>_motor_send` /
+`<side>_motor_data`, one frame per `CanFrame{header, uint16 id, uint8[8] data}`
+message). Use `transport="g4ros"`; see [sdk_lemo_rk3588.md](sdk_lemo_rk3588.md)
+for details.
 
 **CAN command pacing**: a gap is inserted between the per-tick command frames so
 the last-commanded motor's answer slot is never occupied by its predecessor's
