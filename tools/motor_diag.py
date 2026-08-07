@@ -2,17 +2,26 @@
 """A1Z 电机通信诊断与故障排查工具。
 
 功能：
-  --scan        扫描所有电机，检查 CAN 通信是否正常
+  --scan        扫描所有电机，检查通信是否正常
   --monitor     持续监控电机状态（位置/速度/温度/错误码）
-  --listen      被动监听 CAN 总线报文（不发送任何指令）
+  --listen      被动监听总线报文（不发送任何指令）
   --probe J     探测指定关节：使能 → 发送零指令 → 读反馈 → 失能
 
-用法：
-  # 检查 CAN 接口是否正常
-  python tools/motor_diag.py --check-can
+传输：
+  默认走 g4ros（lemo 主板 g4spi_node 的 ROS2 topic 转发），无 socketcan
+  接口的机器（如 lubancat 主板）直接用这一种；需要 rclpy 和
+  lemo_main_board 消息包（source 对应 workspace 后运行）。
+  旧 USB-CAN 直连接法用 --transport socketcan。
 
-  # 扫描所有 6 个电机
+用法：
+  # 扫描所有 7 个电机（g4ros，默认左臂）
   python tools/motor_diag.py --scan
+
+  # g4ros 扫描右臂
+  python tools/motor_diag.py --scan --arm-side right
+
+  # 检查 socketcan CAN 接口是否正常（仅 socketcan）
+  python tools/motor_diag.py --transport socketcan --check-can
 
   # 只扫描 MotorA 或 MotorB
   python tools/motor_diag.py --scan --type motor_a
@@ -853,27 +862,32 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python tools/motor_diag.py --check-can          检查 CAN 接口状态
-  python tools/motor_diag.py --scan               扫描所有电机
+  python tools/motor_diag.py --scan               扫描所有电机（g4ros，默认左臂）
+  python tools/motor_diag.py --scan --arm-side right  扫描右臂（g4ros）
   python tools/motor_diag.py --scan --type motor_a  只扫描 MotorA
   python tools/motor_diag.py --monitor             持续监控
-  python tools/motor_diag.py --listen              被动监听 CAN 总线
+  python tools/motor_diag.py --listen              被动监听总线
   python tools/motor_diag.py --probe 3             探测关节 3
   python tools/motor_diag.py --clear-error         清除所有 MotorB 错误
   python tools/motor_diag.py --clear-error --joints 3 4  清除指定关节错误
+  python tools/motor_diag.py --transport socketcan --check-can  检查 CAN 接口状态
         """,
     )
 
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--check-can", action="store_true", help="检查 CAN 接口状态")
+    group.add_argument("--check-can", action="store_true", help="检查 CAN 接口状态（仅 socketcan）")
     group.add_argument("--scan", action="store_true", help="扫描电机通信")
     group.add_argument("--monitor", action="store_true", help="持续监控电机状态")
-    group.add_argument("--listen", action="store_true", help="被动监听 CAN 总线")
-    group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-5)")
+    group.add_argument("--listen", action="store_true", help="被动监听总线")
+    group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-6)")
     group.add_argument("--clear-error", action="store_true", help="清除 MotorB 错误码")
 
-    parser.add_argument("--channel", default=CAN_CHANNEL, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
-    parser.add_argument("--bitrate", type=int, default=CAN_BITRATE, help=f"CAN 波特率 (默认: {CAN_BITRATE})")
+    parser.add_argument("--transport", choices=["g4ros", "socketcan"], default="g4ros",
+                        help="指令传输方式 (默认: g4ros，lemo 主板 ROS2 topic 转发)")
+    parser.add_argument("--arm-side", choices=["left", "right"], default="left",
+                        help="g4ros 传输的臂侧 (默认: left)")
+    parser.add_argument("--channel", default=CAN_CHANNEL, help=f"socketcan CAN 通道 (默认: {CAN_CHANNEL})")
+    parser.add_argument("--bitrate", type=int, default=CAN_BITRATE, help=f"socketcan CAN 波特率 (默认: {CAN_BITRATE})")
     parser.add_argument("--type", choices=["all", "motor_a", "motor_b"], default="all", help="电机类型筛选")
     parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5)")
     parser.add_argument("--duration", type=float, default=5.0, help="监听时长/秒 (默认: 5)")
@@ -899,8 +913,11 @@ def main():
     print("  A1Z 电机诊断工具")
     print("=" * 60)
 
-    # check-can 不需要打开 CAN 总线
+    # check-can 仅适用于 socketcan 传输
     if args.check_can:
+        if args.transport != "socketcan":
+            print("\n--check-can 仅适用于 --transport socketcan（g4ros 无本地 CAN 接口）")
+            sys.exit(1)
         print(f"\n检查 CAN 接口: {args.channel}")
         ok, detail = check_can_interface(args.channel)
         if ok:
@@ -916,21 +933,31 @@ def main():
             print("  [OK] 无总线错误")
         return
 
-    # 其余操作需要打开 CAN 总线
-    print(f"\nCAN 通道: {args.channel}  波特率: {args.bitrate}")
+    # 打开指令传输总线
+    if args.transport == "g4ros":
+        from a1z.motor_drivers.ros_topic_bus import RosTopicBus
 
-    # 先检查接口
-    ok, detail = check_can_interface(args.channel)
-    if not ok:
-        print(f"\n[FAIL] {detail}")
-        sys.exit(1)
+        print(f"\n传输: g4ros  臂侧: {args.arm_side}")
+        try:
+            bus = RosTopicBus(arm_side=args.arm_side)
+        except ImportError as e:
+            print(f"\n无法启动 g4ros 传输: {e}")
+            sys.exit(1)
+    else:
+        print(f"\n传输: socketcan  通道: {args.channel}  波特率: {args.bitrate}")
 
-    try:
-        bus = can.interface.Bus(channel=args.channel, bustype=CAN_BUSTYPE, bitrate=args.bitrate)
-    except Exception as e:
-        print(f"\n无法打开 CAN 总线: {e}")
-        print(f"请检查: sudo ip link set {args.channel} up type can bitrate {args.bitrate}")
-        sys.exit(1)
+        # 先检查接口
+        ok, detail = check_can_interface(args.channel)
+        if not ok:
+            print(f"\n[FAIL] {detail}")
+            sys.exit(1)
+
+        try:
+            bus = can.interface.Bus(channel=args.channel, bustype=CAN_BUSTYPE, bitrate=args.bitrate)
+        except Exception as e:
+            print(f"\n无法打开 CAN 总线: {e}")
+            print(f"请检查: sudo ip link set {args.channel} up type can bitrate {args.bitrate}")
+            sys.exit(1)
 
     try:
         if args.scan:

@@ -155,7 +155,12 @@ class Dance:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A1Z dance sequence")
-    parser.add_argument("--can", default="can0", help="CAN channel.")
+    parser.add_argument("--transport", choices=["g4ros", "socketcan"], default="g4ros",
+                        help="g4ros: 经 lemo 主板 g4spi_node 的 ROS2 话题（默认）;"
+                             "socketcan: 旧 USB-CAN 直连。")
+    parser.add_argument("--arm-side", choices=["left", "right"], default="left",
+                        help="g4ros 传输的臂侧（默认 left）。")
+    parser.add_argument("--can", default="can0", help="CAN channel (socketcan transport only).")
     parser.add_argument("--speed", type=float, default=0.6,
                         help="Base movement speed in rad/s (default 0.6).")
     parser.add_argument("--gripper", action="store_true",
@@ -177,7 +182,10 @@ def main() -> None:
 
     print("=" * 50)
     print("  A1Z Dance")
-    print(f"  CAN     : {args.can}")
+    if args.transport == "g4ros":
+        print(f"  Transport : g4ros (arm side: {args.arm_side})")
+    else:
+        print(f"  Transport : socketcan (CAN: {args.can})")
     print(f"  Speed   : {args.speed} rad/s")
     print(f"  Gripper : {'yes' if args.gripper else 'no'}")
     print(f"  Moves   : {', '.join(order)}")
@@ -185,6 +193,8 @@ def main() -> None:
 
     robot = get_a1z_robot(
         can_channel=args.can,
+        transport=args.transport,
+        arm_side=args.arm_side,
         gravity_comp_factor=1.0,
         zero_gravity_mode=False,
         with_gripper=args.gripper,

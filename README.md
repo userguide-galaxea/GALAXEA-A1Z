@@ -274,8 +274,8 @@ get_a1z_robot(
 
 **LEMO 主板（RK3588）接入**：在 LEMO 主板上指令/反馈不经过 USB-CAN 适配器，
 而是经板载 G4 MCU 做 SPI↔CAN 透传，SDK 通过嵌入式 `g4spi_node` 的 ROS2 topic
-（`<side>_motor_send` / `<side>_motor_data`，逐帧 `CanFrame{header, uint8 arm_id,
-uint16 id, uint8[] data}`，`data` 不定长不补零；`arm_id` 1=左臂/2=右臂，取代原先
+（`motor_send` / `motor_data`，逐帧 `MotorData{header, uint16 can_id,
+uint8 arm_id, uint8[] data}`，`data` 不定长不补零；`arm_id` 1=左臂/2=右臂，取代原先
 can0/can1 的区分方式）收发。使用 `transport="g4ros"`，详见 [sdk_lemo_rk3588.md](sdk_lemo_rk3588.md)。
 
 **CAN 命令间隔（command pacing）**：每个控制周期内的命令帧突发之间插入间隔，
@@ -785,8 +785,8 @@ get_a1z_robot(
 
 **LEMO main board (RK3588)**: on the LEMO board, commands and feedback do not go
 through a USB-CAN adapter; the onboard G4 MCU bridges SPI↔CAN and the SDK talks
-to the embedded `g4spi_node` over ROS2 topics (`<side>_motor_send` /
-`<side>_motor_data`, one frame per `CanFrame{header, uint8 arm_id, uint16 id,
+to the embedded `g4spi_node` over ROS2 topics (`motor_send` /
+`motor_data`, one frame per `MotorData{header, uint16 can_id, uint8 arm_id,
 uint8[] data}` message; `data` is variable-length and unpadded, `arm_id`
 1=left/2=right replaces the old can0/can1 distinction). Use
 `transport="g4ros"`; see [sdk_lemo_rk3588.md](sdk_lemo_rk3588.md)

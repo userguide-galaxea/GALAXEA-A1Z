@@ -1,38 +1,39 @@
 """ROS2 topic transport bus for the lemo main board.
 
-Bridges the SDK to the embedded ``g4spi_node`` (lemo_main_board repo, ``jsc``
-branch) over its ROS2 topics; the node owns the SPI polling of the G4 MCU,
-so the SDK can control the arm while the node keeps publishing leader-arm /
-key / servo-state topics.
+Bridges the SDK to the embedded ``g4spi_node`` (lemo_main_board repo) over its
+ROS2 topics; the node owns the SPI polling of the G4 MCU, so the SDK can
+control the arm while the node keeps publishing leader-arm / key / servo-state
+topics.
 
 The MCU firmware forwards CAN frames one at a time (no 56-byte command
 image): every ``send()`` publishes one message and every feedback frame
-arrives as its own message. Message layout (``lemo_main_board/msg``)::
+arrives as its own message. Message layout (``lemo_main_board/msg/MotorData.msg``)::
 
     std_msgs/Header header
+    uint16 can_id
     uint8 arm_id          # 1 = left arm, 2 = right arm
-    uint16 id
     uint8[] data          # variable length, 0..8 (classic CAN payload)
 
-Topic wiring::
+Topic wiring — one shared pair for both arms::
 
-    SDK -> node:  <side>_motor_send   (one CAN frame per message)
-    node -> SDK:  <side>_motor_data   (one CAN feedback frame per message)
+    SDK -> node:  motor_send   (one CAN frame per message)
+    node -> SDK:  motor_data   (one CAN feedback frame per message)
 
-``<side>`` is ``left`` (G4 CMD 0x11) or ``right`` (0x12). The ``arm_id``
-field replaces the old can0/can1 bus distinction: the firmware forwards
-each frame to the arm bus selected by ``arm_id`` and stamps feedback with
-the arm it came from. All CAN IDs — arm motors 1..6, gripper 7 / 0x307,
-and the 0x7FF management broadcasts (MotorA enable/disable/set-zero,
-gripper mode-4 register write) — travel on the same pair of topics; the
-firmware forwards each frame by its ``id``.
+The ``arm_id`` field selects the arm: the firmware forwards each downlink
+frame to the arm bus chosen by ``arm_id`` and stamps feedback with the arm it
+came from. The SDK send side fills ``arm_id`` from ``arm_side``
+(left=1 / right=2); the receive side drops frames stamped for the other arm.
+All CAN IDs — arm motors 1..6, gripper 7 / 0x307, and the 0x7FF management
+broadcasts (MotorA enable/disable/set-zero, gripper mode-4 register write) —
+travel on the same pair of topics; the firmware forwards each frame by its
+``can_id``.
 
 ``data`` carries exactly the CAN payload, unpadded: a 4-byte MotorA enable
 goes out as 4 bytes, so the firmware can forward it with the true DLC.
 
 Requires rclpy and the built ``lemo_main_board`` message package on the
-PYTHONPATH (colcon build the jsc branch, source the workspace). Both are
-imported lazily so the SDK stays importable without ROS.
+PYTHONPATH (colcon build the workspace, source it). Both are imported lazily
+so the SDK stays importable without ROS.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 MAX_DATA_LEN = 8
 
-# CanFrame.arm_id values, replacing the old can0/can1 bus distinction.
+# MotorData.arm_id values, replacing the old can0/can1 bus distinction.
 ARM_ID_BY_SIDE = {"left": 1, "right": 2}
 
 
@@ -64,14 +65,14 @@ def check_payload(data: bytes) -> bytes:
 
 
 def decode_motor_frame(msg) -> can.Message:
-    """Single-frame message (header/arm_id/id/data) -> feedback ``can.Message``.
+    """Single-frame MotorData message (header/can_id/arm_id/data) -> feedback ``can.Message``.
 
     ``arm_id`` is not checked here; ``RosTopicBus._on_motor_frame`` filters
     frames for the other arm before decoding.
     """
     return can.Message(
         timestamp=time.time(),
-        arbitration_id=int(msg.id),
+        arbitration_id=int(msg.can_id),
         data=bytes(msg.data),
         is_extended_id=False,
         is_rx=True,
@@ -81,11 +82,12 @@ def decode_motor_frame(msg) -> can.Message:
 class RosTopicBus:
     """python-can BusABC-compatible facade over the g4spi_node ROS topics.
 
-    ``send()`` publishes each CAN frame immediately as one message on
-    ``<side>_motor_send`` with ``arm_id`` set (1 = left, 2 = right).
-    ``recv()`` returns feedback decoded from ``<side>_motor_data`` as
+    ``send()`` publishes each CAN frame immediately as one ``MotorData``
+    message on ``motor_send`` with ``arm_id`` set (1 = left, 2 = right).
+    ``recv()`` returns feedback decoded from ``motor_data`` as
     ``can.Message`` objects with ``is_rx=True`` and Linux-side timestamps;
-    frames stamped with the other arm's ``arm_id`` are dropped.
+    frames stamped with the other arm's ``arm_id`` are dropped. Both arms
+    share the same topic pair; ``arm_id`` disambiguates.
 
     A background executor thread spins the rclpy node, so callbacks run
     independently of the caller's recv() pattern.
@@ -106,17 +108,16 @@ class RosTopicBus:
 
         try:
             import rclpy
-            from lemo_main_board.msg import CanFrame
+            from lemo_main_board.msg import MotorData
         except ImportError as exc:
             raise ImportError(
                 "transport='g4ros' requires rclpy and the lemo_main_board message "
-                "package (CanFrame: std_msgs/Header header, uint8 arm_id, "
-                "uint16 id, uint8[] data): colcon-build the lemo_main_board "
-                "repo (jsc branch) and source the workspace before starting "
-                "the SDK"
+                "package (MotorData: std_msgs/Header header, uint16 can_id, "
+                "uint8 arm_id, uint8[] data): colcon-build the lemo_main_board "
+                "workspace and source it before starting the SDK"
             ) from exc
         self._rclpy = rclpy
-        self._frame_cls = CanFrame
+        self._frame_cls = MotorData
 
         self._owns_node = ros_node is None
         self._owns_context = False
@@ -129,10 +130,10 @@ class RosTopicBus:
             self._node = ros_node
 
         self._send_pub = self._node.create_publisher(
-            CanFrame, f"{arm_side}_motor_send", 10
+            MotorData, "motor_send", 10
         )
         self._node.create_subscription(
-            CanFrame, f"{arm_side}_motor_data", self._on_motor_frame, 10
+            MotorData, "motor_data", self._on_motor_frame, 10
         )
 
         self._rx_cv = threading.Condition()
@@ -155,7 +156,7 @@ class RosTopicBus:
         frame = self._frame_cls()
         frame.header.stamp = self._node.get_clock().now().to_msg()
         frame.arm_id = self._arm_id
-        frame.id = int(msg.arbitration_id)
+        frame.can_id = int(msg.arbitration_id)
         frame.data = list(check_payload(msg.data))
         try:
             self._send_pub.publish(frame)

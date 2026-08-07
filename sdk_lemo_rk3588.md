@@ -20,8 +20,8 @@ SDK (Python) → python-can SocketCAN (can0, 1 Mbps) → A1Z 电机 (CAN ID 1~7)
 ```
 SDK (Python, 跑在 RK3588 上)
   → RosTopicBus (a1z/motor_drivers/ros_topic_bus.py, rclpy)
-  → ROS2 topics: <side>_motor_send (下行, 一帧一条消息)
-                 <side>_motor_data (上行, 一帧一条消息)
+  → ROS2 topics: motor_send (下行, 一帧一条消息)
+                 motor_data (上行, 一帧一条消息)
   → g4spi_node (lemo_main_board jsc 分支, 需保持运行)
   → G4 帧协议 over SPI → G4 固件透传到 CAN → A1Z 电机 (CAN ID 1~7)
 ```
@@ -35,13 +35,13 @@ MotorA / MotorB / MixedMotorChain / Gripper / ArmRobot 的电机协议与控制�
 
 ## Topic 对应关系（g4ros）
 
-`<side>` 为 `left` 或 `right`，消息包为 `lemo_main_board/msg`。
-上下行共用同一个单帧消息格式（一帧 CAN 一条消息）：
+消息为 `lemo_main_board/msg/MotorData.msg`，双臂共用 `motor_send` /
+`motor_data` 一对 topic，上下行同一个单帧消息格式（一帧 CAN 一条消息）：
 
 ```
 std_msgs/Header header
+uint16 can_id
 uint8 arm_id          # 1 = 左臂，2 = 右臂
-uint16 id
 uint8[] data          # 不定长，0~8 字节，即 CAN 帧真实 DLC
 ```
 
@@ -52,8 +52,8 @@ SDK 发送侧按 `arm_side` 填 `arm_id`（left=1 / right=2），接收侧丢弃
 
 | 方向 | Topic | 消息 | 内容 |
 |---|---|---|---|
-| SDK → 节点 | `<side>_motor_send` | `CanFrame` | 一条 CAN 命令帧（id = 电机 1~7 / 0x307 / 0x7FF，arm_id 选臂） |
-| 节点 → SDK | `<side>_motor_data` | `CanFrame` | 一条 CAN 反馈帧（id 同上，arm_id 标识来源臂） |
+| SDK → 节点 | `motor_send` | `MotorData` | 一条 CAN 命令帧（can_id = 电机 1~7 / 0x307 / 0x7FF，arm_id 选臂） |
+| 节点 → SDK | `motor_data` | `MotorData` | 一条 CAN 反馈帧（can_id 同上，arm_id 标识来源臂） |
 
 所有 CAN ID 走同一对 topic：手臂电机 1~6、夹爪 7（hybrid 指令为 `0x300+7`）、
 以及 0x7FF 管理广播帧（MotorA enable/disable/设零、夹爪 mode-4 寄存器写）。
@@ -95,9 +95,9 @@ transport 参数一览：
 ## SDK 侧改动清单（lemo 分支）
 
 - 新增 `a1z/motor_drivers/ros_topic_bus.py`：`RosTopicBus`，**逐帧收发**——
-  `send()` 把每条 CAN 帧立即发布为一条 `CanFrame` 消息（`<side>_motor_send`，
+  `send()` 把每条 CAN 帧立即发布为一条 `MotorData` 消息（`motor_send`，
   载荷按真实长度放入不定长 `data`，不补零）；后台 executor 线程 spin rclpy
-  节点，订阅 `<side>_motor_data` 逐帧解成 `can.Message`（`is_rx=True`，
+  节点，订阅 `motor_data` 逐帧解成 `can.Message`（`is_rx=True`，
   Linux 侧打时间戳）供 `recv()` 取出
 - 修改 `a1z/robots/get_robot.py`：总线创建点按 `transport` 分流
 - 新增 `tests/test_ros_topic_bus.py`：载荷长度校验/解码助手与 import 守卫的
@@ -125,7 +125,7 @@ transport 参数一览：
 
 1. 与嵌入式同事确认上文第 1 条的固件行为（0x7FF 转发）
 2. 板上 colcon 编译 lemo_main_board（jsc 分支），source 后启动 `g4spi_node`，
-   `ros2 topic echo /left_motor_data` 应能看到反馈帧持续刷新
+   `ros2 topic echo /motor_data` 应能看到反馈帧持续刷新
 3. 跑 `examples/position_hold.py`（加 `transport="g4ros"`）验证 6 关节反馈与位置保持
 4. 再验证夹爪（`with_gripper=True`）与重力补偿模式
 

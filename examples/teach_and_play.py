@@ -5,7 +5,8 @@ Usage
 -----
     # Record and save:
     python examples/teach_and_play.py record teach.json
-    python examples/teach_and_play.py record teach.json --can can1 --sample-hz 100
+    python examples/teach_and_play.py record teach.json --sample-hz 100
+    python examples/teach_and_play.py --transport socketcan --can can1 record teach.json
 
     # Load and play:
     python examples/teach_and_play.py play teach.json
@@ -31,15 +32,22 @@ def _wait_enter(prompt: str) -> None:
 def cmd_record(args: argparse.Namespace) -> None:
     robot = get_a1z_robot(
         can_channel=args.can,
+        transport=args.transport,
+        arm_side=args.arm_side,
         zero_gravity_mode=True,
         gravity_comp_factor=1.0,
         with_gripper=True,
+        # 零重力示教时 cmd.pos 锚定在启动位姿，误差积分会把手臂往回拉，关掉。
+        integral_level="K0",
     )
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     print("=" * 60)
     print("  A1Z Teach — Record")
-    print(f"  CAN:        {args.can}")
+    if args.transport == "g4ros":
+        print(f"  Transport:  g4ros (arm side: {args.arm_side})")
+    else:
+        print(f"  Transport:  socketcan (CAN: {args.can})")
     print(f"  Sample Hz:  {args.sample_hz}")
     print(f"  Save to:    {args.file}")
     print("=" * 60)
@@ -101,6 +109,8 @@ def cmd_record(args: argparse.Namespace) -> None:
 def cmd_play(args: argparse.Namespace) -> None:
     robot = get_a1z_robot(
         can_channel=args.can,
+        transport=args.transport,
+        arm_side=args.arm_side,
         zero_gravity_mode=False,
         gravity_comp_factor=1.0,
         with_gripper=True,
@@ -109,7 +119,10 @@ def cmd_play(args: argparse.Namespace) -> None:
 
     print("=" * 60)
     print("  A1Z Teach — Play")
-    print(f"  CAN:        {args.can}")
+    if args.transport == "g4ros":
+        print(f"  Transport:  g4ros (arm side: {args.arm_side})")
+    else:
+        print(f"  Transport:  socketcan (CAN: {args.can})")
     print(f"  File:       {args.file}")
     print(f"  Speed:      {args.speed}x")
     print(f"  Loop:       {'yes' if args.loop else 'no'}")
@@ -155,7 +168,12 @@ def cmd_play(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A1Z teach-and-play")
-    parser.add_argument("--can", default="can0", help="CAN channel (default: can0)")
+    parser.add_argument("--transport", choices=["g4ros", "socketcan"], default="g4ros",
+                        help="g4ros: 经 lemo 主板 g4spi_node 的 ROS2 话题（默认）;"
+                             "socketcan: 旧 USB-CAN 直连。")
+    parser.add_argument("--arm-side", choices=["left", "right"], default="left",
+                        help="g4ros 传输的臂侧（默认 left）。")
+    parser.add_argument("--can", default="can0", help="CAN channel (socketcan transport only, default: can0)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_record = sub.add_parser("record", help="Record a trajectory and save to file")

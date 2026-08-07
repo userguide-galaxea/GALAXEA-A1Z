@@ -7,7 +7,8 @@
 
 用法:
     python examples/gripper_hybrid_test.py
-    python examples/gripper_hybrid_test.py --can can0 --torque 2.0
+    python examples/gripper_hybrid_test.py --torque 2.0
+    python examples/gripper_hybrid_test.py --transport socketcan --can can0
     python examples/gripper_hybrid_test.py --tests free
     python examples/gripper_hybrid_test.py --tests clamp
 """
@@ -130,7 +131,12 @@ def test_torque_clamp(gripper: Gripper, motor: MotorB) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="力位混控夹爪测试")
-    parser.add_argument("--can", default="can0", help="CAN 通道，默认 can0")
+    parser.add_argument("--transport", choices=["g4ros", "socketcan"], default="g4ros",
+                        help="g4ros: 经 lemo 主板 g4spi_node 的 ROS2 话题（默认）;"
+                             "socketcan: 旧 USB-CAN 直连。")
+    parser.add_argument("--arm-side", choices=["left", "right"], default="left",
+                        help="g4ros 传输的臂侧（默认 left）。")
+    parser.add_argument("--can", default="can0", help="CAN 通道（仅 socketcan），默认 can0")
     parser.add_argument(
         "--torque", type=float, default=0.5,
         help=f"最大夹持力矩 (Nm)，默认 0.5，峰值 {MOTOR_PEAK_TORQUE_NM} Nm",
@@ -146,10 +152,15 @@ def main() -> None:
     run_free  = "free"  in args.tests
     run_clamp = "clamp" in args.tests
 
-    print(f"[hybrid] SocketCAN={args.can}  max_torque={args.torque:.1f} Nm"
-          f"  (i_des={args.torque / MOTOR_PEAK_TORQUE_NM:.4f})")
-
-    bus = can.interface.Bus(args.can, interface="socketcan")
+    if args.transport == "g4ros":
+        print(f"[hybrid] g4ros (arm side: {args.arm_side})  max_torque={args.torque:.1f} Nm"
+              f"  (i_des={args.torque / MOTOR_PEAK_TORQUE_NM:.4f})")
+        from a1z.motor_drivers.ros_topic_bus import RosTopicBus
+        bus = RosTopicBus(arm_side=args.arm_side)
+    else:
+        print(f"[hybrid] SocketCAN={args.can}  max_torque={args.torque:.1f} Nm"
+              f"  (i_des={args.torque / MOTOR_PEAK_TORQUE_NM:.4f})")
+        bus = can.interface.Bus(args.can, interface="socketcan")
     motor = MotorB(motor_id=GRIPPER_CAN_ID, bus=bus, ranges=GRIPPER_MOTOR_RANGES)
     gripper = Gripper(motor, max_torque=args.torque)
 

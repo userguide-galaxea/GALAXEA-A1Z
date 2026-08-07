@@ -14,8 +14,8 @@ Usage:
     # Position hold mode:
     python examples/gravity_comp.py --mode hold --urdf a1z/robot_models/a1z/A1Z_nogripper.urdf
 
-    # Custom CAN channel:
-    python examples/gravity_comp.py --can can1 --urdf a1z/robot_models/a1z/A1Z_nogripper.urdf
+    # Legacy USB-CAN direct connection (SocketCAN):
+    python examples/gravity_comp.py --transport socketcan --can can0 --urdf a1z/robot_models/a1z/A1Z_nogripper.urdf
 
 Available URDF models (a1z/robot_models/a1z/):
     A1Z_2kg.urdf          -- default, with 2kg end-effector payload
@@ -40,7 +40,12 @@ def main():
     parser.add_argument("--gravity_factor", type=float, default=1.0,
                         help="Gravity compensation scale (0=off, 1=full). Start small (e.g. 0.3).")
     parser.add_argument("--freq", type=int, default=250, help="Control loop frequency (Hz).")
-    parser.add_argument("--can", default="can0", help="CAN channel.")
+    parser.add_argument("--transport", choices=["g4ros", "socketcan"], default="g4ros",
+                        help="g4ros: 经 lemo 主板 g4spi_node 的 ROS2 话题（默认）;"
+                             "socketcan: 旧 USB-CAN 直连。")
+    parser.add_argument("--arm-side", choices=["left", "right"], default="left",
+                        help="g4ros 传输的臂侧（默认 left）。")
+    parser.add_argument("--can", default="can0", help="CAN channel (socketcan transport only).")
     parser.add_argument("--urdf", default=None, help="Override URDF path.")
     parser.add_argument("--kd", type=str, default=None,
                         help="Override kd gains, comma-separated (6 values). "
@@ -60,17 +65,25 @@ def main():
     print(f"  Mode:            {'Zero-gravity (floating)' if zero_gravity else 'Position hold + gravity comp'}")
     print(f"  Gravity factor:  {args.gravity_factor}")
     print(f"  Control freq:    {args.freq} Hz")
-    print(f"  CAN channel:     {args.can}")
+    if args.transport == "g4ros":
+        print(f"  Transport:       g4ros (arm side: {args.arm_side})")
+    else:
+        print(f"  Transport:       socketcan (CAN channel: {args.can})")
     if kd_override is not None:
         print(f"  kd override:     {kd_override}")
     print("=" * 60)
 
     robot = get_a1z_robot(
         can_channel=args.can,
+        transport=args.transport,
+        arm_side=args.arm_side,
         gravity_comp_factor=args.gravity_factor,
         zero_gravity_mode=zero_gravity,
         control_freq_hz=args.freq,
         urdf_path=args.urdf,
+        # 零重力模式下 cmd.pos 锚定在启动位姿，误差积分会持续把手臂往回拉，
+        # 必须关掉（K0）；hold 模式保留 K1 用于消除静差。
+        integral_level="K1" if not zero_gravity else "K0",
     )
 
     signal.signal(signal.SIGINT, signal.default_int_handler)

@@ -44,7 +44,12 @@ def main():
     parser.add_argument("--gravity_factor", type=float, default=1.0,
                         help="Gravity compensation scale.")
     parser.add_argument("--freq", type=int, default=250, help="Control loop frequency (Hz).")
-    parser.add_argument("--can", default="can0", help="CAN channel.")
+    parser.add_argument("--transport", choices=["g4ros", "socketcan"], default="g4ros",
+                        help="g4ros: 经 lemo 主板 g4spi_node 的 ROS2 话题（默认）;"
+                             "socketcan: 旧 USB-CAN 直连。")
+    parser.add_argument("--arm-side", choices=["left", "right"], default="left",
+                        help="g4ros 传输的臂侧（默认 left）。")
+    parser.add_argument("--can", default="can0", help="CAN channel (socketcan transport only).")
     parser.add_argument("--q_target", type=str, default="",
                         help="Target joint angles (rad), comma-separated, length=6.")
     parser.add_argument("--q_target_deg", type=str, default="",
@@ -59,7 +64,10 @@ def main():
     print(f"  A1Z Position Hold")
     print(f"  Gravity factor:  {args.gravity_factor}")
     print(f"  Control freq:    {args.freq} Hz")
-    print(f"  CAN channel:     {args.can}")
+    if args.transport == "g4ros":
+        print(f"  Transport:       g4ros (arm side: {args.arm_side})")
+    else:
+        print(f"  Transport:       socketcan (CAN channel: {args.can})")
     if q_target.size == 6:
         print(f"  Target (rad):    {np.round(q_target, 3)}")
         print(f"  Target (deg):    {np.round(np.degrees(q_target), 1)}")
@@ -67,6 +75,8 @@ def main():
 
     robot = get_a1z_robot(
         can_channel=args.can,
+        transport=args.transport,
+        arm_side=args.arm_side,
         gravity_comp_factor=args.gravity_factor,
         zero_gravity_mode=False,
         control_freq_hz=args.freq,

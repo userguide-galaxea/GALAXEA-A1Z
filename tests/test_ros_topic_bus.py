@@ -1,7 +1,7 @@
 """Tests for the ROS topic bus (a1z.motor_drivers.ros_topic_bus) helpers.
 
 No ROS involved: decode_motor_frame takes a duck-typed message (same
-attributes as lemo_main_board/msg CanFrame: header/arm_id/id/data), and
+attributes as lemo_main_board/msg MotorData: header/can_id/arm_id/data), and
 RosTopicBus construction is only checked for its ImportError guidance when
 rclpy is unavailable.
 """
@@ -43,7 +43,7 @@ def test_check_payload_rejects_oversize():
 
 
 def test_decode_motor_frame_arm_id():
-    msg = SimpleNamespace(id=3, data=[0x11] * 8)
+    msg = SimpleNamespace(can_id=3, data=[0x11] * 8)
     m = decode_motor_frame(msg)
     assert m.arbitration_id == 3
     assert m.is_rx is True
@@ -52,7 +52,7 @@ def test_decode_motor_frame_arm_id():
 
 def test_decode_motor_frame_claw_and_management_ids():
     for arb_id in (7, 0x307, 0x7FF):
-        msg = SimpleNamespace(id=arb_id, data=[0x5A] * 8)
+        msg = SimpleNamespace(can_id=arb_id, data=[0x5A] * 8)
         m = decode_motor_frame(msg)
         assert m.arbitration_id == arb_id
         assert m.is_rx is True
@@ -78,7 +78,7 @@ def _bus_for_side(side: str) -> RosTopicBus:
 
 def test_on_motor_frame_enqueues_own_arm():
     bus = _bus_for_side("left")
-    bus._on_motor_frame(SimpleNamespace(arm_id=1, id=3, data=[0x11] * 8))
+    bus._on_motor_frame(SimpleNamespace(arm_id=1, can_id=3, data=[0x11] * 8))
     msg = bus.recv(timeout=0.0)
     assert msg is not None
     assert msg.arbitration_id == 3
@@ -86,14 +86,14 @@ def test_on_motor_frame_enqueues_own_arm():
 
 def test_on_motor_frame_drops_other_arm():
     bus = _bus_for_side("left")
-    bus._on_motor_frame(SimpleNamespace(arm_id=2, id=3, data=[0x11] * 8))
+    bus._on_motor_frame(SimpleNamespace(arm_id=2, can_id=3, data=[0x11] * 8))
     assert bus.recv(timeout=0.0) is None
 
 
 def test_on_motor_frame_accepts_missing_arm_id():
     # Old firmware without the arm_id field: keep accepting feedback.
     bus = _bus_for_side("right")
-    bus._on_motor_frame(SimpleNamespace(id=7, data=[0x5A] * 8))
+    bus._on_motor_frame(SimpleNamespace(can_id=7, data=[0x5A] * 8))
     msg = bus.recv(timeout=0.0)
     assert msg is not None
     assert msg.arbitration_id == 7

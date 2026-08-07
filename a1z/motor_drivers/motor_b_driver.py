@@ -343,6 +343,11 @@ class MixedMotorChain:
         for motor in self._motor_a_list:
             motor.enable()
         for motor in self._motor_b_list:
+            # 达妙电机的控制模式存在 flash 里，装机调试时可能被改成非 MIT
+            # 模式（症状：使能/反馈正常但 MIT 帧完全被忽略，电机"假死"，
+            # 2026-08 J4/4340 实测）。每次启动统一写回 MIT（RAM-only，不写
+            # flash），不依赖电机里存的模式。夹爪不走这里——它自己设 mode 4。
+            motor.set_ctrl_mode(1)
             motor.enable()
 
     def disable_all(self) -> None:
