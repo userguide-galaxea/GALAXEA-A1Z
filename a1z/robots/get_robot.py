@@ -164,10 +164,12 @@ def get_a1z_robot(
                    available);
                    "g4spi" (lemo main board, direct spidev bridge — no ROS
                    needed, but conflicts with a running g4spi_node on the
-                   same spidev). With both lemo transports, CAN-ID-0x7FF
-                   management frames (MotorA enable/disable/set-zero, gripper
-                   mode-4 register write) are NOT transportable and are
-                   dropped — the G4 firmware must own motor enable and
+                   same spidev). With "g4ros" every CAN frame is forwarded
+                   by its ID (frame-wise firmware protocol), including the
+                   0x7FF management broadcasts. With "g4spi", CAN-ID-0x7FF
+                   management frames (MotorA enable/disable/set-zero,
+                   gripper mode-4 register write) are NOT transportable and
+                   are dropped — the G4 firmware must own motor enable and
                    gripper mode setup.
         spi_device: g4spi transport only: spidev node, e.g. '/dev/spidev0.0'.
         spi_speed_hz: g4spi transport only: SPI clock in Hz (board default 10 MHz).

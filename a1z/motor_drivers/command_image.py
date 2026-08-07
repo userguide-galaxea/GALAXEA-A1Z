@@ -1,10 +1,12 @@
-"""56-byte A1Z command image buffering, shared by the lemo board transports.
+"""56-byte A1Z command image buffering for the direct G4 SPI transport.
 
-Both lemo board transports (direct G4 SPI in ``spi_bus.py`` and the ROS2
-topic bridge in ``ros_topic_bus.py``) ultimately ship the same 56-byte
-payload per arm: seven 8-byte slots holding the raw CAN data of motors 1..6
-and the claw. This module owns the CAN-ID → slot mapping and the per-tick
-flush trigger so the two transports cannot drift apart.
+The direct-SPI transport (``spi_bus.py``) ships one 56-byte payload per arm:
+seven 8-byte slots holding the raw CAN data of motors 1..6 and the claw.
+This module owns the CAN-ID → slot mapping and the per-tick flush trigger.
+
+The ROS2 topic transport (``ros_topic_bus.py``) does NOT use this: the MCU
+firmware speaks a frame-wise protocol there (one CAN frame per message), so
+``RosTopicBus`` publishes each frame immediately without slot buffering.
 """
 
 from __future__ import annotations

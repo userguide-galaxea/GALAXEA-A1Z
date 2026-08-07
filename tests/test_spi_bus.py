@@ -11,6 +11,7 @@ from collections import deque
 import can
 import pytest
 
+from a1z.motor_drivers.command_image import CommandImage
 from a1z.motor_drivers.spi_bus import (
     CMD_LEFT_A1Z_DATA,
     CMD_RIGHT_A1Z_DATA,
@@ -183,3 +184,44 @@ def test_recv_ignores_other_cmd_ids(bus, fake_spi):
 
 def test_recv_timeout_zero_is_nonblocking(bus):
     assert bus.recv(timeout=0.0) is None
+
+
+
+# --- CommandImage (shared 56-byte command buffering) ------------------------------
+
+
+def test_full_arm_burst_triggers_flush():
+    img = CommandImage()
+    for motor_id in range(1, 6):
+        assert img.write(motor_id, bytes([motor_id] * 8)) is False
+    assert img.write(6, bytes([6] * 8)) is True
+    for motor_id in range(1, 7):
+        off = (motor_id - 1) * 8
+        assert img.payload[off : off + 8] == bytes([motor_id] * 8)
+
+
+def test_claw_slots_and_seen_flag():
+    img = CommandImage()
+    assert img.claw_seen is False
+    assert img.write(0x307, bytes([0xAA] * 8)) is False  # hybrid command ID
+    assert img.claw_seen is True
+    assert img.write(7, bytes([0xBB] * 8)) is False  # plain gripper ID, same slot
+    assert img.payload[48:56] == bytes([0xBB] * 8)
+
+
+def test_reset_keeps_payload_clears_trigger():
+    img = CommandImage()
+    for motor_id in range(1, 7):
+        img.write(motor_id, bytes([motor_id] * 8))
+    img.reset()
+    # After reset, one more write alone must not retrigger a flush...
+    assert img.write(1, bytes([0xFF] * 8)) is False
+    # ...but the payload keeps the previously latched values.
+    assert img.payload[8:16] == bytes([2] * 8)
+
+
+def test_untransportable_and_malformed_frames_dropped():
+    img = CommandImage()
+    assert img.write(0x7FF, bytes([0, 1, 0, 1])) is False  # management broadcast
+    assert img.write(1, bytes([1, 2, 3])) is False  # wrong length
+    assert not any(img.payload)  # nothing landed in the image

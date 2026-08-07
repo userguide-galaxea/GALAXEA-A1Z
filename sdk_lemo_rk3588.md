@@ -14,13 +14,14 @@
 SDK (Python) → python-can SocketCAN (can0, 1 Mbps) → A1Z 电机 (CAN ID 1~7)
 ```
 
-**方案 B：`transport="g4ros"`（当前采用）**——SDK 走嵌入式 ROS2 节点的 topic：
+**方案 B：`transport="g4ros"`（当前采用）**——SDK 走嵌入式 ROS2 节点的 topic，
+**逐帧收发**（MCU 固件一帧一帧透传，不再有 56 字节命令镜像）：
 
 ```
 SDK (Python, 跑在 RK3588 上)
   → RosTopicBus (a1z/motor_drivers/ros_topic_bus.py, rclpy)
-  → ROS2 topics: <side>_a1z_send / <side>_claw_send (下行)
-                 <side>_a1z_data / <side>_claw     (上行)
+  → ROS2 topics: <side>_motor_send (下行, 一帧一条消息)
+                 <side>_motor_data (上行, 一帧一条消息)
   → g4spi_node (lemo_main_board jsc 分支, 需保持运行)
   → G4 帧协议 over SPI → G4 固件透传到 CAN → A1Z 电机 (CAN ID 1~7)
 ```
@@ -35,19 +36,23 @@ MotorA / MotorB / MixedMotorChain / Gripper / ArmRobot 的电机协议与控制�
 
 ## Topic 对应关系（方案 B）
 
-`<side>` 为 `left`（G4 CMD 0x11）或 `right`（0x12），消息包为 `lemo_main_board/msg`：
+`<side>` 为 `left`（G4 CMD 0x11）或 `right`（0x12），消息包为 `lemo_main_board/msg`。
+上下行共用同一个单帧消息格式（一帧 CAN 一条消息）：
+
+```
+std_msgs/Header header
+uint16 id
+uint8[8] data
+```
 
 | 方向 | Topic | 消息 | 内容 |
 |---|---|---|---|
-| SDK → 节点 | `<side>_a1z_send` | `A1zFrame`（6×`MotorCanFrame`） | 电机 1~6 的 8 字节 CAN 裸命令 |
-| SDK → 节点 | `<side>_claw_send` | `Claw` | 夹爪 8 字节（发往 CAN ID `0x300+7`） |
-| 节点 → SDK | `<side>_a1z_data` | `A1zFrame` | 电机 1~6 的 8 字节 CAN 裸反馈 |
-| 节点 → SDK | `<side>_claw` | `Claw` | 夹爪反馈（来自 CAN ID 7） |
+| SDK → 节点 | `<side>_motor_send` | `CanFrame` | 一条 CAN 命令帧（id = 电机 1~7 / 0x307 / 0x7FF） |
+| 节点 → SDK | `<side>_motor_data` | `CanFrame` | 一条 CAN 反馈帧（id 同上） |
 
-**重要**：节点的 `send_pending` 只有在 A1zFrame 和 Claw **都**有待发时才会组帧发给
-MCU（`main.cpp`）。因此 `RosTopicBus` 每次 flush 都会同时发布 A1zFrame 和最近一次的
-Claw 值；在收到第一条夹爪命令之前（建议 `with_gripper=True`），命令不会真正下发，
-总线会打 warning 提示。
+所有 CAN ID 走同一对 topic：手臂电机 1~6、夹爪 7（hybrid 指令为 `0x300+7`）、
+以及 0x7FF 管理广播帧（MotorA enable/disable/设零、夹爪 mode-4 寄存器写）。
+不足 8 字节的帧（如 4 字节的 MotorA enable）发送侧补零到固定 `uint8[8]`。
 
 ## 使用方法（方案 B）
 
@@ -65,7 +70,7 @@ from a1z.robots.get_robot import get_a1z_robot
 robot = get_a1z_robot(
     transport="g4ros",    # 走 ROS2 topic 桥接
     arm_side="left",      # "left" -> left_* topics；"right" -> right_*
-    with_gripper=True,    # 见上文：没有夹爪命令节点不会下发
+    with_gripper=True,
     zero_gravity_mode=False,
     control_freq_hz=250,
 )
@@ -99,13 +104,14 @@ FF FD      小端序     命令字     业务数据  小端序    小端序
 
 ## SDK 侧改动清单（lemo 分支）
 
-- 新增 `a1z/motor_drivers/command_image.py`：两个 lemo transport 共用的 56 字节
-  命令镜像（CAN ID → 槽位映射、每 tick 凑齐 6 电机槽触发 flush、0x7FF 管理帧
-  丢弃告警），防止两份槽位逻辑漂移
+- 新增 `a1z/motor_drivers/command_image.py`：56 字节命令镜像
+  （CAN ID → 槽位映射、每 tick 凑齐 6 电机槽触发 flush、0x7FF 管理帧
+  丢弃告警），仅供方案 A 直连 SPI 使用
 - 新增 `a1z/motor_drivers/ros_topic_bus.py`（**方案 B**）：`RosTopicBus`，
-  `send()` 缓冲进命令镜像、凑齐即发布 `A1zFrame`+`Claw`；后台 executor 线程 spin
-  rclpy 节点，订阅回调把 `<side>_a1z_data`/`<side>_claw` 解成 `can.Message`
-  （ID 1~6 + 夹爪 7，`is_rx=True`，Linux 侧打时间戳）供 `recv()` 取出
+  **逐帧收发**——`send()` 把每条 CAN 帧立即发布为一条 `CanFrame` 消息
+  （`<side>_motor_send`，不足 8 字节补零）；后台 executor 线程 spin rclpy
+  节点，订阅 `<side>_motor_data` 逐帧解成 `can.Message`（`is_rx=True`，
+  Linux 侧打时间戳）供 `recv()` 取出
 - 新增 `a1z/motor_drivers/spi_bus.py`（方案 A，备选）：`G4SpiBus`，G4 帧协议
   纯 Python 移植 + 后台 2 kHz 轮询线程
 - 修改 `a1z/robots/get_robot.py`：总线创建点按 `transport` 分流
@@ -115,17 +121,18 @@ FF FD      小端序     命令字     业务数据  小端序    小端序
 
 ## 注意事项与限制
 
-1. **0x7FF 管理帧无法透传（关键）**：MotorA 的 enable/disable/设零广播帧（`0x7FF`）
-   和夹爪 mode-4 寄存器写（`0x7FF` + `0x55`）不在透传通道内，两种 lemo transport
-   都会丢弃并打 warning。因此 **G4 固件必须自行完成电机上电 enable 和夹爪 mode 4
-   （力位混合）设置**，否则 `start()` 会卡在启动反馈探测、夹爪 hybrid 指令被电机忽略。
-   同理，`tools/set_zero.py` 等设零工具经此通道不可用。
+1. **0x7FF 管理帧**：方案 B（g4ros）逐帧按 ID 透传，MotorA 的 enable/disable/
+   设零广播帧和夹爪 mode-4 寄存器写都会原样下发给 MCU——**需与嵌入式确认固件
+   会把 0x7FF 帧真实转发到 CAN**。方案 A（g4spi）的 56 字节通道仍无法携带
+   0x7FF 帧，会丢弃并打 warning，该路径下 G4 固件必须自行完成电机上电 enable
+   和夹爪 mode 4 设置；`tools/set_zero.py` 等设零工具在方案 A 下不可用。
 2. **MotorB 特殊帧可以透传**：`0xFC/0xFD/0xFB/0xFE`（enable/disable/清错/设零）是
-   电机自身 ID（4~6）上的普通 8 字节数据，会随槽位原样转发；`stop()` 的 disable
-   因此仍然生效。需向嵌入式同事确认固件是"原样转发 7 个槽"，避免意外行为。
+   电机自身 ID（4~6）上的普通 8 字节数据，两种 transport 都会原样转发；
+   `stop()` 的 disable 因此仍然生效。
 3. **CAN 帧节拍下移**：SocketCAN 方案中 SDK 每 tick 发 7 帧、帧间插 250 µs 间隔
-   （SOP-05/06，防止 J6 应答槽被占）。走 G4 桥后 CAN 侧的逐帧 pacing 由固件负责，
-   需确认固件实现了等价间隔。
+   （SOP-05/06，防止 J6 应答槽被占）。方案 B 下逐帧经 topic 转发，帧间隔由
+   SDK 发送节奏和节点转发延迟共同决定，需实测确认 J6 反馈无饿死；方案 A 的
+   CAN 侧逐帧 pacing 由固件负责，需确认固件实现了等价间隔。
 4. **g4spi 与 g4spi_node 互斥**：`transport="g4spi"` 运行时不能同时跑 ROS 节点。
    `transport="g4ros"` 则要求节点必须在线，否则命令无人下发、反馈无人发布。
 5. **反馈新鲜度**：反馈时间戳仍在 Linux 侧按到达时间打，与 SocketCAN 方案一致，
@@ -138,7 +145,7 @@ FF FD      小端序     命令字     业务数据  小端序    小端序
 
 1. 与嵌入式同事确认上文第 1、2、3 条的固件行为
 2. 板上 colcon 编译 lemo_main_board（jsc 分支），source 后启动 `g4spi_node`，
-   `ros2 topic echo /left_a1z_data` 应能看到反馈持续刷新
+   `ros2 topic echo /left_motor_data` 应能看到反馈帧持续刷新
 3. 跑 `examples/position_hold.py`（加 `transport="g4ros"`）验证 6 关节反馈与位置保持
 4. 再验证夹爪（`with_gripper=True`）与重力补偿模式
 
