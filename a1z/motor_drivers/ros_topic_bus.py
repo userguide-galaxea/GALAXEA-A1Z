@@ -1,10 +1,9 @@
-"""ROS2 topic transport bus for the lemo main board (plan B, frame-wise).
+"""ROS2 topic transport bus for the lemo main board.
 
 Bridges the SDK to the embedded ``g4spi_node`` (lemo_main_board repo, ``jsc``
-branch) over its ROS2 topics instead of driving spidev directly. Use this
-when the ROS node must keep running — e.g. it also publishes leader-arm /
-key / servo-state topics — since two processes must not poll the same spidev
-concurrently (the direct-SPI transport in ``spi_bus.py`` conflicts with it).
+branch) over its ROS2 topics; the node owns the SPI polling of the G4 MCU,
+so the SDK can control the arm while the node keeps publishing leader-arm /
+key / servo-state topics.
 
 The MCU firmware forwards CAN frames one at a time (no 56-byte command
 image): every ``send()`` publishes one message and every feedback frame
