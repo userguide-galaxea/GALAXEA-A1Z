@@ -40,18 +40,25 @@ MotorA / MotorB / MixedMotorChain / Gripper / ArmRobot 的电机协议与控制�
 
 ```
 std_msgs/Header header
+uint8 arm_id          # 1 = 左臂，2 = 右臂
 uint16 id
-uint8[8] data
+uint8[] data          # 不定长，0~8 字节，即 CAN 帧真实 DLC
 ```
+
+`arm_id` 字段取代了原先通过 can0/can1 总线区分左右臂的方式：下行时固件按
+`arm_id` 把帧转发到对应手臂的 CAN 总线，上行时固件按反馈来源手臂填充该字段；
+SDK 发送侧按 `arm_side` 填 `arm_id`（left=1 / right=2），接收侧丢弃
+`arm_id` 不属于本臂的帧。
 
 | 方向 | Topic | 消息 | 内容 |
 |---|---|---|---|
-| SDK → 节点 | `<side>_motor_send` | `CanFrame` | 一条 CAN 命令帧（id = 电机 1~7 / 0x307 / 0x7FF） |
-| 节点 → SDK | `<side>_motor_data` | `CanFrame` | 一条 CAN 反馈帧（id 同上） |
+| SDK → 节点 | `<side>_motor_send` | `CanFrame` | 一条 CAN 命令帧（id = 电机 1~7 / 0x307 / 0x7FF，arm_id 选臂） |
+| 节点 → SDK | `<side>_motor_data` | `CanFrame` | 一条 CAN 反馈帧（id 同上，arm_id 标识来源臂） |
 
 所有 CAN ID 走同一对 topic：手臂电机 1~6、夹爪 7（hybrid 指令为 `0x300+7`）、
 以及 0x7FF 管理广播帧（MotorA enable/disable/设零、夹爪 mode-4 寄存器写）。
-不足 8 字节的帧（如 4 字节的 MotorA enable）发送侧补零到固定 `uint8[8]`。
+`data` 不定长、不补零：4 字节的 MotorA enable 就按 4 字节发送，固件可据此
+还原真实 DLC 转发。
 
 ## 使用方法（g4ros）
 
@@ -89,12 +96,12 @@ transport 参数一览：
 
 - 新增 `a1z/motor_drivers/ros_topic_bus.py`：`RosTopicBus`，**逐帧收发**——
   `send()` 把每条 CAN 帧立即发布为一条 `CanFrame` 消息（`<side>_motor_send`，
-  不足 8 字节补零）；后台 executor 线程 spin rclpy 节点，订阅
-  `<side>_motor_data` 逐帧解成 `can.Message`（`is_rx=True`，Linux 侧打时间戳）
-  供 `recv()` 取出
+  载荷按真实长度放入不定长 `data`，不补零）；后台 executor 线程 spin rclpy
+  节点，订阅 `<side>_motor_data` 逐帧解成 `can.Message`（`is_rx=True`，
+  Linux 侧打时间戳）供 `recv()` 取出
 - 修改 `a1z/robots/get_robot.py`：总线创建点按 `transport` 分流
-- 新增 `tests/test_ros_topic_bus.py`：补零/解码助手与 import 守卫的单元测试，
-  无硬件/ROS 依赖
+- 新增 `tests/test_ros_topic_bus.py`：载荷长度校验/解码助手与 import 守卫的
+  单元测试，无硬件/ROS 依赖
 
 ## 注意事项与限制
 
