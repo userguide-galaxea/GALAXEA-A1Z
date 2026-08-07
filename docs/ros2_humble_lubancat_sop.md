@@ -98,11 +98,13 @@ echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 
 仓库:`gitlab.galaxea-ai.com/embeded/a1z_t/lemo_main_board.git`。
 
-> **版本警告(2026-08 实测)**:gitlab 上的 `jsc`/`main`/`LGN` 分支都还是
-> `A1zFrame` 批量协议(`MotorCanFrame[6]`),**没有** a1z `lemo` 分支
-> `ros_topic_bus.py` 所需的逐帧 `CanFrame`(`header/arm_id/id/不定长data`)
-> 消息和 `<side>_motor_send/data` topic。跑 SDK 的 g4ros 传输前,先确认
-> 嵌入式已提供匹配版本的 `lemo_main_board`,否则 `RosTopicBus` 起不来。
+> **版本警告(2026-08 实测)**:SDK `lemo` 分支的 g4ros 传输要求
+> `MotorData` 逐帧协议(消息 `header / uint16 can_id / uint8 arm_id /
+> uint8[] data`,单对 topic `motor_send` / `motor_data`,`arm_id` 1=左
+> 2=右)。gitlab 上的 `jsc`/`main` 分支还是旧的 `A1zFrame` 批量协议
+> (`MotorCanFrame[6]`、`<side>_motor_send` 双 topic),**不匹配**,编
+> 出来 `RosTopicBus` 起不来。目前匹配的实现以嵌入式提供的 tarball 为准;
+> 拿到新版本的 `lemo_main_board` 后先核对 `msg/MotorData.msg` 字段再编。
 
 编译(源码、msg 都在仓库里,colcon 已随第 3 步装好):
 
@@ -112,17 +114,50 @@ rm -rf build install log
 source /opt/ros/humble/setup.bash
 colcon build
 source install/local_setup.bash
-python3 -c "from lemo_main_board.msg import CanFrame; print('msg OK')"
+python3 -c "from lemo_main_board.msg import MotorData; print('msg OK')"
 ros2 pkg list | grep lemo
 ```
 
-启动透传节点(独占 SPI 轮询,需保持运行):
+建议把 workspace 的 source 也写进 `~/.bashrc`(非交互 ssh 不读 bashrc,
+远程跑命令时要在命令里显式 source):
 
 ```bash
-ros2 run lemo_main_board g4spi_node
+echo "source ~/lemo_main_board/install/local_setup.bash" >> ~/.bashrc
 ```
 
-## 6. a1z SDK
+## 6. 启用 SPI(spidev0.0)
+
+`g4spi_node` 通过 `/dev/spidev0.0` 和 G4 板通信,LubanCat 默认不开:
+
+```bash
+# 1. 开 overlay(文件里 overlays= 一行追加,空格分隔)
+sudo vi /boot/firmware/ubuntuEnv.txt
+#    overlays=... rk3588-lubancat-spi0-m1-overlay
+
+# 2. 重启生效
+sudo reboot
+
+# 3. 重启后验证节点存在
+ls -l /dev/spidev0.0
+
+# 4. 给普通用户访问权限(免 sudo 跑节点)
+echo 'SUBSYSTEM=="spidev", GROUP="spi", MODE="0660"' | \
+  sudo tee /etc/udev/rules.d/99-spidev.rules
+sudo udevadm control --reload && sudo udevadm trigger
+sudo usermod -aG spi $USER   # 重新登录后生效
+```
+
+启动透传节点(独占 SPI 轮询,**必须保持运行**,SDK 才有数据):
+
+```bash
+nohup ros2 run lemo_main_board g4spi_node > /tmp/g4spi.log 2>&1 &
+```
+
+> 注意:节点不随开机自启,板子重启后要重新拉起(或自行做成 systemd
+> unit)。日志里刷 "MISO zero / no data received" 属正常——G4 只在有
+> 电机流量时才回帧。
+
+## 7. a1z SDK
 
 ```bash
 cd ~/a1z
@@ -141,6 +176,39 @@ rsync -az /tmp/wheels/ cat@192.168.2.2:wheels/
 # 板子上:
 pip3 install --user --no-index --find-links ~/wheels python-can
 ```
+
+## 8. 日常使用与排障
+
+跑任何 SDK 脚本前,环境必须 source 好(写进 bashrc 后新开终端即可;
+非交互 ssh 要在命令里显式 source):
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/lemo_main_board/install/local_setup.bash
+```
+
+板子重启后的检查顺序:
+
+```bash
+ls /dev/spidev0.0                 # 1. SPI 节点在不在
+pgrep -fa g4spi_node              # 2. 透传节点活没活,没在就 nohup 拉起(见第 6 节)
+cd ~/a1z && python3 tools/motor_diag.py --scan   # 3. 再跑诊断
+```
+
+常见问题:
+
+- **`No module named 'rclpy'` / `requires rclpy and the lemo_main_board
+  message package`**:没 source 环境,见上。
+- **第一次启动报 "Startup probe did not obtain fresh feedback ... joint*=missing",
+  第二次跑就好**:DDS 订阅者发现竞态(冷启动时订阅还没和
+  `g4spi_node` 匹配上,启动探测已经发出),重跑一次即可。
+- **`motor_data` 上完全没帧**:先确认 `g4spi_node` 活着,再确认电机已
+  上电。
+- **电机使能/反馈正常但对 MIT 指令完全无响应("假死")**:电机 flash
+  里存的控制模式不是 MIT;SDK `enable_all()` 每次启动会统一写回 MIT
+  (RAM-only),不用手动处理。
+- 测 topic 频率:`ros2 topic hz /motor_data`(反馈)、
+  `ros2 topic hz /motor_send`(命令,250Hz 控制时约为 1500Hz)。
 
 ## 已知网络限制
 
