@@ -1,0 +1,1275 @@
+<a id="chinese"></a>
+
+[中文](#chinese) | [English](#english)
+
+# A1Z — 6-DOF 机械臂 Python SDK（可选 G1Z 夹爪）
+
+<p align="center">
+  <img src="docs/images/A1Z_G1Z.png" alt="A1Z 机械臂（带 G1Z 夹爪）" width="500"/>
+</p>
+
+A1Z 六轴机械臂的 Python 控制 SDK，提供 CAN 总线电机驱动、基于 Pinocchio 的重力补偿、正/逆运动学，以及零力示教和位置保持等功能。
+
+## 项目结构
+
+```
+a1z/
+├── pyproject.toml                 # 构建配置 (flit)
+├── setup.py                       # setuptools 后备
+├── README.md
+├── a1z/                       # SDK 主包
+│   ├── dynamics/
+│   │   └── gravity_model.py       # Pinocchio RNEA 重力补偿
+│   ├── motor_drivers/
+│   │   ├── can_backend.py         # 跨平台 CAN 后端选择（Linux/macOS/Windows 自动适配）
+│   │   ├── can_interface.py       # CAN 总线封装
+│   │   ├── motor_a_driver.py      # MotorA 驱动 (MIT 混控)
+│   │   ├── motor_b_driver.py      # MotorB 驱动 + MixedMotorChain
+│   │   └── utils.py               # 数据结构, float↔uint 转换
+│   ├── robots/
+│   │   ├── robot.py               # Robot Protocol (抽象接口)
+│   │   ├── arm_robot.py           # ArmRobot 实现 (控制回路+重力补偿+安全状态机)
+│   │   ├── get_robot.py           # 工厂函数 get_a1z_robot()
+│   │   ├── gripper.py             # Gripper 控制 (MotorB CAN ID 0x07)
+│   │   ├── server.py              # Unix socket 控制服务端
+│   │   └── kinematics.py          # FK/IK (Pinocchio)
+│   ├── robot_models/
+│   │   └── a1z/               # URDF 模型文件 (A1Z_Flange.urdf 默认，A1Z_G1Z.urdf 用于夹爪配置)
+│   └── utils/
+│       └── utils.py               # RateRecorder, 日志工具
+├── examples/
+│   ├── gravity_comp.py            # 重力补偿示例
+│   ├── position_hold.py           # 位置保持示例
+│   ├── teach_and_play.py          # 零力示教录制与回放
+│   └── gripper_hybrid_test.py     # 夹爪测试：自由行程 + 力矩饱和验证
+└── tools/
+    ├── a1zctl                     # 机械臂控制 CLI（serve/move/gripper/dance/stop）
+    ├── gripper_set_zero.py        # 夹爪零点标定（出厂已完成，一般无需执行）
+    ├── motor_diag.py              # 电机通信诊断与故障排查
+    ├── set_zero.py                # 电机零点标定
+    ├── setup_can.sh               # Linux SocketCAN 一键配置
+    ├── verify_can_mac.sh          # macOS CAN 通信验证
+    └── verify_can_win.py          # Windows CAN 通信验证
+```
+
+
+## 安装
+
+### 依赖
+
+- Python >= 3.10
+- **Linux**：SocketCAN（需硬件 CAN 接口）
+- **macOS / Windows**：通过 HHS USB-CANFD 适配器（VID:PID `a8fa:8598`）连接，SDK 自动使用 gs_usb 用户态后端
+- URDF 模型文件（包内自带，见 `a1z/robot_models/a1z/`。默认使用 `A1Z_Flange.urdf`；启用夹爪时使用 `A1Z_G1Z.urdf`）
+
+> 跨平台支持详情见 [跨平台 CAN 配置](#跨平台-can-配置) 章节。
+
+### 安装 SDK
+
+```bash
+
+# 拉取本仓库（main 分支已包含可选夹爪支持）
+git clone https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+
+cd /path/to/GALAXEA-A1Z
+
+# 建议使用虚拟环境，避免污染系统 Python（可选但推荐）
+# 注意解释器必须 >= 3.10；macOS 自带的 python3 是 3.9，请显式指定，如 python3.10
+python3 -m venv .venv
+source .venv/bin/activate    # Windows 用 .venv\Scripts\activate
+
+# 开发模式安装（推荐）
+pip install -e .
+
+# 或直接安装
+pip install .
+```
+
+依赖会自动安装：`numpy`、`python-can>=4.0`、`pin`（Pinocchio）、`pyyaml`。
+
+macOS / Windows 用户请改用以下命令安装（含 gs_usb 用户态后端 + 内置 libusb，无需额外安装驱动库）：
+
+```bash
+pip install -e ".[gs_usb]"
+```
+
+> 注意：macOS 默认的 zsh 会把 `[...]` 当作通配符并报 `no matches found`，所以引号不能省。
+
+### 配置文件（可选）
+
+仓库根目录提供了两份配置文件，可在其中一次性设置 CAN 通道、URDF、夹爪等参数。所有支持 `--config` 的脚本（examples、tools、a1zctl）都会读取该文件，且命令行参数优先级高于配置文件。
+
+- `a1z.yaml`：默认配置，无夹爪（`with_gripper: false`）
+- `a1z_g1z.yaml`：末端装有 G1Z 夹爪时使用（`with_gripper: true`，自动切换为 A1Z_G1Z.urdf）
+
+```yaml
+can_channel: can0
+control_freq_hz: 250
+gravity_comp_factor: 1.0
+zero_gravity_mode: true
+with_gripper: false
+```
+
+> 配置文件中还可覆盖 `default_kp` / `default_kd`（出厂默认值为真机调优增益，见 [默认控制参数](#默认控制参数)）。CAN 帧间隔（`inter_cmd_gap_us`）为 `get_a1z_robot()` 构造参数，不经配置文件设置。
+
+使用示例：
+
+```bash
+python examples/position_hold.py --config a1z.yaml
+python examples/position_hold.py --config a1z_g1z.yaml   # 带夹爪
+python tools/a1zctl serve --config a1z_g1z.yaml
+python tools/motor_diag.py --scan --config a1z.yaml
+python tools/set_zero.py --all --config a1z.yaml
+```
+
+### 配置 CAN 总线（SocketCAN 模式）
+
+注意：检查can盒电阻是否正确安装！
+
+使用 HHS USB-CANFD 适配器（VID/PID `a8fa:8598`）：
+
+```bash
+# 1. 加载驱动
+sudo modprobe gs_usb
+
+# 2. 将 HHS 适配器绑定到 gs_usb（已绑定时忽略报错）
+sudo sh -c 'echo "a8fa 8598" > /sys/bus/usb/drivers/gs_usb/new_id' 2>/dev/null || true
+
+# 3. 确认接口出现（单适配器通常为 can0）
+ip link show type can
+
+# 4. 配置并启动（1 Mbps）
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+```
+
+#### macOS（gs_usb 用户态模式）
+
+macOS 没有 SocketCAN，SDK 会自动检测平台并使用 gs_usb 用户态后端连接 HHS USB-CANFD 适配器，**无需手动配置 CAN 接口**。
+
+```bash
+# 1. 安装 SDK + gs_usb extras（含内置 libusb，通常无需 brew）
+pip install -e ".[gs_usb]"
+
+# 2. 验证 CAN 通信（可选）
+bash tools/verify_can_mac.sh
+```
+
+#### Windows（gs_usb 用户态模式）
+
+Windows 同样走 gs_usb 用户态后端，但需要先用 **Zadig** 安装 WinUSB 驱动：
+
+```powershell
+# 1. 用 Zadig 将 HHS 适配器驱动替换为 WinUSB
+
+# 2. 安装 Pinocchio（Windows 没有 pip 预编译包，必须用 conda）
+conda install -c conda-forge pin
+
+# 3. 安装 SDK + gs_usb extras
+pip install -e ".[gs_usb]"
+
+# 4. 验证 CAN 通信（可选）
+python tools\verify_can_win.py
+```
+
+> ⚠️ **Zadig 步骤不能省**。Windows 默认会用通用 USB 串行驱动占用 HHS 设备，libusb 抢不到设备会报 `Cannot find device 0`。
+
+#### 跨平台 CAN 配置
+
+SDK 默认按平台自动选择 CAN 后端：
+
+| 平台 | 适配器 | 安装 | 使用 |
+|------|--------|------|------|
+| Linux | SocketCAN 内核驱动 | `pip install -e .` | `--can can0` |
+| **macOS** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"` | （默认）`gs_usb` |
+| **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB 运行时 | `--bustype pcan --can PCAN_USBBUS1` |
+| **Windows** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"` + Zadig WinUSB 驱动 | （默认）`gs_usb` |
+| **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK 官方驱动 | `--bustype pcan --can PCAN_USBBUS1` |
+
+不传 `--bustype` 时使用 OS 默认值：Linux 默认 `socketcan`/`can0`，macOS/Windows 默认 `gs_usb`/设备序号 `0`。
+
+#### CAN 命令帧间隔（Pacing）
+
+每个控制周期 SDK 会向 6 个关节各发一帧 MIT 指令。默认在**相邻命令帧之间插入 250 µs 间隔**，避免前一帧电机的应答时隙被后一帧占用（修复了脉冲式连发时末端腕关节反馈/目标锁存饿死的问题）。该间隔在电机链内部实现，一体化夹爪帧也遵循同样的间隔。
+
+```python
+robot = get_a1z_robot()                          # 默认 250 µs
+robot = get_a1z_robot(inter_cmd_gap_us=0)        # 关闭 pacing（恢复旧的连发行为）
+```
+
+- `inter_cmd_gap_us=None`（默认）→ 250 µs；`0` 关闭；超过 **500 µs** 在构造时抛 `ValueError`（6 段间隔必须容纳在 4 ms 控制周期内）。
+- 该参数是 `get_a1z_robot()` 的构造参数，不经 YAML 配置文件设置，SDK 也不读取相关环境变量。
+- 定时精度依赖 CAN 后端：SocketCAN（内核态）较可靠；gs_usb 用户态后端（macOS/Windows）实际间隔可能偏大，必要时可按后端用 `inter_cmd_gap_us` 重调。
+
+## 快速开始
+
+### 使用 example 脚本
+
+> ⚠️ **带 G1Z 夹爪时，以下所有命令都要加 `--config a1z_g1z.yaml`**（或在支持的脚本上加 `--with-gripper`）。这不只是控制夹爪——重力补偿的动力学模型需要包含夹爪的质量，缺了它补偿力矩会偏小，机械臂会缓慢下垂。
+
+```bash
+# 零力漂浮（默认 URDF A1Z_Flange.urdf；带夹爪用 --config a1z_g1z.yaml 自动切换 A1Z_G1Z.urdf）
+
+# 从小补偿因子开始（推荐首次调试方式）
+python examples/gravity_comp.py --gravity_factor 0.3
+
+# 确认补偿方向正确后提升到全补偿
+python examples/gravity_comp.py --gravity_factor 1.0
+
+# 带 G1Z 夹爪：指定夹爪配置（重力补偿会包含夹爪质量）
+python examples/gravity_comp.py --config a1z_g1z.yaml --gravity_factor 0.3
+
+# 位置保持模式
+python examples/gravity_comp.py --mode hold
+
+# 位置保持 + 移动到目标
+python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
+
+# 位置保持 + 移动到目标（带夹爪，7-DOF）
+python examples/position_hold.py --with-gripper --q_target_deg 0,30,-20,-15,0,0,0.5 --speed 0.5
+
+# 夹爪测试（自由行程 + 力矩饱和验证）
+python examples/gripper_hybrid_test.py --can can0
+```
+
+> ⚠️ **如果上述命令报错或机械臂无反应**，请跳转到 [CAN 通信故障排查](#can-通信故障排查)。
+
+### 零力示教与回放
+
+`teach_and_play.py` 分为两个子命令：`record`（录制）和 `play`（回放）。
+
+#### 录制轨迹
+
+```bash
+# 录制并保存到文件（默认 can0，50 Hz 采样）
+python examples/teach_and_play.py record teach.json
+
+# 指定 CAN 口和采样频率
+python examples/teach_and_play.py --can can1 record teach.json --sample-hz 100
+
+# 带 G1Z 夹爪录制（7-DOF）
+python examples/teach_and_play.py record teach.json --with-gripper
+```
+
+启动后机械臂进入零力漂浮模式，可自由拖拽：
+
+```
+[record] Arm running in zero-gravity mode.
+[record] Press ENTER to START recording...   ← 按 Enter 开始录制
+[record] Recording — move the arm freely.  Press ENTER to STOP.
+                                             ← 拖动到目标轨迹后按 Enter 停止
+[record] Recorded 243 frames (4.86s).
+[record] Saved to teach.json
+```
+
+录制完成后机械臂自动回零位再失能。Ctrl+C 可随时中止（同样会回零再失能）。
+
+#### 回放轨迹
+
+```bash
+# 以原速回放
+python examples/teach_and_play.py play teach.json
+
+# 0.5 倍速回放
+python examples/teach_and_play.py play teach.json --speed 0.5
+
+# 循环回放直到 Ctrl+C
+python examples/teach_and_play.py play teach.json --loop
+
+# 指定 CAN 口
+python examples/teach_and_play.py --can can1 play teach.json
+
+# 带 G1Z 夹爪回放
+python examples/teach_and_play.py play teach.json --with-gripper
+```
+
+启动后机械臂先运动到轨迹起点，按 Enter 开始回放：
+
+```
+[play] Loaded 243 frames (4.86s).
+[play] Returning to start position...
+[play] Ready.
+[play] Press ENTER to PLAY (4.86s at 1.0x)...   ← 按 Enter 播放
+[play] Playing (loop 1)...
+[play] Playback complete.
+```
+
+回放结束（或 Ctrl+C 中止）后机械臂自动回零位再失能。
+
+### 使用 a1zctl 服务端（可用于openclaw交互）
+
+```bash
+# 终端 1：启动服务端（默认无夹爪；加 --with-gripper 启用夹爪）
+python3 tools/a1zctl serve
+
+# 终端 1（带夹爪）：
+python3 tools/a1zctl serve --with-gripper
+
+# 终端 2：发送控制指令
+python3 tools/a1zctl status              # 查看关节状态（含夹爪开度）
+python3 tools/a1zctl move --preset home  # 移动到预置位
+python3 tools/a1zctl move 0,60,-60,0,0,0 --speed 0.5
+python3 tools/a1zctl gripper 0.5         # 夹爪到 50% 开度
+python3 tools/a1zctl dance --moves salute,wave,nod
+python3 tools/a1zctl info                # 查看所有预置位与限位
+python3 tools/a1zctl stop               # 停止服务端
+```
+
+## CAN 通信故障排查
+
+如果运行 `python examples/gravity_comp.py --gravity_factor 0.3` 报错或机械臂无反应，最常见原因是部分较老或特定版本的 Linux 内核，其内置的 socketcan / `gs_usb` 驱动与本 CAN 盒存在兼容性问题。
+
+### 1. 检查硬件接线
+
+- CAN 盒（USB-CANFD 适配器）已插入电脑并牢固接触
+- CAN 总线两端接线正确、无松动
+- 机械臂电源已上电
+- CAN 盒的终端电阻正确安装（参见上文"配置 CAN 总线"）
+
+### 2. 检查内核版本并修复（推荐直接执行）
+
+查看当前内核版本：
+
+```bash
+uname -r
+```
+
+- **方案 A**：升级 Linux 内核到 **6.8.0-124** 或更新版本（如果您有其他工作依赖当前内核，建议按照方案 B 操作）
+- **方案 B**：按官方文档给内核 / 驱动打补丁 —— 详见 [Galaxea 内核补丁指引](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
+
+### 3. 手动确认是否为内核兼容问题（可选）
+
+如果不确定问题是否出在内核，或按上一步升级 / 打补丁后仍无法通信，可以手动向 J6 电机发送 CAN 指令来复现。
+
+打开两个终端：**终端 A** 用 `candump can0` 监听总线收发；**终端 B** 依次向 J6 电机发送使能 / 运动 / 失能指令，观察终端 A 是否有反馈帧、J6 是否实际转动。
+
+终端 A：
+
+```bash
+candump can0
+```
+
+终端 B：
+
+```bash
+# 1. 使能 J6
+cansend can0 006#FFFFFFFFFFFFFFFC
+
+# 2. 正向低速 0.5 rad/s
+cansend can0 006#8000844000199800
+
+# 3. 反向低速 -0.5 rad/s
+cansend can0 006#80007BB000199800
+
+# 4. 失能 J6
+cansend can0 006#FFFFFFFFFFFFFFFD
+```
+
+预期表现：使能命令下发后，J6 应有反馈帧回到 `candump`；正 / 反向运动命令下发后，J6 应实际低速转动。
+
+**判断依据**：如果使能命令完全没有反馈，关闭机械臂电源后重新上电 —— 若上电瞬间可以看到大约 **2 帧 CAN 数据**返回（电机上电反馈），但之后发送使能命令仍无回帧，基本可以确认是内核 / socketcan 兼容性问题，回到第 2 步执行方案 A 或 B。
+
+## API 参考
+
+### `get_a1z_robot()`
+
+工厂函数，创建配置好的 ArmRobot 实例：
+
+```python
+get_a1z_robot(
+    can_channel="can0",           # CAN 通道名
+    gravity_comp_factor=1.0,      # 重力补偿比例 (0=关闭, 1=全补偿)
+    zero_gravity_mode=True,       # True=零力漂浮, False=位置保持
+    control_freq_hz=250,          # 控制回路频率 (Hz)
+    urdf_path=None,               # 覆盖 URDF 路径
+    default_kp=None,              # 覆盖默认位置增益
+    default_kd=None,              # 覆盖默认速度增益
+    with_gripper=False,           # True=启用夹爪 (CAN ID 0x07)
+    gripper_max_torque=2.0,       # 夹爪最大夹持力矩 (Nm)，默认 2.0 Nm
+    inter_cmd_gap_us=None,        # CAN 命令帧间隔 (µs)：None=默认 250，0=关闭，上限 500
+    bustype=None,                 # CAN 后端（None=OS 默认: Linux→socketcan, macOS/Windows→gs_usb）
+) -> ArmRobot
+```
+
+### `ArmRobot` 主要方法
+
+| 方法 | 说明 |
+|------|------|
+| `start(initial_kp, initial_kd)` | 使能电机，启动控制回路（含夹爪归零）；仅 `STOPPED` 状态可启动，否则抛 `RuntimeError`；硬故障后须重建对象 |
+| `stop()` | 停止控制回路并失能所有电机；**不关闭 CAN 总线**（总线由对象析构或外部调用方管理） |
+| `estop(reason, fault_code) -> bool` | 软急停：kp=0、kd 减半、锁定当前位置，重力补偿继续、**电机保持使能**；详见 [安全状态机](#安全状态机) |
+| `release(expected_fault_code=None) -> bool` | 解除软急停/保持并恢复 `RUNNING`；要求反馈新鲜、状态匹配，失败返回 `False` 并保持现状 |
+| `hold_position(reason, fault_code) -> bool` | 锁存全增益 MIT 位置保持（`FAULT_HOLD`），控制回路保持运行 |
+| `hold_last_command() -> bool` | 保持最后一次已下发的位置目标并清零运动前馈（不锁存故障，用于 teleop 输入丢失） |
+| `latch_last_command(reason, fault_code) -> bool` | 锁存最后一次已下发目标（`COMMAND_HOLD`），`release()` 成功前拒绝新命令 |
+| `get_fault_status() -> dict` | 查询安全状态快照：`state` / `code` / `reason` / 反馈健康度 / `restart_allowed` 等 |
+| `get_joint_pos() -> np.ndarray` | 获取当前关节角 (rad)；有夹爪时返回 7 元素数组（第 7 个为夹爪归一化开度） |
+| `get_joint_state() -> dict` | 获取 `{pos, vel, eff}`（仅 6 轴） |
+| `get_observations() -> dict` | 获取 `{joint_pos, joint_vel, joint_eff}`；带夹爪时额外包含 `gripper_pos` |
+| `command_joint_pos(pos) -> bool` | 设置目标关节角（越界始终裁剪，见 [关节限位处理](#关节限位处理)）；可传 7 元素数组，第 7 个为夹爪开度 [0, 1]；急停/故障中拒绝并返回 `False` |
+| `command_joint_state(joint_state) -> bool` | 设置目标关节角 + 自定义增益；vel/kp/kd/acc/torque_ff 越界则拒绝整帧并返回 `False` |
+| `command_gripper(value)` | 设置夹爪目标开度 [0.0=关闭, 1.0=全开] |
+| `get_gripper_pos() -> float\|None` | 获取当前夹爪指令开度；无夹爪返回 None |
+| `move_joints(target, speed, kp, kd, max_jump_rad, sync_to_measured, gain_ramp_s)` | minimum-jerk 插值移动到目标位置（阻塞）；目标越界超出容差抛 `ValueError`；`max_jump_rad` 可拒绝距当前测量位置过远的目标 |
+| `is_running` / `is_estopped` | 控制回路是否在运行 / 是否处于急停或故障保持（兼容属性） |
+
+### `Kinematics` 运动学
+
+```python
+from a1z.robots.kinematics import Kinematics
+
+kin = Kinematics("/path/to/urdf")
+
+# 正运动学 → 4x4 齐次变换矩阵
+T = kin.fk(q)
+
+# 逆运动学 (阻尼最小二乘)
+converged, q_sol = kin.ik(target_pose, init_q=q0)
+```
+
+## 工具
+
+### 电机通信诊断与故障排查
+
+```bash
+# 检查 CAN 接口是否正常
+python tools/motor_diag.py --check-can
+
+# 扫描所有 6 个电机（加 --with-gripper 可扫描夹爪）
+python tools/motor_diag.py --scan
+
+# 详细探测某个关节（完整收发流程 + 反馈解析）
+python tools/motor_diag.py --probe 3
+
+# 持续监控所有电机状态（位置/速度/温度/错误码）
+python tools/motor_diag.py --monitor
+
+# 被动监听 CAN 总线（不发任何指令，用于排查总线冲突）
+python tools/motor_diag.py --listen --duration 10
+
+# 清除 MotorB 错误码
+python tools/motor_diag.py --clear-error
+python tools/motor_diag.py --clear-error --joints 3 4
+```
+
+诊断脚本会自动检测并给出常见问题的排查建议：
+- 电机无响应（未上电 / CAN 线反接 / ID 错误 / 固件模式）
+- MotorB 错误码（过压/欠压/过流/过温/通信丢失/过载）
+- CAN 总线异常（bus-off / error-passive / 重启次数）
+- 温度预警
+
+### 电机零点标定
+
+```bash
+# 标定所有电机（当前位置设为零点）
+sudo python tools/set_zero.py --all
+
+# 标定指定关节
+sudo python tools/set_zero.py --joints 0 3
+```
+
+## 夹爪
+
+夹爪出厂已完成零点标定，断电重启后无需归零，直接上电即可使用。
+
+### 使用方法
+
+```python
+from a1z.robots.get_robot import get_a1z_robot
+
+# 创建带夹爪的机械臂
+robot = get_a1z_robot(
+    with_gripper=True,
+    gripper_max_torque=2.0,   # 夹持力矩上限（Nm），默认 2.0 Nm
+)
+robot.start()   # 自动使能夹爪并归零到张开位
+
+# 控制夹爪
+robot.command_gripper(0.0)   # 关闭
+robot.command_gripper(1.0)   # 张开
+robot.command_gripper(0.5)   # 50% 开度
+
+# 读取夹爪状态
+norm = robot.get_gripper_pos()           # 当前指令开度
+obs  = robot.get_observations()          # 包含 gripper_pos 的完整观测字典
+
+# 同时控制关节和夹爪（7 元素数组，第 7 个为夹爪）
+import numpy as np
+robot.command_joint_pos(np.array([0, 0.5, -0.5, 0, 0, 0, 0.8]))
+robot.move_joints(np.array([0, 0.3, -0.3, 0, 0, 0, 0.0]), speed=0.5)
+
+robot.stop()
+```
+
+### 力矩限制（夹持保护）
+
+`gripper_max_torque` 通过力位混控模式的硬件电流饱和环节直接限制夹持力矩：夹爪接触物体后，电流被钳位在 `i_des = max_torque / 11.0`，力矩不再随位置误差增大，无论物体尺寸如何均不会超力。
+
+```python
+robot = get_a1z_robot(
+    with_gripper=True,
+    gripper_max_torque=1.0,   # 1.0 Nm 限制，适合轻物体
+)
+```
+
+## 控制原理
+
+### MIT 力位混控
+
+每个控制周期，SDK 通过 `send_mit_command` 向电机下发五元组（`pos`, `vel`, `kp`, `kd`, `torque`），电机固件在内部执行 PD + 前馈合力：
+
+```python
+# motor_a_driver.py / motor_b_driver.py — send_mit_command
+def send_mit_command(self, pos: float, vel: float, kp: float, kd: float, torque: float) -> None:
+    pos_u16    = float_to_uint(pos,    r.pos_min,    r.pos_max,    16)
+    vel_u12    = float_to_uint(vel,    r.vel_min,    r.vel_max,    12)
+    kp_u12     = float_to_uint(kp,     r.kp_min,     r.kp_max,     12)
+    kd_u9      = float_to_uint(kd,     r.kd_min,     r.kd_max,      9)
+    torque_u12 = float_to_uint(torque, r.torque_min, r.torque_max, 12)
+    # 打包成 8 字节 CAN 帧下发
+```
+
+SDK 在每个控制周期（默认 250 Hz）的 `_update` 中执行（发送路径位于 `_send_command_and_cache_hold_locked`）：
+
+```python
+# arm_robot.py — _update()
+
+# 1. 读取电机反馈，并做每周期安全检查（反馈新鲜度 / 电机错误 / 温度 / 速度）
+self._read_state()
+feedback_fault = self._check_runtime_safety()
+# 反馈失效时：先重发缓存的纯重力补偿 MIT 保持帧，再抛可恢复故障（见"故障策略"）；
+# 过温 / 过速 / 电机错误等硬故障直接失能电机
+
+# 2. Pinocchio RNEA 逆动力学（重力 + 科氏力 + 惯性）
+tau_id = self._gravity_model.compute_inverse_dynamics(q, cmd.vel, cmd.acc)
+
+# 3. 合成最终扭矩（PD + 重力补偿：torque_ff + 逆动力学补偿）
+torques_urdf  = cmd.torque_ff + tau_id * self._gravity_torque_scale * self.gravity_comp_factor
+motor_torques = np.clip(torques_urdf * self._joint_sign, -self._torque_clip, self._torque_clip)
+
+# 4. 经电机链下发（相邻命令帧按 inter_cmd_gap_s 间隔 pacing），
+#    并缓存一帧纯重力补偿安全保持帧，供反馈失效时重发
+self._motor_chain.send_commands(
+    pos=cmd.pos * self._joint_sign,
+    vel=cmd.vel * self._joint_sign,
+    kp=cmd.kp,
+    kd=cmd.kd,
+    torque=motor_torques,
+)
+```
+
+### 零力漂浮模式
+
+```python
+# get_a1z_robot(zero_gravity_mode=True) 启动时初始化：
+self._command.kp = np.zeros(self._num_joints)        # 无位置刚度
+self._command.kd = self._default_kd.copy() * 0.5    # 小阻尼
+# 仅靠 tau_g 抵消重力，机械臂可自由拖拽
+```
+
+### 位置保持模式
+
+```python
+# get_a1z_robot(zero_gravity_mode=False) 启动时初始化：
+self._command.kp = self._default_kp.copy()  # [146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]
+self._command.kd = self._default_kd.copy()  # [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]
+# PD 控制 + 重力补偿，锁定到当前位置
+```
+
+## 安全注意事项
+
+- 首次使用请将 `gravity_comp_factor` 设为较小值（如 0.3），确认补偿方向正确后再逐步增大
+- SDK 由显式安全状态机管理急停与故障行为（见下文"安全状态机"与"故障策略"）
+- 反馈丢失 / 总线瞬态错误时自动重发缓存的安全保持帧并继续尝试恢复；持续 0.2 s 未恢复则锁存位置保持；过温 / 过速 / 电机错误直接失能电机
+- 所有目标关节角都会被裁剪到 URDF 限位范围内（见下文"关节限位处理"）
+
+### 安全状态机
+
+控制回路运行在显式状态机上：`STOPPED` / `RUNNING` / `SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD` / `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED`。
+
+- `start()` 仅允许从 `STOPPED` 状态启动（无存活控制线程、无未清除的致命故障），否则抛 `RuntimeError`。进入 `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED` 后对象不可重启，必须重建 `ArmRobot` 实例。
+- `estop()` 为软急停：kp 清零、kd 减半、命令位置锁定到当前测量位置；**电机保持使能**，重力补偿继续运行，机械臂在负载下不会坠落。从 `STOPPED` / `FAULT_HOLD` / `HARD_*` 状态调用返回 `False`。
+- `estop()` / `release()` 均返回 `bool`。`release(expected_fault_code=None)` 仅在控制回路运行、反馈新鲜完整、状态匹配（`SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD`）时恢复 `RUNNING`；否则返回 `False` 并保持现状。`expected_fault_code` 可防止误释放其他来源的故障。
+- 急停 / 保持期间，`command_joint_pos` / `command_joint_state` / `command_gripper` / `move_joints` 被拒绝（返回 `False` 或提前返回，并记日志）。
+- `stop()` 停止控制回路并失能所有电机；**不再关闭 CAN 总线**——总线在对象析构时关闭（或由外部调用方管理），因此 `stop()` 后可用同一对象再次 `start()`。
+- `get_fault_status()` 返回线程安全的状态快照（`state` / `code` / `reason` / 故障时长 / 逐关节反馈健康度 / `restart_allowed` 等）。
+
+### 故障策略
+
+| 分类 | 触发条件 | 行为 |
+|------|----------|------|
+| 可恢复（recoverable） | 反馈超时（stale）、瞬态 CAN 发送错误（EAGAIN/EWOULDBLOCK/EINTR/ENOBUFS/TX 缓冲区满）、逆动力学计算异常 | 保持最后一次命令并重发缓存的纯重力补偿 MIT 保持帧（电机**不**失能）；持续 0.2 s 未恢复 → 锁存 `FAULT_HOLD`（全增益位置保持），反馈恢复后可 `release()` |
+| 硬故障（hard） | 过温、过速、电机错误码、非有限反馈 | 立即失能所有电机（`HARD_DISABLED`），锁存故障且对象不可重启 |
+
+### 关节限位处理
+
+- 流式命令（`command_joint_pos` / `command_joint_state`，teleop / 轨迹回放场景）：越界目标**始终裁剪**到物理限位，不再拒绝整帧或触发急停，未越界关节继续跟踪。裁剪前按 S¹ 圆拓扑将目标 unwrap 到距当前命令最近的等价角，避免 ±π 回绕导致满行程跳变。超出每关节容差（默认 0.05 rad）的大越界记 ERROR 日志，容差内小越界记 WARNING。
+- `move_joints` 单发运动：目标越界超出容差仍抛 `ValueError` 拒绝执行；新增 `max_jump_rad` 参数，可拒绝距当前测量位置过远的目标（如 IK 翻肘解）。
+- 运行中测量位置漂出软限位只记日志（1 Hz 限频），不再触发急停。
+
+## 关节限位
+
+| 关节 | 名称 | 机械限位 (°) | 机械限位 (rad) | 软限位 (°) | 软限位 (rad) |
+|------|------|-------------|--------------|-----------|-------------|
+| 0 | arm_joint1 | [-130°, 130°] | [-2.269, 2.269] | [-120°, 120°] | [-2.094, 2.094] |
+| 1 | arm_joint2 | [-1.94°, 192.78°] | [-0.034, 3.365] | [0°, 180°] | [0.000, 3.142] |
+| 2 | arm_joint3 | [-200.38°, 0°] | [-3.497, 0.000] | [-180°, 0°] | [-3.142, 0] |
+| 3 | arm_joint4 | [-91.88°, 110.38°] | [-1.604, 1.926] | [-85°, 85°] | [-1.484, 1.484] |
+| 4 | arm_joint5 | [-90°, 90°] | [-1.571, 1.571] | [-85°, 85°] | [-1.484, 1.484] |
+| 5 | arm_joint6 | [-120°, 120°] | [-2.094, 2.094] | [-115°, 115°] | [-2.007, 2.007] |
+
+## 默认控制参数
+
+| 参数 | 值 |
+|------|------|
+| 默认 KP | `[146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]` |
+| 默认 KD | `[5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]` |
+| 命令增益上限 | kp ≤ 200，kd ≤ 5（`command_joint_state` / `move_joints` 自定义增益越界拒绝） |
+| CAN 命令帧间隔 | 250 µs（`inter_cmd_gap_us` 可调，0=关闭，上限 500 µs） |
+| 关节坐标系符号 | `[1, 1, -1, 1, -1, 1]` (关节3，5与URDF方向相反) |
+| 重力扭矩缩放 | `[1, 1, 1, 1, 1, 1]` |
+| 最大重力扭矩 | `[50, 50, 50, 24, 10, 10]` Nm |
+| 扭矩限幅 | `[70, 70, 70, 27, 10, 10]` Nm |
+| MotorA KT | 2.8 (电流→扭矩转换系数) |
+| 控制频率 | 250 Hz |
+
+## 开源许可
+
+本项目基于 [MIT License](LICENSE) 开源，版权归 **星海图** 所有。
+
+### 第三方依赖许可
+
+| 依赖 | 许可证 | 说明 |
+|------|--------|------|
+| [numpy](https://numpy.org) | BSD-3-Clause | 数值计算 |
+| [python-can](https://github.com/hardbyte/python-can) | LGPL-3.0 | CAN 总线通信 |
+| [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | 机器人动力学计算 |
+
+以上依赖均与 MIT 协议兼容，可自由用于商业和非商业项目。
+
+---
+
+<a id="english"></a>
+
+[中文](#chinese) | [English](#english)
+
+# A1Z — 6-DOF Robotic Arm Python SDK (with G1Z Gripper)
+
+<p align="center">
+  <img src="docs/images/A1Z_G1Z.png" alt="A1Z robotic arm with G1Z gripper" width="500"/>
+</p>
+
+A Python control SDK for the A1Z six-axis robotic arm, providing CAN-bus motor drivers, Pinocchio-based gravity compensation, forward/inverse kinematics, zero-force teaching, position hold, with optional G1Z gripper control.
+
+## Project Structure
+
+```
+a1z/
+├── pyproject.toml                 # Build config (flit)
+├── setup.py                       # setuptools fallback
+├── README.md
+├── a1z/                       # SDK main package
+│   ├── dynamics/
+│   │   └── gravity_model.py       # Pinocchio RNEA gravity compensation
+│   ├── motor_drivers/
+│   │   ├── can_backend.py         # Cross-platform CAN backend selection (Linux/macOS/Windows auto-adaptation)
+│   │   ├── can_interface.py       # CAN bus wrapper
+│   │   ├── motor_a_driver.py      # MotorA driver (MIT mixed control)
+│   │   ├── motor_b_driver.py      # MotorB driver + MixedMotorChain
+│   │   └── utils.py               # Data structures, float↔uint conversion
+│   ├── robots/
+│   │   ├── robot.py               # Robot Protocol (abstract interface)
+│   │   ├── arm_robot.py           # ArmRobot implementation (control loop + gravity comp + safety state machine)
+│   │   ├── get_robot.py           # Factory function get_a1z_robot()
+│   │   ├── gripper.py             # Gripper control (MotorB CAN ID 0x07)
+│   │   ├── server.py              # Unix socket control server
+│   │   └── kinematics.py          # FK/IK (Pinocchio)
+│   ├── robot_models/
+│   │   └── a1z/               # URDF model files (defaults to A1Z_Flange.urdf; use A1Z_G1Z.urdf when the gripper is attached)
+│   └── utils/
+│       └── utils.py               # RateRecorder, logging utilities
+├── examples/
+│   ├── gravity_comp.py            # Gravity compensation example
+│   ├── position_hold.py           # Position hold example
+│   ├── teach_and_play.py          # Zero-force teach recording and playback
+│   └── gripper_hybrid_test.py     # Gripper test: free travel + torque saturation
+└── tools/
+    ├── a1zctl                     # Arm control CLI (serve/move/gripper/dance/stop)
+    ├── gripper_set_zero.py        # Gripper zero calibration (factory-done, rarely needed)
+    ├── motor_diag.py              # Motor communication diagnostics
+    ├── set_zero.py                # Motor zero calibration
+    ├── setup_can.sh               # Linux SocketCAN one-step setup
+    ├── verify_can_mac.sh          # macOS CAN communication verification
+    └── verify_can_win.py          # Windows CAN communication verification
+```
+
+## Installation
+
+### Prerequisites
+
+- Python >= 3.10
+- **Linux**: SocketCAN (hardware CAN interface required)
+- **macOS / Windows**: Connects via the HHS USB-CANFD adapter (VID:PID `a8fa:8598`); the SDK automatically uses the gs_usb userspace backend
+- URDF model files (bundled, see `a1z/robot_models/a1z/`; defaults to `A1Z_Flange.urdf`, use `A1Z_G1Z.urdf` with `with_gripper=True`)
+
+> See the [Cross-Platform CAN Configuration](#cross-platform-can-configuration) section for details.
+
+### Install the SDK
+
+```bash
+# Clone the repository (gripper support is now optional on main)
+git clone https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+
+cd /path/to/GALAXEA-A1Z
+
+# A virtual environment is recommended to keep your system Python clean
+# The interpreter must be >= 3.10; the macOS system python3 is 3.9, so specify one explicitly, e.g. python3.10
+python3 -m venv .venv
+source .venv/bin/activate    # on Windows: .venv\Scripts\activate
+
+# Development mode (recommended)
+pip install -e .
+
+# Or standard install
+pip install .
+```
+
+Dependencies are installed automatically: `numpy`, `python-can>=4.0`, `pin` (Pinocchio), `pyyaml`.
+
+On macOS / Windows, install with the gs_usb extras instead (includes the gs_usb userspace backend + bundled libusb — no extra driver library needed):
+
+```bash
+pip install -e ".[gs_usb]"
+```
+
+> Note: zsh (the default macOS shell) treats `[...]` as a glob and fails with `no matches found` — the quotes are required.
+
+### Configuration File (Optional)
+
+Two config files are provided in the repo root. Put default robot parameters there once and reuse them across examples and tools — every script that supports `--config` (examples, tools, a1zctl) reads it, and command-line flags override config-file values.
+
+- `a1z.yaml`: default config, no gripper (`with_gripper: false`)
+- `a1z_g1z.yaml`: use when a G1Z gripper is attached (`with_gripper: true`, automatically switches to A1Z_G1Z.urdf)
+
+```yaml
+can_channel: can0
+control_freq_hz: 250
+gravity_comp_factor: 1.0
+zero_gravity_mode: true
+with_gripper: false
+```
+
+> The config file can also override `default_kp` / `default_kd` (factory defaults are hardware-tuned gains, see [Default Control Parameters](#default-control-parameters)). The CAN pacing gap (`inter_cmd_gap_us`) is a `get_a1z_robot()` constructor argument and is not set via the config file.
+
+Example usage:
+
+```bash
+python examples/position_hold.py --config a1z.yaml
+python examples/position_hold.py --config a1z_g1z.yaml   # with gripper
+python tools/a1zctl serve --config a1z_g1z.yaml
+python tools/motor_diag.py --scan --config a1z.yaml
+python tools/set_zero.py --all --config a1z.yaml
+```
+
+### Configure the CAN Bus (SocketCAN)
+
+> Note: verify that the CAN termination resistor is installed correctly!
+
+Using the HHS USB-CANFD adapter (VID/PID `a8fa:8598`):
+
+```bash
+# 1. Load the driver
+sudo modprobe gs_usb
+
+# 2. Bind the HHS adapter to gs_usb (ignore errors if already bound)
+sudo sh -c 'echo "a8fa 8598" > /sys/bus/usb/drivers/gs_usb/new_id' 2>/dev/null || true
+
+# 3. Confirm the interface appears (usually can0 for a single adapter)
+ip link show type can
+
+# 4. Configure and bring up (1 Mbps)
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+```
+
+#### macOS (gs_usb userspace mode)
+
+macOS has no SocketCAN. The SDK automatically detects the platform and uses the gs_usb userspace backend to connect to the HHS USB-CANFD adapter — **no manual CAN interface configuration is required**.
+
+```bash
+# 1. Install SDK + gs_usb extras (includes bundled libusb; usually no brew needed)
+pip install -e ".[gs_usb]"
+
+# 2. Verify CAN communication (optional)
+bash tools/verify_can_mac.sh
+```
+
+#### Windows (gs_usb userspace mode)
+
+Windows also uses the gs_usb userspace backend, but you must first install a WinUSB driver with **Zadig**:
+
+```powershell
+# 1. Use Zadig to replace the HHS adapter driver with WinUSB
+
+# 2. Install Pinocchio (no pip prebuilt package on Windows; conda is required)
+conda install -c conda-forge pin
+
+# 3. Install SDK + gs_usb extras
+pip install -e ".[gs_usb]"
+
+# 4. Verify CAN communication (optional)
+python tools\verify_can_win.py
+```
+
+> ⚠️ **The Zadig step is mandatory.** Windows will otherwise occupy the HHS device with the generic USB-serial driver, and libusb will report `Cannot find device 0`.
+
+#### Cross-Platform CAN Configuration
+
+The SDK automatically selects the CAN backend by platform:
+
+| Platform | Adapter | Install | Usage |
+|----------|---------|---------|-------|
+| Linux | SocketCAN kernel driver | `pip install -e .` | `--can can0` |
+| **macOS** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"` | (default) `gs_usb` |
+| **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB runtime | `--bustype pcan --can PCAN_USBBUS1` |
+| **Windows** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"` + Zadig WinUSB driver | (default) `gs_usb` |
+| **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK official driver | `--bustype pcan --can PCAN_USBBUS1` |
+
+When `--bustype` is omitted, the OS default is used: Linux defaults to `socketcan`/`can0`; macOS/Windows default to `gs_usb`/device index `0`.
+
+#### CAN Command Pacing
+
+Each control tick sends one MIT frame per joint. By default the SDK inserts a **250 µs gap between consecutive command frames** so a motor's answer slot is never occupied by its predecessor's answer — this fixes the feedback/target-latch starvation observed on the wrist joint at the end of a back-to-back burst. The gap is implemented inside the motor chain, and the integrated gripper frame honors the same pacing.
+
+```python
+robot = get_a1z_robot()                          # default 250 µs
+robot = get_a1z_robot(inter_cmd_gap_us=0)        # disable pacing (legacy back-to-back burst)
+```
+
+- `inter_cmd_gap_us=None` (default) → 250 µs; `0` disables pacing; values above **500 µs** raise `ValueError` at construction (the 6 paced boundaries must fit inside the 4 ms control tick).
+- The gap is a `get_a1z_robot()` constructor argument — it is not exposed via the YAML config file, and the SDK reads no environment variable for it.
+- Timing precision depends on the CAN backend: SocketCAN (kernel) is reliable; on userspace backends (gs_usb on macOS/Windows) actual gaps may be longer. Retune per backend with `inter_cmd_gap_us` if needed.
+
+## Quick Start
+
+### Example Scripts
+
+> ⚠️ **With a G1Z gripper attached, add `--config a1z_g1z.yaml` to every command below** (or `--with-gripper` where supported). This is not just about controlling the gripper — the gravity-compensation dynamics model must include the gripper's mass; without it the compensation torque is too small and the arm will slowly droop.
+
+```bash
+# Zero-force float (default URDF A1Z_Flange.urdf; use --config a1z_g1z.yaml to switch to A1Z_G1Z.urdf automatically)
+
+# Start with a small compensation factor (recommended for first-time setup)
+python examples/gravity_comp.py --gravity_factor 0.3
+
+# Increase to full compensation once direction is confirmed correct
+python examples/gravity_comp.py --gravity_factor 1.0
+
+# With G1Z gripper: specify the gripper config (gravity comp includes gripper mass)
+python examples/gravity_comp.py --config a1z_g1z.yaml --gravity_factor 0.3
+
+# Position hold mode
+python examples/gravity_comp.py --mode hold
+
+# Position hold + move to target
+python examples/position_hold.py --q_target_deg 0,30,-20,-15,0,0 --speed 0.5
+
+# Position hold + move to target (with gripper, 7-DOF)
+python examples/position_hold.py --with-gripper --q_target_deg 0,30,-20,-15,0,0,0.5 --speed 0.5
+
+# Gripper test (free travel + torque saturation)
+python examples/gripper_hybrid_test.py --can can0
+```
+
+> ⚠️ **If the commands above error out or the arm does not respond**, jump to [CAN Communication Troubleshooting](#can-communication-troubleshooting).
+
+### Zero-Force Teaching and Playback
+
+`teach_and_play.py` has two sub-commands: `record` and `play`.
+
+#### Record a Trajectory
+
+```bash
+# Record and save to file (default can0, 50 Hz sampling)
+python examples/teach_and_play.py record teach.json
+
+# Specify CAN channel and sample rate
+python examples/teach_and_play.py --can can1 record teach.json --sample-hz 100
+
+# 带 G1Z 夹爪录制（7-DOF）
+python examples/teach_and_play.py record teach.json --with-gripper
+```
+
+The arm enters zero-force float mode and can be freely backdriven:
+
+```
+[record] Arm running in zero-gravity mode.
+[record] Press ENTER to START recording...   ← press Enter to begin
+[record] Recording — move the arm freely.  Press ENTER to STOP.
+                                             ← guide the arm, then press Enter
+[record] Recorded 243 frames (4.86s).
+[record] Saved to teach.json
+```
+
+The arm returns to zero position and disables after recording. Ctrl+C aborts safely (also returns to zero).
+
+#### Play Back a Trajectory
+
+```bash
+# Play at original speed
+python examples/teach_and_play.py play teach.json
+
+# Play at 0.5× speed
+python examples/teach_and_play.py play teach.json --speed 0.5
+
+# Loop until Ctrl+C
+python examples/teach_and_play.py play teach.json --loop
+
+# Specify CAN channel
+python examples/teach_and_play.py --can can1 play teach.json
+
+# 带 G1Z 夹爪回放
+python examples/teach_and_play.py play teach.json --with-gripper
+```
+
+The arm moves to the trajectory start position first, then waits for Enter:
+
+```
+[play] Loaded 243 frames (4.86s).
+[play] Returning to start position...
+[play] Ready.
+[play] Press ENTER to PLAY (4.86s at 1.0x)...   ← press Enter to play
+[play] Playing (loop 1)...
+[play] Playback complete.
+```
+
+After playback (or Ctrl+C), the arm returns to zero and disables.
+
+### Using the a1zctl Server
+
+```bash
+# Terminal 1: start the server (default no gripper; add --with-gripper to enable it)
+python3 tools/a1zctl serve
+
+# Terminal 1 (with gripper):
+python3 tools/a1zctl serve --with-gripper
+
+# Terminal 2: send control commands
+python3 tools/a1zctl status              # show joint state (including gripper)
+python3 tools/a1zctl move --preset home  # move to preset position
+python3 tools/a1zctl move 0,60,-60,0,0,0 --speed 0.5
+python3 tools/a1zctl gripper 0.5         # set gripper to 50% open
+python3 tools/a1zctl dance --moves salute,wave,nod
+python3 tools/a1zctl info                # list all presets and limits
+python3 tools/a1zctl stop               # stop the server
+```
+
+## CAN Communication Troubleshooting
+
+If `python examples/gravity_comp.py --gravity_factor 0.3` errors out or the arm does not respond, the most common cause is a compatibility issue between the built-in SocketCAN / `gs_usb` driver in some older or specific Linux kernel versions and this CAN adapter.
+
+### 1. Check the wiring
+
+- The USB-CANFD adapter is plugged in and seated firmly
+- Both ends of the CAN bus are wired correctly and not loose
+- The arm is powered on
+- The CAN termination resistor is installed correctly (see "Configure the CAN Bus" above)
+
+### 2. Check the kernel version and fix (recommended path)
+
+Check your current kernel version:
+
+```bash
+uname -r
+```
+
+- **Option A**: upgrade the Linux kernel to **6.8.0-124** or newer (if you have other work that depends on the current kernel, prefer Option B)
+- **Option B**: patch the kernel / driver as described in the [Galaxea kernel patch guide](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
+
+### 3. Manually confirm the kernel compatibility issue (optional)
+
+If you are not sure the kernel is the culprit, or CAN still does not work after step 2, manually reproduce the issue by sending CAN commands to the J6 motor.
+
+Open two terminals. **Terminal A** monitors bus traffic with `candump can0`; **Terminal B** sends the enable / motion / disable commands to J6 in sequence. Watch Terminal A for feedback frames and check whether J6 actually rotates.
+
+Terminal A:
+
+```bash
+candump can0
+```
+
+Terminal B:
+
+```bash
+# 1. Enable J6
+cansend can0 006#FFFFFFFFFFFFFFFC
+
+# 2. Forward at 0.5 rad/s
+cansend can0 006#8000844000199800
+
+# 3. Reverse at -0.5 rad/s
+cansend can0 006#80007BB000199800
+
+# 4. Disable J6
+cansend can0 006#FFFFFFFFFFFFFFFD
+```
+
+Expected behavior: after the enable command, J6 should emit a feedback frame visible in `candump`; after forward / reverse, J6 should physically rotate at low speed.
+
+**Diagnosis**: if the enable command produces no feedback at all, power-cycle the arm — if you see roughly **2 CAN frames** returned during power-on (the motor's boot-up feedback) but the enable command still produces nothing, this confirms a kernel / SocketCAN compatibility issue. Go back to step 2 and apply Option A or B.
+
+## API Reference
+
+### `get_a1z_robot()`
+
+Factory function that creates a configured `ArmRobot` instance:
+
+```python
+get_a1z_robot(
+    can_channel="can0",           # CAN channel name
+    gravity_comp_factor=1.0,      # Gravity compensation scale (0=off, 1=full)
+    zero_gravity_mode=True,       # True=zero-force float, False=position hold
+    control_freq_hz=250,          # Control loop frequency (Hz)
+    urdf_path=None,               # Override URDF path
+    default_kp=None,              # Override default position gains
+    default_kd=None,              # Override default velocity gains
+    with_gripper=False,           # True=enable gripper (CAN ID 0x07)
+    gripper_max_torque=2.0,       # Max gripping torque (Nm), default 2.0 Nm
+    inter_cmd_gap_us=None,        # CAN command pacing gap (µs): None=250 default, 0=off, max 500
+    bustype=None,                 # CAN backend (None=OS default: Linux→socketcan, macOS/Windows→gs_usb)
+) -> ArmRobot
+```
+
+### `ArmRobot` Key Methods
+
+| Method | Description |
+|--------|-------------|
+| `start(initial_kp, initial_kd)` | Enable motors and start the control loop (gripper homing included); only allowed from `STOPPED` — otherwise raises `RuntimeError`; after a hard fault the object cannot be restarted (recreate it) |
+| `stop()` | Stop the control loop and disable all motors; does **not** shut down the CAN bus (the bus is closed on object destruction or by the owning caller) |
+| `estop(reason, fault_code) -> bool` | Soft emergency stop: kp=0, kd halved, position pinned to the current pose; gravity compensation keeps running and **motors stay enabled**; see [Safety State Machine](#safety-state-machine) |
+| `release(expected_fault_code=None) -> bool` | Release a soft estop / hold back to `RUNNING`; requires fresh feedback and a matching state — returns `False` (and holds) otherwise |
+| `hold_position(reason, fault_code) -> bool` | Latch a strict full-gain MIT position hold (`FAULT_HOLD`) while the control loop stays alive |
+| `hold_last_command() -> bool` | Keep the last queued position target and clear motion feedforward (no fault latched; teleop input-loss behavior) |
+| `latch_last_command(reason, fault_code) -> bool` | Latch the last transmitted target (`COMMAND_HOLD`); new commands are rejected until `release()` succeeds |
+| `get_fault_status() -> dict` | Thread-safe safety snapshot: `state` / `code` / `reason` / per-joint feedback health / `restart_allowed`, etc. |
+| `get_joint_pos() -> np.ndarray` | Get current joint angles (rad); returns 7-element array when gripper is attached (7th = normalized gripper position) |
+| `get_joint_state() -> dict` | Get `{pos, vel, eff}` (arm joints only) |
+| `get_observations() -> dict` | Get `{joint_pos, joint_vel, joint_eff}`; includes `gripper_pos` when a gripper is attached |
+| `command_joint_pos(pos) -> bool` | Set target joint angles (out-of-limits targets are always clipped, see [Joint Limit Handling](#joint-limit-handling)); accepts 7-element array (7th = gripper [0, 1]); returns `False` when rejected (e.g. while estopped) |
+| `command_joint_state(joint_state) -> bool` | Set target joint angles + custom gains; out-of-range vel/kp/kd/acc/torque_ff rejects the whole frame (`False`) |
+| `command_gripper(value)` | Set gripper target position [0.0=closed, 1.0=fully open] |
+| `get_gripper_pos() -> float\|None` | Get current gripper command position; returns None without gripper |
+| `move_joints(target, speed, kp, kd, max_jump_rad, sync_to_measured, gain_ramp_s)` | Minimum-jerk interpolation to target (blocking); a target beyond the joint-limit tolerance raises `ValueError`; `max_jump_rad` rejects targets too far from the measured pose |
+| `is_running` / `is_estopped` | Whether the control loop is active / whether the robot is in estop or a fault hold (compatibility properties) |
+
+### `Kinematics`
+
+```python
+from a1z.robots.kinematics import Kinematics
+
+kin = Kinematics("/path/to/urdf")
+
+# Forward kinematics → 4×4 homogeneous transform
+T = kin.fk(q)
+
+# Inverse kinematics (damped least squares)
+converged, q_sol = kin.ik(target_pose, init_q=q0)
+```
+
+## Tools
+
+### Motor Communication Diagnostics
+
+```bash
+# Check CAN interface
+python tools/motor_diag.py --check-can
+
+# Scan all 6 motors (add --with-gripper to scan the gripper as joint 6)
+python tools/motor_diag.py --scan
+
+# Detailed probe of a specific joint (full TX/RX flow + feedback parsing)
+python tools/motor_diag.py --probe 3
+
+# Continuous monitoring of all motor states (position/velocity/temperature/error codes)
+python tools/motor_diag.py --monitor
+
+# Passive CAN bus listener (no commands sent, for diagnosing bus conflicts)
+python tools/motor_diag.py --listen --duration 10
+
+# Clear MotorB error codes
+python tools/motor_diag.py --clear-error
+python tools/motor_diag.py --clear-error --joints 3 4
+```
+
+The diagnostic script automatically detects and suggests remedies for common issues:
+- Motor not responding (unpowered / reversed CAN wiring / wrong ID / firmware mode)
+- MotorB error codes (overvoltage / undervoltage / overcurrent / overtemperature / comm loss / overload)
+- CAN bus faults (bus-off / error-passive / restart count)
+- Temperature warnings
+
+### Motor Zero Calibration
+
+```bash
+# Calibrate all motors (set current position as zero)
+sudo python tools/set_zero.py --all
+
+# Calibrate specific joints
+sudo python tools/set_zero.py --joints 0 3
+```
+
+## Gripper
+
+The gripper ships with factory zero calibration and requires no re-homing after power cycle.
+
+### Usage
+
+```python
+from a1z.robots.get_robot import get_a1z_robot
+
+robot = get_a1z_robot(
+    with_gripper=True,
+    gripper_max_torque=2.0,   # max gripping torque (Nm), default 2.0 Nm
+)
+robot.start()   # enables gripper and homes to open position
+
+# Control the gripper
+robot.command_gripper(0.0)   # close
+robot.command_gripper(1.0)   # fully open
+robot.command_gripper(0.5)   # 50% open
+
+# Read gripper state
+norm = robot.get_gripper_pos()           # current command position
+obs  = robot.get_observations()          # full observation dict including gripper_pos
+
+# Control arm and gripper together (7-element array, 7th = gripper)
+import numpy as np
+robot.command_joint_pos(np.array([0, 0.5, -0.5, 0, 0, 0, 0.8]))
+robot.move_joints(np.array([0, 0.3, -0.3, 0, 0, 0, 0.0]), speed=0.5)
+
+robot.stop()
+```
+
+### Torque Limiting (Grasp Protection)
+
+`gripper_max_torque` limits gripping force directly via the hardware current saturation in MIT mixed control mode. Once the gripper contacts an object, current is clamped to `i_des = max_torque / 11.0` and torque no longer grows with position error, regardless of object size.
+
+```python
+robot = get_a1z_robot(
+    with_gripper=True,
+    gripper_max_torque=1.0,   # 1.0 Nm, suitable for lighter objects
+)
+```
+
+## Control Architecture
+
+### MIT Position-Velocity-Torque Mixed Control
+
+Each control cycle, the SDK sends a five-tuple (`pos`, `vel`, `kp`, `kd`, `torque`) to each motor via `send_mit_command`. The motor firmware executes PD + feedforward internally:
+
+```python
+# motor_a_driver.py / motor_b_driver.py — send_mit_command
+def send_mit_command(self, pos, vel, kp, kd, torque):
+    pos_u16    = float_to_uint(pos,    r.pos_min,    r.pos_max,    16)
+    vel_u12    = float_to_uint(vel,    r.vel_min,    r.vel_max,    12)
+    kp_u12     = float_to_uint(kp,     r.kp_min,     r.kp_max,     12)
+    kd_u9      = float_to_uint(kd,     r.kd_min,     r.kd_max,      9)
+    torque_u12 = float_to_uint(torque, r.torque_min, r.torque_max, 12)
+    # pack into 8-byte CAN frame and send
+```
+
+The SDK's `_update()` runs at each control cycle (default 250 Hz); the send path lives in `_send_command_and_cache_hold_locked()`:
+
+1. Read motor feedback from the CAN bus and run per-cycle safety checks (feedback freshness, motor error codes, temperatures, velocities)
+2. On stale/incomplete feedback, first resend the cached gravity-only MIT hold frame, then raise a recoverable fault (see [Fault Policy](#fault-policy)); confirmed hard faults (over-temperature / over-speed / motor errors) disable the motors immediately
+3. Compute full inverse dynamics `τ_id(q, vel, acc)` (gravity + Coriolis + inertia) via Pinocchio RNEA
+4. Compose final torque: `τ = torque_ff + τ_id × scale × factor` — PD + gravity compensation
+5. Clip to the per-joint safe range and send via the motor chain (consecutive frames paced by `inter_cmd_gap_s`), caching a gravity-only safe-hold frame for the feedback-loss resend path
+
+### Zero-Force Float Mode
+
+```python
+# get_a1z_robot(zero_gravity_mode=True)
+self._command.kp = np.zeros(self._num_joints)        # no position stiffness
+self._command.kd = self._default_kd.copy() * 0.5    # low damping
+# only τ_g counteracts gravity; the arm can be freely backdriven
+```
+
+### Position Hold Mode
+
+```python
+# get_a1z_robot(zero_gravity_mode=False)
+self._command.kp = self._default_kp.copy()  # [146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]
+self._command.kd = self._default_kd.copy()  # [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]
+# PD control + gravity compensation, locks to current position
+```
+
+## Safety
+
+- For first use, set `gravity_comp_factor` to a small value (e.g. 0.3) and confirm compensation direction before increasing
+- Estop and fault behavior is managed by an explicit safety state machine (see "Safety State Machine" and "Fault Policy" below)
+- On feedback loss / transient bus errors the SDK resends the cached safe-hold frame and keeps trying to recover; if the fault persists for 0.2 s it latches a position hold; over-temperature / over-speed / motor errors disable the motors immediately
+- All target joint angles are clipped to the URDF joint limits (see "Joint Limit Handling" below)
+
+### Safety State Machine
+
+The control loop runs on an explicit state machine: `STOPPED` / `RUNNING` / `SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD` / `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED`.
+
+- `start()` is only allowed from `STOPPED` (no live control thread, no sticky lifecycle fault); otherwise it raises `RuntimeError`. After `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED` the object cannot be restarted — recreate the `ArmRobot` instance.
+- `estop()` is a **soft** emergency stop: position gain zeroed, damping halved, command position pinned to the current measured pose; **motors stay enabled** and gravity compensation keeps running, so the arm does not collapse under load. Calling it from `STOPPED` / `FAULT_HOLD` / `HARD_*` returns `False`.
+- `estop()` / `release()` both return `bool`. `release(expected_fault_code=None)` returns to `RUNNING` only when the control loop is alive, feedback is fresh and complete, and the state matches (`SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD`); otherwise it returns `False` and holds. `expected_fault_code` protects against releasing an unrelated fault source.
+- While estopped / holding, `command_joint_pos` / `command_joint_state` / `command_gripper` / `move_joints` are rejected (return `False` or return early, with a log entry).
+- `stop()` stops the control loop and disables all motors; it **no longer shuts down the CAN bus** — the bus is closed when the object is destroyed (or by the owning caller), so the same object can be started again after `stop()`.
+- `get_fault_status()` returns a thread-safe snapshot (`state` / `code` / `reason` / fault age / per-joint feedback health / `restart_allowed`, etc.).
+
+### Fault Policy
+
+| Class | Triggers | Behavior |
+|-------|----------|----------|
+| Recoverable | Stale feedback, transient CAN TX errors (EAGAIN/EWOULDBLOCK/EINTR/ENOBUFS/TX buffer full), inverse-dynamics computation errors | Hold the last command and resend the cached gravity-only MIT hold frame (motors **not** disabled); if no successful update for 0.2 s → latch `FAULT_HOLD` (full-gain position hold); `release()` once feedback recovers |
+| Hard | Over-temperature, over-speed, motor error codes, non-finite feedback | Immediately disable all motors (`HARD_DISABLED`); the fault is latched and the object cannot be restarted |
+
+### Joint Limit Handling
+
+- Streaming commands (`command_joint_pos` / `command_joint_state`, teleop / trajectory replay): out-of-limits targets are **always clipped** to the physical limits instead of rejecting the frame or engaging estop, so non-violating joints keep tracking. Before clipping, each target is unwrapped on the S¹ circle topology to the equivalent angle nearest the current command, preventing a ±π wrap from producing a full-stroke jump. Large violations beyond the per-joint tolerance (0.05 rad by default) are logged at ERROR; small overshoots within tolerance at WARNING (rate-limited).
+- `move_joints` one-shot moves: a target beyond the limit tolerance still raises `ValueError`; the new `max_jump_rad` argument refuses targets too far from the measured pose (e.g. elbow-flipped IK solutions).
+- A measured position drifting past the soft limits at runtime now only logs (1 Hz rate-limited) instead of triggering an estop.
+
+## Joint Limits
+
+| Joint | Name | Mechanical (°) | Mechanical (rad) | Software (°) | Software (rad) |
+|-------|------|----------------|-----------------|--------------|----------------|
+| 0 | arm_joint1 | [-130°, 130°] | [-2.269, 2.269] | [-120°, 120°] | [-2.094, 2.094] |
+| 1 | arm_joint2 | [-1.94°, 192.78°] | [-0.034, 3.365] | [0°, 180°] | [0.000, 3.142] |
+| 2 | arm_joint3 | [-200.38°, 0°] | [-3.497, 0.000] | [-180°, 0°] | [-3.142, 0] |
+| 3 | arm_joint4 | [-91.88°, 110.38°] | [-1.604, 1.926] | [-85°, 85°] | [-1.484, 1.484] |
+| 4 | arm_joint5 | [-90°, 90°] | [-1.571, 1.571] | [-85°, 85°] | [-1.484, 1.484] |
+| 5 | arm_joint6 | [-120°, 120°] | [-2.094, 2.094] | [-115°, 115°] | [-2.007, 2.007] |
+
+## Default Control Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Default KP | `[146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]` |
+| Default KD | `[5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]` |
+| Command gain caps | kp ≤ 200, kd ≤ 5 (custom gains in `command_joint_state` / `move_joints` are rejected beyond these) |
+| CAN command pacing | 250 µs between frames (tunable via `inter_cmd_gap_us`, 0=off, max 500 µs) |
+| Joint sign | `[1, 1, -1, 1, -1, 1]` (joints 3 and 5 are inverted relative to URDF) |
+| Gravity torque scale | `[1, 1, 1, 1, 1, 1]` |
+| Max gravity torque | `[50, 50, 50, 24, 10, 10]` Nm |
+| Torque clip | `[70, 70, 70, 27, 10, 10]` Nm |
+| MotorA KT | 2.8 (current-to-torque conversion factor) |
+| Control frequency | 250 Hz |
+
+## License
+
+This project is open-sourced under the [MIT License](LICENSE), copyright © **Galaxea**.
+
+### Third-Party Dependency Licenses
+
+| Dependency | License | Description |
+|------------|---------|-------------|
+| [numpy](https://numpy.org) | BSD-3-Clause | Numerical computation |
+| [python-can](https://github.com/hardbyte/python-can) | LGPL-3.0 | CAN bus communication |
+| [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | Robot dynamics computation |
+
+All dependencies are compatible with the MIT license and may be used freely in commercial and non-commercial projects.
