@@ -36,7 +36,7 @@ MixedMotorChain::MixedMotorChain(std::vector<std::shared_ptr<MotorA>> motor_a_li
         entry.motor = motor;
         entry.joint_index = motor_a_joint_indices_[i];
         motor_id_map_[motor->motor_id()] = entry;
-        if (!can_) can_ = motor->can();
+        if (!transport_) transport_ = motor->transport();
     }
 
     for (size_t i = 0; i < motor_b_list_.size(); ++i) {
@@ -46,7 +46,7 @@ MixedMotorChain::MixedMotorChain(std::vector<std::shared_ptr<MotorA>> motor_a_li
         entry.motor = motor;
         entry.joint_index = motor_b_joint_indices_[i];
         motor_id_map_[motor->motor_id()] = entry;
-        if (!can_) can_ = motor->can();
+        if (!transport_) transport_ = motor->transport();
     }
 }
 
@@ -84,14 +84,14 @@ bool MixedMotorChain::disable_all() {
 }
 
 int MixedMotorChain::drain_and_update(int timeout_ms) {
-    if (!can_) return 0;
+    if (!transport_) return 0;
 
     int valid_count = 0;
     auto start = std::chrono::steady_clock::now();
     auto deadline = start + std::chrono::milliseconds(timeout_ms);
 
     while (std::chrono::steady_clock::now() < deadline) {
-        auto frame = can_->try_receive();
+        auto frame = transport_->receive(0);
         if (!frame) break;
 
         dispatch_feedback(*frame);

@@ -109,13 +109,13 @@ int main(int argc, char* argv[]) {
 
     // MotorA: joints 1-3 (CAN ID 0x01-0x03)
     for (int i = 1; i <= 3; ++i) {
-        auto motor = std::make_shared<MotorA>(i, nullptr);
+        auto motor = std::make_shared<MotorA>(i, transport);
         motor_a_list.push_back(motor);
     }
 
     // MotorB: joints 4-6 (CAN ID 0x04-0x06)
     for (int i = 4; i <= 6; ++i) {
-        auto motor = std::make_shared<MotorB>(i, nullptr);
+        auto motor = std::make_shared<MotorB>(i, transport);
         motor_b_list.push_back(motor);
     }
 

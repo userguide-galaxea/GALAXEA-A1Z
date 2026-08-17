@@ -1,7 +1,7 @@
 #pragma once
 
 #include "a1z/types.hpp"
-#include "a1z/can_interface.hpp"
+#include "a1z/transport.hpp"
 #include <memory>
 #include <optional>
 
@@ -54,12 +54,12 @@ public:
     /**
      * @brief Construct a MotorA driver.
      * @param motor_id CAN ID of the motor (0x01-0x7FF)
-     * @param can CAN interface reference
+     * @param transport Transport interface (SocketCAN or G4Ros)
      * @param ranges Physical ranges for scaling
      * @param use_new_enable_protocol Use 0x7FF config frame instead of legacy
      */
     explicit MotorA(int motor_id,
-                    std::shared_ptr<CanInterface> can,
+                    std::shared_ptr<Transport> transport,
                     const MotorARanges& ranges = MotorARanges(),
                     bool use_new_enable_protocol = false);
 
@@ -103,13 +103,13 @@ public:
     int motor_id() const { return motor_id_; }
 
     /**
-     * @brief Get CAN interface.
+     * @brief Get transport interface.
      */
-    std::shared_ptr<CanInterface> can() const { return can_; }
+    std::shared_ptr<Transport> transport() const { return transport_; }
 
 private:
     int motor_id_;
-    std::shared_ptr<CanInterface> can_;
+    std::shared_ptr<Transport> transport_;
     MotorARanges ranges_;
     bool use_new_enable_protocol_;
     std::optional<MotorAFeedback> last_feedback_;

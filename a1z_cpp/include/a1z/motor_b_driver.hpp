@@ -1,7 +1,7 @@
 #pragma once
 
 #include "a1z/types.hpp"
-#include "a1z/can_interface.hpp"
+#include "a1z/transport.hpp"
 #include <map>
 #include <memory>
 #include <optional>
@@ -53,11 +53,11 @@ public:
     /**
      * @brief Construct a MotorB driver.
      * @param motor_id CAN ID of the motor
-     * @param can CAN interface reference
+     * @param transport Transport interface (SocketCAN or G4Ros)
      * @param ranges Physical ranges for scaling
      */
     explicit MotorB(int motor_id,
-                    std::shared_ptr<CanInterface> can,
+                    std::shared_ptr<Transport> transport,
                     const MotorBRanges& ranges = MotorBRanges());
 
     /**
@@ -115,9 +115,9 @@ public:
     int motor_id() const { return motor_id_; }
 
     /**
-     * @brief Get CAN interface.
+     * @brief Get transport interface.
      */
-    std::shared_ptr<CanInterface> can() const { return can_; }
+    std::shared_ptr<Transport> transport() const { return transport_; }
 
     /**
      * @brief Write register via 0x7FF broadcast frame.
@@ -131,7 +131,7 @@ public:
 
 private:
     int motor_id_;
-    std::shared_ptr<CanInterface> can_;
+    std::shared_ptr<Transport> transport_;
     MotorBRanges ranges_;
     std::optional<MotorBFeedback> last_feedback_;
 

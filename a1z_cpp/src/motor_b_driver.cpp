@@ -20,10 +20,10 @@ const std::map<int, std::string> MOTOR_B_ERROR_CODES = {
     {0xF, "position out of range"},
 };
 
-MotorB::MotorB(int motor_id, std::shared_ptr<CanInterface> can,
+MotorB::MotorB(int motor_id, std::shared_ptr<Transport> transport,
                const MotorBRanges& ranges)
     : motor_id_(motor_id)
-    , can_(std::move(can))
+    , transport_(std::move(transport))
     , ranges_(ranges) {}
 
 void MotorB::enable() {
@@ -32,7 +32,7 @@ void MotorB::enable() {
     frame.dlc = 8;
     std::memset(frame.data.data(), 0xFF, 7);
     frame.data[7] = 0xFC;
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -42,7 +42,7 @@ void MotorB::disable() {
     frame.dlc = 8;
     std::memset(frame.data.data(), 0xFF, 7);
     frame.data[7] = 0xFD;
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -52,7 +52,7 @@ void MotorB::clear_error() {
     frame.dlc = 8;
     std::memset(frame.data.data(), 0xFF, 7);
     frame.data[7] = 0xFB;
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -62,7 +62,7 @@ void MotorB::set_zero_ram() {
     frame.dlc = 8;
     std::memset(frame.data.data(), 0xFF, 7);
     frame.data[7] = 0xFE;
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -79,7 +79,7 @@ void MotorB::write_register(int reg_id, uint32_t value) {
     frame.data[2] = 0x55;  // write command
     frame.data[3] = reg_id & 0xFF;
     std::memcpy(&frame.data[4], &value, 4);
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -92,7 +92,7 @@ void MotorB::write_register_float(int reg_id, float value) {
     frame.data[2] = 0x55;  // write command
     frame.data[3] = reg_id & 0xFF;
     std::memcpy(&frame.data[4], &value, 4);
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -115,7 +115,7 @@ void MotorB::send_mit_command(double pos, double vel, double kp, double kd,
     frame.data[5] = (kd_u12 >> 4) & 0xFF;
     frame.data[6] = ((kd_u12 & 0xF) << 4) | ((tor_u12 >> 8) & 0xF);
     frame.data[7] = tor_u12 & 0xFF;
-    can_->send(frame);
+    transport_->send(frame);
 }
 
 void MotorB::send_hybrid_command(double pos, double vel, double i_des) {
@@ -138,7 +138,7 @@ void MotorB::send_hybrid_command(double pos, double vel, double i_des) {
     // i_des: uint16 little-endian, ×10000 → fraction
     frame.data[6] = i_int & 0xFF;
     frame.data[7] = (i_int >> 8) & 0xFF;
-    can_->send(frame);
+    transport_->send(frame);
 }
 
 std::optional<MotorBFeedback> MotorB::parse_feedback(const CanFrame& frame) {

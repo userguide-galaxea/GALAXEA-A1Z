@@ -2,6 +2,7 @@
 
 #include "a1z/motor_a_driver.hpp"
 #include "a1z/motor_b_driver.hpp"
+#include "a1z/transport.hpp"
 #include <array>
 #include <map>
 #include <memory>
@@ -141,7 +142,7 @@ private:
     // CAN ID -> motor mapping for feedback dispatch
     std::map<int, MotorEntry> motor_id_map_;
 
-    std::shared_ptr<CanInterface> can_;
+    std::shared_ptr<Transport> transport_;
 
     void dispatch_feedback(const CanFrame& frame);
     double now_seconds() const;

@@ -7,10 +7,10 @@
 
 namespace a1z {
 
-MotorA::MotorA(int motor_id, std::shared_ptr<CanInterface> can,
+MotorA::MotorA(int motor_id, std::shared_ptr<Transport> transport,
                const MotorARanges& ranges, bool use_new_enable_protocol)
     : motor_id_(motor_id)
-    , can_(std::move(can))
+    , transport_(std::move(transport))
     , ranges_(ranges)
     , use_new_enable_protocol_(use_new_enable_protocol) {}
 
@@ -31,7 +31,7 @@ void MotorA::enable() {
         std::memset(frame.data.data(), 0xFF, 7);
         frame.data[7] = 0xFC;
     }
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -52,7 +52,7 @@ void MotorA::disable() {
         std::memset(frame.data.data(), 0xFF, 7);
         frame.data[7] = 0xFD;
     }
-    can_->send(frame);
+    transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -70,7 +70,7 @@ void MotorA::send_mit_command(double pos, double vel, double kp, double kd,
     frame.id = motor_id_;
     frame.dlc = 8;
     std::memcpy(frame.data.data(), data.data(), 8);
-    can_->send(frame);
+    transport_->send(frame);
 }
 
 std::optional<MotorAFeedback> MotorA::parse_feedback(const CanFrame& frame) {

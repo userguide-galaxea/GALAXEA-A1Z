@@ -65,15 +65,58 @@ int cmd_scan(std::shared_ptr<Transport> transport) {
                   << ", " << config.type << ", CAN ID 0x"
                   << std::hex << config.can_id << std::dec << "): ";
 
-        // Try to receive feedback
-        auto frame = transport->receive(100);
-        if (frame && frame->id == config.can_id) {
-            std::cout << "OK (feedback received)" << std::endl;
-            found++;
-        } else {
+        // Send enable command to trigger feedback
+        CanFrame enable_frame;
+        enable_frame.id = config.can_id;
+        enable_frame.dlc = 8;
+        std::memset(enable_frame.data.data(), 0xFF, 7);
+        enable_frame.data[7] = 0xFC;  // Enable command
+
+        if (!transport->send(enable_frame)) {
+            std::cout << "SEND FAILED" << std::endl;
+            missing++;
+            continue;
+        }
+
+        // Wait for feedback (up to 200ms)
+        bool got_feedback = false;
+        for (int retry = 0; retry < 10; ++retry) {
+            auto frame = transport->receive(20);
+            if (frame && frame->id == static_cast<uint32_t>(config.can_id)) {
+                std::cout << "OK";
+                if (config.type == "MOTOR_A") {
+                    // Parse MotorA feedback
+                    if (frame->dlc >= 8) {
+                        uint64_t raw = 0;
+                        for (int i = 0; i < 8; ++i) {
+                            raw = (raw << 8) | frame->data[i];
+                        }
+                        uint16_t pos_raw = (raw >> 40) & 0xFFFF;
+                        double pos = (pos_raw / 65535.0) * 25.0 - 12.5;
+                        std::cout << " (pos=" << pos << " rad)";
+                    }
+                } else {
+                    // Parse MotorB feedback
+                    if (frame->dlc >= 8) {
+                        uint16_t pos_raw = (frame->data[1] << 8) | frame->data[2];
+                        double pos = (pos_raw / 65535.0) * 25.0 - 12.5;
+                        std::cout << " (pos=" << pos << " rad)";
+                    }
+                }
+                std::cout << std::endl;
+                got_feedback = true;
+                found++;
+                break;
+            }
+        }
+
+        if (!got_feedback) {
             std::cout << "NO RESPONSE" << std::endl;
             missing++;
         }
+
+        // Small delay between motors
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     std::cout << "===================" << std::endl;
@@ -83,19 +126,75 @@ int cmd_scan(std::shared_ptr<Transport> transport) {
 
 int cmd_monitor(std::shared_ptr<Transport> transport) {
     std::cout << "Monitoring motors (Ctrl+C to exit)..." << std::endl;
+    std::cout << "Time       Joint  Type      Pos(rad)   Vel(rad/s)  Cur/Torque  Temp" << std::endl;
+    std::cout << "------------------------------------------------------------------------" << std::endl;
 
-    auto motor_a = std::make_shared<MotorA>(0x01, nullptr);
-    auto motor_b = std::make_shared<MotorB>(0x04, nullptr);
+    auto start_time = std::chrono::steady_clock::now();
 
     while (true) {
         auto frame = transport->receive(100);
-        if (frame) {
-            std::cout << "CAN ID 0x" << std::hex << frame->id << std::dec
-                      << " [" << static_cast<int>(frame->dlc) << " bytes]: ";
-            for (int i = 0; i < frame->dlc; ++i) {
-                printf("%02X ", frame->data[i]);
+        if (!frame) {
+            continue;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - start_time).count();
+
+        // Find joint config
+        int joint_idx = -1;
+        std::string joint_name = "unknown";
+        std::string joint_type = "unknown";
+
+        for (const auto& [idx, config] : JOINT_CONFIG) {
+            if (config.can_id == static_cast<int>(frame->id)) {
+                joint_idx = idx;
+                joint_name = config.name;
+                joint_type = config.type;
+                break;
             }
-            std::cout << std::endl;
+        }
+
+        if (joint_idx < 0) {
+            continue;  // Unknown CAN ID
+        }
+
+        printf("%8.2f  J%d    %-8s", elapsed, joint_idx, joint_type.c_str());
+
+        if (joint_type == "MOTOR_A") {
+            // Parse MotorA feedback
+            if (frame->dlc >= 8) {
+                uint64_t raw = 0;
+                for (int i = 0; i < 8; ++i) {
+                    raw = (raw << 8) | frame->data[i];
+                }
+                uint16_t pos_raw = (raw >> 40) & 0xFFFF;
+                uint16_t vel_raw = (raw >> 28) & 0xFFF;
+                uint16_t cur_raw = (raw >> 16) & 0xFFF;
+                uint8_t temp_raw = (raw >> 8) & 0xFF;
+
+                double pos = (pos_raw / 65535.0) * 25.0 - 12.5;
+                double vel = (vel_raw / 4095.0) * 36.0 - 18.0;
+                double cur = (cur_raw / 4095.0) * 60.0 - 30.0;
+                double temp = (temp_raw - 50) / 2.0;
+
+                printf("  %8.4f  %8.4f  %8.3fA  %5.1fC\n", pos, vel, cur, temp);
+            }
+        } else {
+            // Parse MotorB feedback
+            if (frame->dlc >= 8) {
+                uint16_t pos_raw = (frame->data[1] << 8) | frame->data[2];
+                uint16_t vel_raw = (frame->data[3] << 4) | (frame->data[4] >> 4);
+                uint16_t tor_raw = ((frame->data[4] & 0xF) << 8) | frame->data[5];
+                uint8_t temp_mos = frame->data[6];
+                uint8_t temp_rotor = frame->data[7];
+
+                double pos = (pos_raw / 65535.0) * 25.0 - 12.5;
+                double vel = (vel_raw / 4095.0) * 60.0 - 30.0;
+                double tor = (tor_raw / 4095.0) * 20.0 - 10.0;
+
+                printf("  %8.4f  %8.4f  %8.3fNm  %d/%dC\n", pos, vel, tor,
+                       static_cast<int>(temp_mos), static_cast<int>(temp_rotor));
+            }
         }
     }
 
