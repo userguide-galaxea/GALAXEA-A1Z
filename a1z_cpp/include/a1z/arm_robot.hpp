@@ -166,7 +166,9 @@ private:
     void check_runtime_joint_limits();
 
     // Command validation
-    std::optional<JointVector> clip_joint_pos(const JointVector& pos, double tol_rad = 0.05);
+    std::optional<JointVector> clip_joint_pos(const JointVector& pos,
+                                               const JointVector* q_current = nullptr,
+                                               double tol_rad = 0.05);
     JointVector validate_joint_pos(const JointVector& pos, double tolerance_rad = 0.05);
 
     // Hardware interface

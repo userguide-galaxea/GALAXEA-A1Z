@@ -146,8 +146,13 @@ bool ArmRobot::command_joint_state(const JointCommand& cmd) {
         return false;
     }
 
-    // Validate position
-    auto validated_pos = clip_joint_pos(cmd.pos);
+    // Validate position with circle-unwrap (S¹ topology)
+    JointVector current_pos;
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        current_pos = command_.pos;
+    }
+    auto validated_pos = clip_joint_pos(cmd.pos, &current_pos);
     if (!validated_pos) {
         std::cerr << "[ArmRobot] Command rejected: position out of limits" << std::endl;
         return false;
@@ -526,7 +531,9 @@ void ArmRobot::check_runtime_joint_limits() {
     }
 }
 
-std::optional<JointVector> ArmRobot::clip_joint_pos(const JointVector& pos, double tol_rad) {
+std::optional<JointVector> ArmRobot::clip_joint_pos(const JointVector& pos,
+                                                    const JointVector* q_current,
+                                                    double tol_rad) {
     if (!joint_limits_) {
         return pos;
     }
@@ -537,12 +544,26 @@ std::optional<JointVector> ArmRobot::clip_joint_pos(const JointVector& pos, doub
     for (size_t i = 0; i < 6; ++i) {
         double lo = (*joint_limits_)[i].first;
         double hi = (*joint_limits_)[i].second;
+        double original = pos[i];
 
-        if (pos[i] < lo - tol_rad || pos[i] > hi + tol_rad) {
+        // S¹-topology circle-unwrap: map target to the nearest equivalent on the circle
+        // Joint angles live on a circle. The Leader may represent the same physical
+        // pose with different 2π-shifted values (e.g. wrap across ±π). Find the
+        // equivalent angle closest to the current command position so a small
+        // physical movement never produces a full-stroke jump after clipping.
+        if (q_current != nullptr) {
+            double diff = original - (*q_current)[i];
+            double k = std::round(diff / (2.0 * M_PI));
+            original = original - k * 2.0 * M_PI;
+        }
+
+        if (original < lo - tol_rad || original > hi + tol_rad) {
             rejected = true;
             break;
-        } else if (pos[i] < lo || pos[i] > hi) {
-            result[i] = std::clamp(pos[i], lo, hi);
+        } else if (original < lo || original > hi) {
+            result[i] = std::clamp(original, lo, hi);
+        } else {
+            result[i] = original;
         }
     }
 
@@ -554,7 +575,7 @@ std::optional<JointVector> ArmRobot::clip_joint_pos(const JointVector& pos, doub
 }
 
 JointVector ArmRobot::validate_joint_pos(const JointVector& pos, double tolerance_rad) {
-    auto result = clip_joint_pos(pos, tolerance_rad);
+    auto result = clip_joint_pos(pos, nullptr, tolerance_rad);
     if (!result) {
         throw std::runtime_error("Target joint position out of limits");
     }
