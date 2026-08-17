@@ -1,0 +1,262 @@
+/**
+ * @file motor_diag.cpp
+ * @brief A1Z motor communication diagnostic tool (C++ version)
+ *
+ * Usage:
+ *   motor_diag --scan [--arm-side left|right] [--transport g4ros|socketcan]
+ *   motor_diag --monitor [--arm-side left|right]
+ *   motor_diag --listen [--duration 5]
+ *   motor_diag --probe JOINT_ID
+ */
+
+#include "a1z/transport.hpp"
+#include "a1z/motor_a_driver.hpp"
+#include "a1z/motor_b_driver.hpp"
+
+#include <chrono>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <thread>
+
+using namespace a1z;
+
+// Joint configuration (matches Python version)
+struct JointConfig {
+    std::string name;
+    std::string type;
+    int can_id;
+};
+
+const std::map<int, JointConfig> JOINT_CONFIG = {
+    {0, {"arm_joint1", "MOTOR_A", 0x01}},
+    {1, {"arm_joint2", "MOTOR_A", 0x02}},
+    {2, {"arm_joint3", "MOTOR_A", 0x03}},
+    {3, {"arm_joint4", "MotorB4340", 0x04}},
+    {4, {"arm_joint5", "MotorB4310", 0x05}},
+    {5, {"arm_joint6", "MotorB4310", 0x06}},
+    {6, {"gripper", "MotorB4310", 0x07}},
+};
+
+void print_usage(const char* prog) {
+    std::cout << "Usage: " << prog << " [OPTIONS]\n"
+              << "\nModes:\n"
+              << "  --scan              Scan all motors and check communication\n"
+              << "  --monitor           Continuously monitor motor states\n"
+              << "  --listen            Passively listen to bus messages\n"
+              << "  --probe JOINT_ID    Probe specific joint (enable -> zero cmd -> read -> disable)\n"
+              << "\nOptions:\n"
+              << "  --transport TYPE    Transport type: g4ros (default) or socketcan\n"
+              << "  --arm-side SIDE     Arm side: left (default) or right (g4ros only)\n"
+              << "  --can CHANNEL       CAN channel (default: can0, socketcan only)\n"
+              << "  --duration SECONDS  Duration for listen mode (default: 5)\n"
+              << "  --help              Show this help\n";
+}
+
+int cmd_scan(std::shared_ptr<Transport> transport) {
+    std::cout << "Scanning motors..." << std::endl;
+    std::cout << "===================" << std::endl;
+
+    int found = 0;
+    int missing = 0;
+
+    for (const auto& [joint_idx, config] : JOINT_CONFIG) {
+        std::cout << "Joint " << joint_idx << " (" << config.name
+                  << ", " << config.type << ", CAN ID 0x"
+                  << std::hex << config.can_id << std::dec << "): ";
+
+        // Try to receive feedback
+        auto frame = transport->receive(100);
+        if (frame && frame->id == config.can_id) {
+            std::cout << "OK (feedback received)" << std::endl;
+            found++;
+        } else {
+            std::cout << "NO RESPONSE" << std::endl;
+            missing++;
+        }
+    }
+
+    std::cout << "===================" << std::endl;
+    std::cout << "Found: " << found << ", Missing: " << missing << std::endl;
+    return missing > 0 ? 1 : 0;
+}
+
+int cmd_monitor(std::shared_ptr<Transport> transport) {
+    std::cout << "Monitoring motors (Ctrl+C to exit)..." << std::endl;
+
+    auto motor_a = std::make_shared<MotorA>(0x01, nullptr);
+    auto motor_b = std::make_shared<MotorB>(0x04, nullptr);
+
+    while (true) {
+        auto frame = transport->receive(100);
+        if (frame) {
+            std::cout << "CAN ID 0x" << std::hex << frame->id << std::dec
+                      << " [" << static_cast<int>(frame->dlc) << " bytes]: ";
+            for (int i = 0; i < frame->dlc; ++i) {
+                printf("%02X ", frame->data[i]);
+            }
+            std::cout << std::endl;
+        }
+    }
+
+    return 0;
+}
+
+int cmd_listen(std::shared_ptr<Transport> transport, int duration_s) {
+    std::cout << "Listening to CAN bus for " << duration_s << " seconds..." << std::endl;
+
+    auto start = std::chrono::steady_clock::now();
+    int count = 0;
+
+    while (true) {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - start).count() > duration_s) {
+            break;
+        }
+
+        auto frame = transport->receive(100);
+        if (frame) {
+            std::cout << "CAN ID 0x" << std::hex << frame->id << std::dec
+                      << " [" << static_cast<int>(frame->dlc) << " bytes]: ";
+            for (int i = 0; i < frame->dlc; ++i) {
+                printf("%02X ", frame->data[i]);
+            }
+            std::cout << std::endl;
+            count++;
+        }
+    }
+
+    std::cout << "Received " << count << " messages" << std::endl;
+    return 0;
+}
+
+int cmd_probe(std::shared_ptr<Transport> transport, int joint_id) {
+    auto it = JOINT_CONFIG.find(joint_id);
+    if (it == JOINT_CONFIG.end()) {
+        std::cerr << "Invalid joint ID: " << joint_id << std::endl;
+        return 1;
+    }
+
+    const auto& config = it->second;
+    std::cout << "Probing joint " << joint_id << " (" << config.name << ")..." << std::endl;
+
+    // Enable motor
+    std::cout << "  Enabling..." << std::endl;
+    CanFrame enable_frame;
+    enable_frame.id = config.can_id;
+    enable_frame.dlc = 8;
+    std::memset(enable_frame.data.data(), 0xFF, 7);
+    enable_frame.data[7] = 0xFC;
+    transport->send(enable_frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Send zero MIT command
+    std::cout << "  Sending zero MIT command..." << std::endl;
+    CanFrame mit_frame;
+    mit_frame.id = config.can_id;
+    mit_frame.dlc = 8;
+    std::memset(mit_frame.data.data(), 0, 8);
+    transport->send(mit_frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Read feedback
+    std::cout << "  Reading feedback..." << std::endl;
+    auto frame = transport->receive(500);
+    if (frame && frame->id == config.can_id) {
+        std::cout << "  Feedback received: pos="
+                  << (frame->data[1] << 8 | frame->data[2]) / 65535.0 * 25.0 - 12.5
+                  << " rad" << std::endl;
+    } else {
+        std::cout << "  No feedback received!" << std::endl;
+    }
+
+    // Disable motor
+    std::cout << "  Disabling..." << std::endl;
+    CanFrame disable_frame;
+    disable_frame.id = config.can_id;
+    disable_frame.dlc = 8;
+    std::memset(disable_frame.data.data(), 0xFF, 7);
+    disable_frame.data[7] = 0xFD;
+    transport->send(disable_frame);
+
+    return 0;
+}
+
+int main(int argc, char* argv[]) {
+    std::string transport_type = "g4ros";
+    std::string arm_side = "left";
+    std::string can_channel = "can0";
+    int duration = 5;
+    int probe_joint = -1;
+
+    enum Mode { NONE, SCAN, MONITOR, LISTEN, PROBE };
+    Mode mode = NONE;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--help") {
+            print_usage(argv[0]);
+            return 0;
+        } else if (arg == "--scan") {
+            mode = SCAN;
+        } else if (arg == "--monitor") {
+            mode = MONITOR;
+        } else if (arg == "--listen") {
+            mode = LISTEN;
+        } else if (arg == "--probe" && i + 1 < argc) {
+            mode = PROBE;
+            probe_joint = std::atoi(argv[++i]);
+        } else if (arg == "--transport" && i + 1 < argc) {
+            transport_type = argv[++i];
+        } else if (arg == "--arm-side" && i + 1 < argc) {
+            arm_side = argv[++i];
+        } else if (arg == "--can" && i + 1 < argc) {
+            can_channel = argv[++i];
+        } else if (arg == "--duration" && i + 1 < argc) {
+            duration = std::atoi(argv[++i]);
+        }
+    }
+
+    if (mode == NONE) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    // Create transport
+    std::shared_ptr<Transport> transport;
+    try {
+        if (transport_type == "g4ros") {
+            transport = create_g4ros_transport(arm_side);
+        } else if (transport_type == "socketcan") {
+            transport = create_socketcan_transport(can_channel);
+        } else {
+            std::cerr << "Invalid transport type: " << transport_type << std::endl;
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to create transport: " << e.what() << std::endl;
+        return 1;
+    }
+
+    // Execute command
+    int result = 0;
+    switch (mode) {
+        case SCAN:
+            result = cmd_scan(transport);
+            break;
+        case MONITOR:
+            result = cmd_monitor(transport);
+            break;
+        case LISTEN:
+            result = cmd_listen(transport, duration);
+            break;
+        case PROBE:
+            result = cmd_probe(transport, probe_joint);
+            break;
+        default:
+            break;
+    }
+
+    transport->close();
+    return result;
+}

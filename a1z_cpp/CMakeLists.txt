@@ -99,6 +99,16 @@ if(A1Z_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+# Examples (optional)
+option(A1Z_BUILD_EXAMPLES "Build examples" OFF)
+if(A1Z_BUILD_EXAMPLES)
+    add_executable(motor_diag examples/motor_diag.cpp)
+    target_link_libraries(motor_diag a1z_cpp)
+
+    add_executable(gravity_comp examples/gravity_comp.cpp)
+    target_link_libraries(gravity_comp a1z_cpp)
+endif()
+
 # Install
 install(TARGETS a1z_cpp
     ARCHIVE DESTINATION lib
