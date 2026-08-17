@@ -181,13 +181,13 @@ private:
     double gravity_comp_factor_ = 1.0;
     bool zero_gravity_mode_ = false;
 
-    // Joint configuration
-    JointVector joint_sign_ = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+    // Joint configuration (lemo branch defaults)
+    JointVector joint_sign_ = {1.0, 1.0, -1.0, 1.0, -1.0, 1.0};
     JointVector gravity_torque_scale_ = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
-    JointVector max_gravity_torque_ = {50.0, 50.0, 50.0, 50.0, 50.0, 50.0};
-    JointVector torque_clip_ = {50.0, 50.0, 50.0, 50.0, 50.0, 50.0};
-    JointVector default_kp_ = {30.0, 30.0, 30.0, 20.0, 5.0, 5.0};
-    JointVector default_kd_ = {5.0, 1.0, 1.0, 0.5, 0.5, 0.5};
+    JointVector max_gravity_torque_ = {50.0, 50.0, 50.0, 24.0, 10.0, 10.0};
+    JointVector torque_clip_ = {70.0, 70.0, 70.0, 27.0, 10.0, 10.0};
+    JointVector default_kp_ = {146.9, 62.95, 89.24, 120.0, 40.0, 100.0};
+    JointVector default_kd_ = {5.0, 5.0, 5.0, 2.078, 1.506, 1.255};
     std::optional<std::array<std::pair<double, double>, 6>> joint_limits_;
 
     // Safety limits

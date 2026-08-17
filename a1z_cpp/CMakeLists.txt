@@ -21,6 +21,17 @@ endif()
 # Dependencies
 find_package(Threads REQUIRED)
 
+# Optional: ROS2 for g4ros transport
+find_package(rclcpp QUIET)
+find_package(lemo_main_board QUIET)
+if(rclcpp_FOUND AND lemo_main_board_FOUND)
+    message(STATUS "ROS2 found: g4ros transport enabled")
+    add_definitions(-DA1Z_HAS_ROS2)
+    set(A1Z_ROS2_LIBS rclcpp lemo_main_board)
+else()
+    message(STATUS "ROS2 not found: g4ros transport disabled")
+endif()
+
 # Optional: Pinocchio for gravity compensation
 find_package(pinocchio QUIET)
 if(pinocchio_FOUND)
@@ -52,6 +63,8 @@ set(A1Z_SOURCES
     src/mixed_motor_chain.cpp
     src/gripper.cpp
     src/arm_robot.cpp
+    src/transport_socketcan.cpp
+    src/transport_g4ros.cpp
 )
 
 # Always include gravity_model (has stub when Pinocchio not available)
@@ -63,6 +76,7 @@ add_library(a1z_cpp STATIC ${A1Z_SOURCES})
 target_link_libraries(a1z_cpp
     PUBLIC
         Threads::Threads
+        ${A1Z_ROS2_LIBS}
 )
 
 if(pinocchio_FOUND)

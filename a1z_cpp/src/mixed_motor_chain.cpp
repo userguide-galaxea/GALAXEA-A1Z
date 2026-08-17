@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <thread>
 
 namespace a1z {
 
@@ -10,12 +11,14 @@ MixedMotorChain::MixedMotorChain(std::vector<std::shared_ptr<MotorA>> motor_a_li
                                  std::vector<std::shared_ptr<MotorB>> motor_b_list,
                                  std::vector<int> motor_a_joint_indices,
                                  std::vector<int> motor_b_joint_indices,
-                                 double motor_a_kt)
+                                 double motor_a_kt,
+                                 double inter_cmd_gap_s)
     : motor_a_list_(std::move(motor_a_list))
     , motor_b_list_(std::move(motor_b_list))
     , motor_a_joint_indices_(std::move(motor_a_joint_indices))
     , motor_b_joint_indices_(std::move(motor_b_joint_indices))
-    , motor_a_kt_(motor_a_kt) {
+    , motor_a_kt_(motor_a_kt)
+    , inter_cmd_gap_s_(inter_cmd_gap_s) {
 
     num_motors_ = motor_a_list_.size() + motor_b_list_.size();
 
@@ -51,6 +54,8 @@ void MixedMotorChain::enable_all() {
         motor->enable();
     }
     for (auto& motor : motor_b_list_) {
+        // DaMiao motors may have wrong mode in flash - set MIT mode in RAM
+        motor->set_ctrl_mode(1);
         motor->enable();
     }
 }
@@ -141,7 +146,14 @@ void MixedMotorChain::dispatch_feedback(const CanFrame& frame) {
 void MixedMotorChain::send_commands(const JointVector& pos, const JointVector& vel,
                                     const JointVector& kp, const JointVector& kd,
                                     const JointVector& torque, int motor_a_mode) {
+    bool first = true;
+
     for (size_t i = 0; i < motor_a_list_.size(); ++i) {
+        if (!first && inter_cmd_gap_s_ > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(inter_cmd_gap_s_));
+        }
+        first = false;
         int idx = motor_a_joint_indices_[i];
         motor_a_list_[i]->send_mit_command(
             pos[idx], vel[idx], kp[idx], kd[idx], torque[idx], motor_a_mode
@@ -149,6 +161,11 @@ void MixedMotorChain::send_commands(const JointVector& pos, const JointVector& v
     }
 
     for (size_t i = 0; i < motor_b_list_.size(); ++i) {
+        if (!first && inter_cmd_gap_s_ > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(inter_cmd_gap_s_));
+        }
+        first = false;
         int idx = motor_b_joint_indices_[i];
         motor_b_list_[i]->send_mit_command(
             pos[idx], vel[idx], kp[idx], kd[idx], torque[idx]

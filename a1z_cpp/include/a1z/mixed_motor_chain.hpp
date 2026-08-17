@@ -24,12 +24,15 @@ public:
      * @param motor_a_joint_indices Joint indices for MotorA motors
      * @param motor_b_joint_indices Joint indices for MotorB motors
      * @param motor_a_kt Torque constant for MotorA current->torque conversion
+     * @param inter_cmd_gap_s Delay (s) inserted before each command frame send
+     *        after the first in send_commands (SOP-05/SOP-06 CAN pacing)
      */
     MixedMotorChain(std::vector<std::shared_ptr<MotorA>> motor_a_list,
                     std::vector<std::shared_ptr<MotorB>> motor_b_list,
                     std::vector<int> motor_a_joint_indices,
                     std::vector<int> motor_b_joint_indices,
-                    double motor_a_kt = 2.8);
+                    double motor_a_kt = 2.8,
+                    double inter_cmd_gap_s = 0.0);
 
     /**
      * @brief Get total number of motors/joints.
@@ -108,6 +111,11 @@ public:
      */
     bool all_feedback_fresh(double max_age_s = 0.2) const;
 
+    /**
+     * @brief Get inter-command gap in seconds.
+     */
+    double inter_cmd_gap_s() const { return inter_cmd_gap_s_; }
+
 private:
     struct MotorEntry {
         enum class Type { MotorA, MotorB };
@@ -121,6 +129,7 @@ private:
     std::vector<int> motor_a_joint_indices_;
     std::vector<int> motor_b_joint_indices_;
     double motor_a_kt_;
+    double inter_cmd_gap_s_;
     int num_motors_;
 
     // State arrays
