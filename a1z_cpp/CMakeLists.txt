@@ -27,7 +27,12 @@ find_package(lemo_main_board QUIET)
 if(rclcpp_FOUND AND lemo_main_board_FOUND)
     message(STATUS "ROS2 found: g4ros transport enabled")
     add_definitions(-DA1Z_HAS_ROS2)
-    set(A1Z_ROS2_LIBS rclcpp lemo_main_board)
+    # ROS2 include directories
+    include_directories(${rclcpp_INCLUDE_DIRS})
+    include_directories(${lemo_main_board_INCLUDE_DIRS})
+    # Get ROS2 library directories
+    link_directories(${rclcpp_LIBRARY_DIRS})
+    set(A1Z_ROS2_LIBS ${rclcpp_LIBRARIES} ${lemo_main_board_LIBRARIES})
 else()
     message(STATUS "ROS2 not found: g4ros transport disabled")
 endif()
