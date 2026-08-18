@@ -4,6 +4,8 @@
 #include "a1z/mixed_motor_chain.hpp"
 #include "a1z/gravity_model.hpp"
 #include "a1z/gripper.hpp"
+#include "a1z/integrator.hpp"
+#include "a1z/friction.hpp"
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -120,6 +122,16 @@ public:
     ControlState control_state() const;
 
     /**
+     * @brief Latched fault code ("" when no fault is active).
+     */
+    std::string fault_code() const { return fault_code_; }
+
+    /**
+     * @brief Human-readable reason of the latched fault.
+     */
+    std::string fault_reason() const { return fault_reason_; }
+
+    /**
      * @brief Set target joint state.
      * @param cmd Joint command with pos, vel, and optional kp, kd, acc, torque_ff
      * @return true if command was accepted
@@ -173,6 +185,72 @@ public:
     void set_gravity_mode(bool enabled);
 
     /**
+     * @brief Smoothly interpolate to a target position at the given speed.
+     *
+     * Blocking minimum-jerk interpolation at the control period (port of
+     * Python ArmRobot.move_joints). Returns early if an estop/fault latches
+     * mid-trajectory.
+     *
+     * @param target_pos Target joint angles (rad), within joint limits
+     * @param speed Max joint speed (rad/s); the minimum-jerk peak velocity
+     *              (1.875 x speed) must stay under the 4.0 rad/s feedforward cap
+     * @param kp Optional PD gain override (nullptr = default)
+     * @param kd Optional PD gain override (nullptr = default)
+     * @param max_jump_rad If set, refuse to move when any joint is farther
+     *                     than this from the *measured* position (e.g. to
+     *                     reject elbow-flipped IK solutions)
+     * @throws std::invalid_argument on invalid speed/gains/max_jump_rad,
+     *         std::runtime_error when the target exceeds joint limits
+     */
+    void move_joints(const JointVector& target_pos, double speed = 0.5,
+                     const JointVector* kp = nullptr,
+                     const JointVector* kd = nullptr,
+                     std::optional<double> max_jump_rad = std::nullopt);
+
+    /**
+     * @brief Toggle gripper free-drive (zero-torque) mode for hand teaching.
+     *
+     * When enabled, the control loop sends Gripper::free_drive_step()
+     * instead of step(), so the jaw produces no torque while feedback
+     * continues to stream. No-op without an attached gripper.
+     */
+    void set_gripper_free_drive(bool enabled);
+
+    /**
+     * @brief Atomically swap the error-integral config and zero the
+     * accumulator (SOP-09 W2). std::nullopt disables the integrator.
+     *
+     * The integrator only serves the streaming command_joint_state tracker;
+     * every non-streaming entry (command_joint_pos, move_joints,
+     * set_gravity_mode) and every fault path resets it.
+     */
+    void set_integral_config(std::optional<IntegralConfig> cfg);
+
+    /**
+     * @brief Zero the integral accumulator without changing the config.
+     */
+    void reset_integral();
+
+    /**
+     * @brief Atomically swap the tanh-smoothed Coulomb feedforward config
+     * (SOP-11 section 7.2); std::nullopt disables. Clears the legacy
+     * hard-sign array.
+     */
+    void set_coulomb_config(std::optional<CoulombConfig> cfg);
+
+    /**
+     * @brief Set the legacy bare-array Coulomb feedforward amplitude (Nm),
+     * applied as sign(cmd.pos - q) * ff in the torque sum; std::nullopt
+     * disables. Clears the tanh-smoothed config.
+     */
+    void set_coulomb_ff(std::optional<JointVector> ff);
+
+    /**
+     * @brief Last tau_i folded into the torque sum (bookkeeping, SOP-09).
+     */
+    JointVector last_tau_i() const;
+
+    /**
      * @brief Enable/disable recording for teaching.
      */
     void set_recording(bool enable);
@@ -208,6 +286,11 @@ private:
                                                const JointVector* q_current = nullptr,
                                                double tol_rad = 0.05);
     JointVector validate_joint_pos(const JointVector& pos, double tolerance_rad = 0.05);
+
+    // Zero the error integrator (nullptr-safe). Called by every non-streaming
+    // command entry and fault path so the integral only serves the streaming
+    // command_joint_state tracker (SOP-09 W4).
+    void reset_integral_state();
 
     // Hardware interface
     std::shared_ptr<MixedMotorChain> motor_chain_;
@@ -246,6 +329,19 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> estop_latch_{false};
     std::atomic<bool> commands_blocked_{true};
+
+    // Error-integral feedforward (SOP-09 W2); nullptr = disabled. Swapped
+    // under command_mutex_; the control loop works on a copied shared_ptr.
+    std::shared_ptr<JointErrorIntegrator> integrator_;
+    JointVector last_tau_i_ = {};  // guarded by state_mutex_
+
+    // Coulomb friction feedforward (S1): tanh-smoothed config or legacy
+    // hard-sign array; both swapped under command_mutex_.
+    std::optional<CoulombConfig> coulomb_config_;
+    std::optional<JointVector> coulomb_ff_;
+
+    // Gripper free-drive toggle (read by the control loop each tick).
+    std::atomic<bool> gripper_free_drive_{false};
 
     // Threading
     std::thread control_thread_;

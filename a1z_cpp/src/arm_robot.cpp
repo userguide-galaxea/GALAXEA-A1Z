@@ -7,6 +7,15 @@
 
 namespace a1z {
 
+namespace {
+// Command feedforward caps (Python arm_robot.py module constants
+// _MAX_CMD_VEL_RAD_S / _MAX_CMD_ACC_RAD_S2 / _MAX_CMD_KP / _MAX_CMD_KD).
+constexpr double MAX_CMD_VEL_RAD_S = 4.0;
+constexpr double MAX_CMD_ACC_RAD_S2 = 20.0;
+constexpr double MAX_CMD_KP = 200.0;
+constexpr double MAX_CMD_KD = 5.0;
+} // namespace
+
 ArmRobot::ArmRobot(std::shared_ptr<MixedMotorChain> motor_chain,
                    std::shared_ptr<GravityModel> gravity_model,
                    std::shared_ptr<Gripper> gripper,
@@ -224,7 +233,13 @@ bool ArmRobot::command_joint_pos(const JointVector& pos) {
     cmd.kp = default_kp_;
     cmd.kd = default_kd_;
     cmd.torque_ff.fill(0.0);
-    return command_joint_state(cmd);
+    bool ok = command_joint_state(cmd);
+    if (ok) {
+        // Non-streaming entry: the integral only serves the streaming
+        // command_joint_state tracker (Python parity, SOP-09 W4).
+        reset_integral_state();
+    }
+    return ok;
 }
 
 JointState ArmRobot::get_joint_state() {
@@ -251,6 +266,7 @@ void ArmRobot::estop() {
     estop_latch_ = true;
     commands_blocked_ = true;
     set_fault_state(ControlState::SOFT_ESTOP, "MANUAL_ESTOP", "manual soft estop");
+    reset_integral_state();
     std::cout << "[ArmRobot] Emergency stop engaged" << std::endl;
 }
 
@@ -267,6 +283,7 @@ void ArmRobot::release() {
     estop_latch_ = false;
     commands_blocked_ = false;
     set_fault_state(ControlState::RUNNING, "", "");
+    reset_integral_state();
     std::cout << "[ArmRobot] Emergency stop released" << std::endl;
 }
 
@@ -296,7 +313,212 @@ void ArmRobot::set_gravity_mode(bool enabled) {
         }
     }
     zero_gravity_mode_ = enabled;
+    reset_integral_state();
 }
+
+void ArmRobot::move_joints(const JointVector& target_pos, double speed,
+                           const JointVector* kp, const JointVector* kd,
+                           std::optional<double> max_jump_rad) {
+    if (commands_blocked_) {
+        std::cerr << "[ArmRobot] move_joints rejected: robot is in estop"
+                  << std::endl;
+        return;
+    }
+    // Minimum-jerk peak velocity is 1.875 x average. Reject upfront so we
+    // never generate a feedforward that the update() check would refuse.
+    if (!std::isfinite(speed) || speed <= 0.0) {
+        throw std::invalid_argument("move_joints speed must be > 0");
+    }
+    if (speed * 1.875 > MAX_CMD_VEL_RAD_S) {
+        throw std::invalid_argument(
+            "move_joints speed exceeds feedforward cap: peak vel " +
+            std::to_string(speed * 1.875) + " > " +
+            std::to_string(MAX_CMD_VEL_RAD_S) + " rad/s");
+    }
+
+    JointVector target = validate_joint_pos(target_pos);
+
+    // Gain overrides validated before they reach shared state.
+    JointVector kp_cmd = kp != nullptr ? *kp : default_kp_;
+    JointVector kd_cmd = kd != nullptr ? *kd : default_kd_;
+    for (size_t i = 0; i < 6; ++i) {
+        if (!std::isfinite(kp_cmd[i]) || kp_cmd[i] < 0.0 ||
+            kp_cmd[i] > MAX_CMD_KP) {
+            throw std::invalid_argument(
+                "move_joints kp must be within [0, " +
+                std::to_string(MAX_CMD_KP) + "]");
+        }
+        if (!std::isfinite(kd_cmd[i]) || kd_cmd[i] < 0.0 ||
+            kd_cmd[i] > MAX_CMD_KD) {
+            throw std::invalid_argument(
+                "move_joints kd must be within [0, " +
+                std::to_string(MAX_CMD_KD) + "]");
+        }
+    }
+
+    // The jump guard uses the *measured* position — this is what
+    // max_jump_rad actually protects (e.g. catching elbow-flipped IK
+    // against reality).
+    JointVector measured = get_joint_state().pos;
+    if (max_jump_rad.has_value()) {
+        double limit = *max_jump_rad;
+        if (!std::isfinite(limit) || limit < 0.0) {
+            throw std::invalid_argument(
+                "max_jump_rad must be finite and >= 0");
+        }
+        for (size_t i = 0; i < 6; ++i) {
+            double jump = std::abs(target[i] - measured[i]);
+            if (jump > limit) {
+                throw std::invalid_argument(
+                    "Target too far from current position (max_jump_rad=" +
+                    std::to_string(limit) + "), refusing to move: joint " +
+                    std::to_string(i + 1) + " off by " +
+                    std::to_string(jump) + " rad");
+            }
+        }
+    }
+
+    // Trajectory start uses the *last commanded* position so back-to-back
+    // move_joints calls keep command-space continuity. Using the measured
+    // position here would inject a backwards step equal to the PD tracking
+    // error between consecutive moves, which the PD loop sees as a jerk.
+    JointVector current;
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        if (commands_blocked_) {
+            std::cerr << "[ArmRobot] move_joints rejected while entering a fault"
+                      << std::endl;
+            return;
+        }
+        current = command_.pos;
+    }
+
+    JointVector delta;
+    double max_dist = 0.0;
+    for (size_t i = 0; i < 6; ++i) {
+        delta[i] = target[i] - current[i];
+        max_dist = std::max(max_dist, std::abs(delta[i]));
+    }
+    if (max_dist < 0.001) {
+        return;
+    }
+
+    // Minimum-jerk peak acc is about 5.7735*delta/duration^2. A re-command of
+    // an already-reached pose (tiny delta) or a high-speed short-distance
+    // move would otherwise spike past the feedforward cap. Clamp duration
+    // from below by (a) the fixed MIN_MOVE_DURATION_S and (b)
+    // sqrt(6*delta/MAX_ACC) — the slight over-estimate of the 5.7735
+    // coefficient gives ~4% acc headroom for float epsilon. The vel cap is
+    // already guaranteed by the speed pre-check above.
+    const double MIN_MOVE_DURATION_S = 0.3;
+    double acc_dur = std::sqrt(6.0 * max_dist / MAX_CMD_ACC_RAD_S2);
+    double duration = std::max({max_dist / speed, acc_dur, MIN_MOVE_DURATION_S});
+    double dt = control_period_s_;
+    int steps = std::max(1, static_cast<int>(duration / dt));
+
+    for (int step = 1; step <= steps; ++step) {
+        if (commands_blocked_) {
+            std::cerr << "[ArmRobot] move_joints aborted mid-trajectory: "
+                         "estop engaged" << std::endl;
+            return;
+        }
+        double t = static_cast<double>(step) / steps;
+        // Minimum-jerk profile: pos and vel are zero at t=0 and t=1.
+        double t2 = t * t;
+        double t3 = t2 * t;
+        double t4 = t3 * t;
+        double t5 = t4 * t;
+        double alpha = 10.0 * t3 - 15.0 * t4 + 6.0 * t5;
+        double alpha_dot = (30.0 * t2 - 60.0 * t3 + 30.0 * t4) / duration;
+        double alpha_ddot = (60.0 * t - 180.0 * t2 + 120.0 * t3) /
+                            (duration * duration);
+        {
+            std::lock_guard<std::mutex> lock(command_mutex_);
+            if (commands_blocked_) {
+                std::cerr << "[ArmRobot] move_joints aborted while entering a "
+                             "fault" << std::endl;
+                return;
+            }
+            for (size_t i = 0; i < 6; ++i) {
+                command_.pos[i] = current[i] + alpha * delta[i];
+                command_.vel[i] = alpha_dot * delta[i];
+                command_.acc[i] = alpha_ddot * delta[i];
+            }
+            command_.kp = kp_cmd;
+            command_.kd = kd_cmd;
+        }
+        std::this_thread::sleep_for(std::chrono::duration<double>(dt));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        if (commands_blocked_) {
+            return;
+        }
+        command_.pos = target;
+        command_.vel.fill(0.0);
+        command_.acc.fill(0.0);
+    }
+    reset_integral_state();
+}
+
+void ArmRobot::set_gripper_free_drive(bool enabled) {
+    if (!gripper_) {
+        return;
+    }
+    gripper_free_drive_ = enabled;
+}
+
+void ArmRobot::reset_integral_state() {
+    {
+        std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+        if (integrator_) {
+            integrator_->reset();
+        }
+    }
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    last_tau_i_.fill(0.0);
+}
+
+void ArmRobot::set_integral_config(std::optional<IntegralConfig> cfg) {
+    // Swap under the command lock so a mid-run level switch never mixes old
+    // accumulator state with new gains.
+    {
+        std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+        if (cfg.has_value()) {
+            integrator_ =
+                std::make_shared<JointErrorIntegrator>(*cfg, control_period_s_);
+        } else {
+            integrator_.reset();
+        }
+    }
+    reset_integral_state();
+}
+
+void ArmRobot::reset_integral() {
+    reset_integral_state();
+}
+
+void ArmRobot::set_coulomb_config(std::optional<CoulombConfig> cfg) {
+    // Same command-lock discipline as set_integral_config: the config is
+    // read on every control cycle, so a mid-run switch must never mix a
+    // partially-updated config into a command.
+    std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+    coulomb_config_ = std::move(cfg);
+    coulomb_ff_.reset();
+}
+
+void ArmRobot::set_coulomb_ff(std::optional<JointVector> ff) {
+    std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+    coulomb_ff_ = ff;
+    coulomb_config_.reset();
+}
+
+JointVector ArmRobot::last_tau_i() const {
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    return last_tau_i_;
+}
+
 
 void ArmRobot::set_recording(bool enable) {
     std::lock_guard<std::mutex> lock(record_mutex_);
@@ -415,11 +637,18 @@ void ArmRobot::update() {
         }
     }
 
-    // 4) Get current command
+    // 4) Get current command (plus the feedforward configs under the same
+    // lock — a mid-run config swap must never mix into a command)
     JointCommand cmd;
+    std::shared_ptr<JointErrorIntegrator> integrator;
+    std::optional<CoulombConfig> coulomb_config;
+    std::optional<JointVector> coulomb_ff;
     {
         std::lock_guard<std::mutex> lock(command_mutex_);
         cmd = command_;
+        integrator = integrator_;
+        coulomb_config = coulomb_config_;
+        coulomb_ff = coulomb_ff_;
     }
 
     // 5) Validate command/feedback finiteness (Python parity)
@@ -465,17 +694,52 @@ void ArmRobot::update() {
         }
     }
 
-    // 7) Combine torques
+    // 7) Error-integral feedforward (SOP-09 W2). e = q_des - q_meas, both in
+    // the URDF frame. Only accumulates on the streaming tracker and never
+    // while estopped; steps at the control rate. tau_i (already clamped to
+    // +/-tau_i_max inside the integrator) joins the torque sum below — ahead
+    // of x joint_sign and torque_clip, so it is frame-correct and the global
+    // clip stays the mechanical backstop for a runaway (Python parity:
+    // _send_command_and_cache_hold_locked).
+    JointVector tau_i = {};
+    if (integrator && !estop_latch_) {
+        JointVector e;
+        for (size_t i = 0; i < 6; ++i) {
+            e[i] = cmd.pos[i] - state_.pos[i];
+        }
+        tau_i = integrator->step(e, cmd.vel);
+    }
+    {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        last_tau_i_ = tau_i;
+    }
+
+    // 8) Coulomb friction feedforward (S1): two paths — CoulombConfig
+    // (tanh-smoothed) or bare array (hard sign, legacy); zero while estopped.
+    JointVector tau_c = {};
+    if (!estop_latch_) {
+        if (coulomb_config.has_value()) {
+            tau_c = coulomb_config->compute_tau(cmd.vel);
+        } else if (coulomb_ff.has_value()) {
+            for (size_t i = 0; i < 6; ++i) {
+                double e = cmd.pos[i] - state_.pos[i];
+                double s = (e > 0.0) ? 1.0 : (e < 0.0 ? -1.0 : 0.0);
+                tau_c[i] = s * (*coulomb_ff)[i];
+            }
+        }
+    }
+
+    // 9) Combine torques
     JointVector motor_torques;
     for (size_t i = 0; i < 6; ++i) {
-        double torque_urdf = cmd.torque_ff[i] + tau_id[i];
+        double torque_urdf = cmd.torque_ff[i] + tau_i[i] + tau_c[i] + tau_id[i];
         motor_torques[i] = std::clamp(
             torque_urdf * joint_sign_[i],
             -torque_clip_[i], torque_clip_[i]
         );
     }
 
-    // 8) Safe-hold fallback frame: with any feedforward motion in the
+    // 10) Safe-hold fallback frame: with any feedforward motion in the
     // command, the fallback is gravity-only at the measured pose (Python
     // _static_hold_motor_torque); otherwise it is the frame just sent.
     JointVector safe_torque = motor_torques;
@@ -503,7 +767,7 @@ void ArmRobot::update() {
         }
     }
 
-    // 9) Send commands to motor chain
+    // 11) Send commands to motor chain
     JointVector motor_pos, motor_vel;
     for (size_t i = 0; i < 6; ++i) {
         motor_pos[i] = cmd.pos[i] * joint_sign_[i];
@@ -512,7 +776,7 @@ void ArmRobot::update() {
 
     motor_chain_->send_commands(motor_pos, motor_vel, cmd.kp, cmd.kd, motor_torques);
 
-    // 10) Cache the sent command and its gravity-only fallback for the
+    // 12) Cache the sent command and its gravity-only fallback for the
     // recoverable-fault policy
     {
         std::lock_guard<std::mutex> lock(command_mutex_);
@@ -525,7 +789,7 @@ void ArmRobot::update() {
         last_safe_hold_frame_.torque = safe_torque;
     }
 
-    // 11) Send gripper command
+    // 13) Send gripper command
     if (gripper_) {
         // SOP-06: leave a bus slot for the last arm motor's feedback before
         // the gripper frame, same as the Python SDK.
@@ -533,7 +797,13 @@ void ArmRobot::update() {
         if (gap > 0) {
             std::this_thread::sleep_for(std::chrono::duration<double>(gap));
         }
-        gripper_->step();
+        // Free-drive toggle (Python _gripper_free_drive): zero-torque frame
+        // for hand teaching instead of the position-tracking hybrid frame.
+        if (gripper_free_drive_) {
+            gripper_->free_drive_step();
+        } else {
+            gripper_->step();
+        }
     }
 }
 
@@ -789,6 +1059,7 @@ void ArmRobot::hold_position(const std::string& reason,
         command_.torque_ff.fill(0.0);
     }
     set_fault_state(ControlState::FAULT_HOLD, fault_code, reason);
+    reset_integral_state();
     std::cerr << "[ArmRobot] Fault hold engaged (" << fault_code << "): "
               << reason << std::endl;
 }

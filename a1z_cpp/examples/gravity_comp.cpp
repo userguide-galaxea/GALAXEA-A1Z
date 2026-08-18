@@ -113,8 +113,13 @@ int main(int argc, char* argv[]) {
     std::vector<std::shared_ptr<MotorB>> motor_b_list;
 
     // MotorA: joints 1-3 (CAN ID 0x01-0x03)
+    // Torque range ±70, matching the Python SDK's get_robot._MOTOR_A_RANGES
+    // (the driver default ±90 mis-scales torque feedforward).
+    MotorARanges motor_a_ranges;
+    motor_a_ranges.torque_min = -70.0;
+    motor_a_ranges.torque_max = 70.0;
     for (int i = 1; i <= 3; ++i) {
-        auto motor = std::make_shared<MotorA>(i, transport, MotorARanges(),
+        auto motor = std::make_shared<MotorA>(i, transport, motor_a_ranges,
                                               /*use_new_enable_protocol=*/true);
         motor_a_list.push_back(motor);
     }
