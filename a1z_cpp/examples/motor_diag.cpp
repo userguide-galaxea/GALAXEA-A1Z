@@ -53,46 +53,57 @@ void print_usage(const char* prog) {
               << "  --help              Show this help\n";
 }
 
-// MotorA enable/disable use the 0x7FF broadcast config frame
-// ([id_hi, id_lo, 0x00, cmd], no reply); MotorB uses per-ID 0xFC/0xFD.
-static void send_enable_frame(Transport& transport, const JointConfig& config) {
-    CanFrame frame;
-    if (config.type == "MOTOR_A") {
-        frame.id = 0x7FF;
-        frame.dlc = 4;
-        frame.data[0] = (config.can_id >> 8) & 0xFF;
-        frame.data[1] = config.can_id & 0xFF;
-        frame.data[2] = 0x00;
-        frame.data[3] = 0x01;  // enable
-    } else {
-        frame.id = config.can_id;
-        frame.dlc = 8;
-        std::memset(frame.data.data(), 0xFF, 7);
-        frame.data[7] = 0xFC;
-    }
-    transport.send(frame);
-}
+// Probe one motor through the SDK drivers, using the same zero-gain probe
+// the Python SDK sends at startup (kp=0, kd=0.05, pos=0 properly encoded).
+// NEVER hand-craft an all-zero MIT frame: raw-zero fields can be treated by
+// the firmware as "keep previous value" — a stale nonzero kp/kd combined
+// with p_des at the range endpoint drives the joint to its limit.
+// MotorB gets set_ctrl_mode(1) before enable, mirroring Python enable_all.
+static bool probe_motor(std::shared_ptr<Transport> transport,
+                        const JointConfig& config, double* pos_out) {
+    bool got = false;
 
-static void send_disable_frame(Transport& transport, const JointConfig& config) {
-    CanFrame frame;
     if (config.type == "MOTOR_A") {
-        frame.id = 0x7FF;
-        frame.dlc = 4;
-        frame.data[0] = (config.can_id >> 8) & 0xFF;
-        frame.data[1] = config.can_id & 0xFF;
-        frame.data[2] = 0x00;
-        frame.data[3] = 0x02;  // disable
-    } else {
-        frame.id = config.can_id;
-        frame.dlc = 8;
-        std::memset(frame.data.data(), 0xFF, 7);
-        frame.data[7] = 0xFD;
+        MotorA motor(config.can_id, transport, MotorARanges(),
+                     /*use_new_enable_protocol=*/true);
+        motor.enable();
+        motor.send_mit_command(0.0, 0.0, 0.0, 0.05, 0.0);
+        for (int retry = 0; retry < 10 && !got; ++retry) {
+            auto frame = transport->receive(20);
+            if (frame && frame->id == static_cast<uint32_t>(config.can_id)) {
+                auto fb = motor.parse_feedback(*frame);
+                if (fb && fb->valid_position) {
+                    *pos_out = fb->position;
+                    got = true;
+                }
+            }
+        }
+        motor.disable();
+        return got;
     }
-    transport.send(frame);
+
+    MotorB motor(config.can_id, transport);
+    motor.set_ctrl_mode(1);  // MIT mode
+    motor.enable();
+    motor.send_mit_command(0.0, 0.0, 0.0, 0.05, 0.0);
+    for (int retry = 0; retry < 10 && !got; ++retry) {
+        auto frame = transport->receive(20);
+        if (frame && frame->id == static_cast<uint32_t>(config.can_id)) {
+            auto fb = motor.parse_feedback(*frame);
+            if (fb) {
+                *pos_out = fb->position;
+                got = true;
+            }
+        }
+    }
+    motor.disable();
+    return got;
 }
 
 int cmd_scan(std::shared_ptr<Transport> transport) {
     std::cout << "Scanning motors..." << std::endl;
+    std::cout << "NOTE: each motor is enabled briefly with zero gains — "
+                 "keep the arm supported." << std::endl;
     std::cout << "===================" << std::endl;
 
     int found = 0;
@@ -103,57 +114,14 @@ int cmd_scan(std::shared_ptr<Transport> transport) {
                   << ", " << config.type << ", CAN ID 0x"
                   << std::hex << config.can_id << std::dec << "): ";
 
-        // Send enable command to trigger feedback
-        send_enable_frame(*transport, config);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-        // MotorA enable is a broadcast frame with no reply, so request
-        // feedback with a zero MIT command (kp=kd=0 -> no torque).
-        CanFrame mit_frame;
-        mit_frame.id = config.can_id;
-        mit_frame.dlc = 8;
-        std::memset(mit_frame.data.data(), 0, 8);
-        transport->send(mit_frame);
-
-        // Wait for feedback (up to 200ms)
-        bool got_feedback = false;
-        for (int retry = 0; retry < 10; ++retry) {
-            auto frame = transport->receive(20);
-            if (frame && frame->id == static_cast<uint32_t>(config.can_id)) {
-                std::cout << "OK";
-                if (config.type == "MOTOR_A") {
-                    // Parse MotorA feedback
-                    if (frame->dlc >= 8) {
-                        uint64_t raw = 0;
-                        for (int i = 0; i < 8; ++i) {
-                            raw = (raw << 8) | frame->data[i];
-                        }
-                        uint16_t pos_raw = (raw >> 40) & 0xFFFF;
-                        double pos = (pos_raw / 65535.0) * 25.0 - 12.5;
-                        std::cout << " (pos=" << pos << " rad)";
-                    }
-                } else {
-                    // Parse MotorB feedback
-                    if (frame->dlc >= 8) {
-                        uint16_t pos_raw = (frame->data[1] << 8) | frame->data[2];
-                        double pos = (pos_raw / 65535.0) * 25.0 - 12.5;
-                        std::cout << " (pos=" << pos << " rad)";
-                    }
-                }
-                std::cout << std::endl;
-                got_feedback = true;
-                found++;
-                break;
-            }
-        }
-
-        if (!got_feedback) {
+        double pos = 0.0;
+        if (probe_motor(transport, config, &pos)) {
+            std::cout << "OK (pos=" << pos << " rad)" << std::endl;
+            found++;
+        } else {
             std::cout << "NO RESPONSE" << std::endl;
             missing++;
         }
-
-        // Disable the motor again so scan leaves nothing enabled.
-        send_disable_frame(*transport, config);
 
         // Small delay between motors
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -279,34 +247,15 @@ int cmd_probe(std::shared_ptr<Transport> transport, int joint_id) {
     const auto& config = it->second;
     std::cout << "Probing joint " << joint_id << " (" << config.name << ")..." << std::endl;
 
-    // Enable motor
-    std::cout << "  Enabling..." << std::endl;
-    send_enable_frame(*transport, config);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Send zero MIT command
-    std::cout << "  Sending zero MIT command..." << std::endl;
-    CanFrame mit_frame;
-    mit_frame.id = config.can_id;
-    mit_frame.dlc = 8;
-    std::memset(mit_frame.data.data(), 0, 8);
-    transport->send(mit_frame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Read feedback
-    std::cout << "  Reading feedback..." << std::endl;
-    auto frame = transport->receive(500);
-    if (frame && frame->id == config.can_id) {
-        std::cout << "  Feedback received: pos="
-                  << (frame->data[1] << 8 | frame->data[2]) / 65535.0 * 25.0 - 12.5
-                  << " rad" << std::endl;
+    std::cout << "  Enabling and sending zero-gain probe (kp=0, kd=0.05)..." << std::endl;
+    double pos = 0.0;
+    if (probe_motor(transport, config, &pos)) {
+        std::cout << "  Feedback received: pos=" << pos << " rad" << std::endl;
     } else {
         std::cout << "  No feedback received!" << std::endl;
+        return 1;
     }
-
-    // Disable motor
-    std::cout << "  Disabling..." << std::endl;
-    send_disable_frame(*transport, config);
+    std::cout << "  Disabled." << std::endl;
 
     return 0;
 }
