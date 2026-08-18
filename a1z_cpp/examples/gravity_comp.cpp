@@ -15,8 +15,10 @@
 #include "a1z/gravity_model.hpp"
 #include "a1z/gripper.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdlib>
 #include <fstream>
@@ -234,7 +236,35 @@ int main(int argc, char* argv[]) {
             std::cout << "] rad" << std::flush;
         }
 
-        std::cout << "\n\nStopping robot..." << std::endl;
+        std::cout << "\n\nReturning to zero pose before stop..." << std::endl;
+        // Python example parity: move to the zero pose with position-hold
+        // gains before disabling, so the arm does not drop on power-off.
+        robot->set_gravity_mode(false);
+        {
+            JointState state = robot->get_joint_state();
+            double max_dist = 0.0;
+            for (size_t i = 0; i < 6; ++i) {
+                max_dist = std::max(max_dist, std::abs(state.pos[i]));
+            }
+            const double speed = 0.3;  // rad/s
+            double duration = max_dist / speed;
+            for (double t = 0.02; t < duration; t += 0.02) {
+                JointVector target;
+                double s = t / duration;
+                for (size_t i = 0; i < 6; ++i) {
+                    target[i] = state.pos[i] * (1.0 - s);
+                }
+                if (!robot->command_joint_pos(target)) {
+                    break;  // commands blocked (fault hold) — just stop
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            JointVector zero = {};
+            robot->command_joint_pos(zero);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        std::cout << "Stopping robot..." << std::endl;
         robot->stop();
 
     } catch (const std::exception& e) {
