@@ -9,11 +9,40 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace a1z {
+
+/**
+ * @brief Recoverable control fault (transient CAN error, stale feedback,
+ * inverse-dynamics failure, ...).
+ *
+ * The control loop holds the last safely transmitted command and retries;
+ * only if the fault persists does it escalate to a latched FAULT_HOLD.
+ * Matches the Python SDK's RecoverableControlFault policy.
+ */
+class RecoverableControlFault : public std::runtime_error {
+public:
+    explicit RecoverableControlFault(const std::string& msg,
+                                     std::string fault_code = "CONTROL_FAULT")
+        : std::runtime_error(msg), fault_code_(std::move(fault_code)) {}
+    const std::string& fault_code() const { return fault_code_; }
+
+private:
+    std::string fault_code_;
+};
+
+/**
+ * @brief Hard safety fault (motor fault, over-temperature, non-finite
+ * feedback, ...). The control loop disables the motors immediately.
+ */
+class HardSafetyFault : public std::runtime_error {
+public:
+    explicit HardSafetyFault(const std::string& msg) : std::runtime_error(msg) {}
+};
 
 /**
  * @brief Joint command structure.
@@ -243,10 +272,43 @@ private:
     std::string fault_code_;
     std::string fault_reason_;
 
+    // Fault policy (Python parity): a recoverable error holds the last
+    // safely sent command and resends the cached gravity-only hold frame;
+    // only after RECOVERABLE_TIMEOUT_S of continuous failure does it latch
+    // FAULT_HOLD (position hold at the measured pose, loop stays alive).
+    // Hard faults still disable immediately — the arm has no brake, so
+    // dropping power is reserved for confirmed hardware/safety faults.
+    static constexpr double RECOVERABLE_TIMEOUT_S = 0.2;
+
+    // Motor-space frame cached after every successful send; resent while a
+    // recoverable fault is being retried.
+    struct MotorCommandFrame {
+        JointVector pos = {};
+        JointVector vel = {};
+        JointVector kp = {};
+        JointVector kd = {};
+        JointVector torque = {};
+    };
+
+    void write_last_sent_hold_locked();  // caller owns command_mutex_
+    void resend_last_safe_hold();
+    void hold_position(const std::string& reason,
+                       const std::string& fault_code);
+    // Returns true if the loop should continue. Sets recoverable_since on
+    // first error; clears semantics handled by caller.
+    bool handle_control_exception(const std::exception& e,
+                                  std::chrono::steady_clock::time_point& recoverable_since,
+                                  bool& recoverable_active);
+
     // Helper
     double now_seconds() const;
     void set_fault_state(ControlState state, const std::string& code, const std::string& reason);
     void send_zero_torque_and_disable();
+
+    // Last successfully transmitted command and its gravity-only fallback
+    JointCommand last_sent_command_;
+    MotorCommandFrame last_safe_hold_frame_;
+    bool has_sent_command_ = false;
 };
 
 } // namespace a1z

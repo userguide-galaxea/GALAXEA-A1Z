@@ -233,14 +233,40 @@ JointState ArmRobot::get_joint_state() {
 }
 
 void ArmRobot::estop() {
+    // Python parity: atomically pin the target to the measured pose with
+    // kp=0 and halved kd; gravity compensation keeps running so the arm
+    // does not collapse under load.
+    {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+        command_.pos = state_.pos;
+        command_.vel.fill(0.0);
+        command_.acc.fill(0.0);
+        command_.kp.fill(0.0);
+        for (size_t i = 0; i < 6; ++i) {
+            command_.kd[i] = default_kd_[i] * 0.5;
+        }
+        command_.torque_ff.fill(0.0);
+    }
     estop_latch_ = true;
     commands_blocked_ = true;
+    set_fault_state(ControlState::SOFT_ESTOP, "MANUAL_ESTOP", "manual soft estop");
     std::cout << "[ArmRobot] Emergency stop engaged" << std::endl;
 }
 
 void ArmRobot::release() {
+    // Re-anchor the target at the measured pose before accepting commands.
+    {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+        command_.pos = state_.pos;
+        command_.vel.fill(0.0);
+        command_.acc.fill(0.0);
+        command_.torque_ff.fill(0.0);
+    }
     estop_latch_ = false;
     commands_blocked_ = false;
+    set_fault_state(ControlState::RUNNING, "", "");
     std::cout << "[ArmRobot] Emergency stop released" << std::endl;
 }
 
@@ -293,24 +319,33 @@ void ArmRobot::clear_recording() {
 
 void ArmRobot::control_loop() {
     const double FREQ_CHECK_INTERVAL = 2.0;  // Check frequency every 2s
-    const int MAX_SLOW_PERIODS = 3;          // Emergency stop after 3 consecutive slow periods
+    const int MAX_SLOW_PERIODS = 3;          // Position hold after 3 consecutive slow periods
 
     auto last_check_time = std::chrono::steady_clock::now();
     int iteration_count = 0;
     int consecutive_slow = 0;
+    bool recoverable_active = false;
+    auto recoverable_since = std::chrono::steady_clock::now();
 
     while (!stop_requested_) {
         auto loop_start = std::chrono::steady_clock::now();
 
         try {
             update();
-        } catch (const std::exception& e) {
-            std::cerr << "[ArmRobot] Control loop error: " << e.what() << std::endl;
-            std::cerr << "[ArmRobot] Emergency stop!" << std::endl;
+            recoverable_active = false;
+        } catch (const HardSafetyFault& e) {
+            // Confirmed hardware/safety fault: the only case where cutting
+            // power is safer than holding (the arm has no brake).
+            std::cerr << "[ArmRobot] Hard safety fault: " << e.what()
+                      << " — disabling motors" << std::endl;
             send_zero_torque_and_disable();
             running_ = false;
-            control_state_ = ControlState::HARD_DISABLED;
+            set_fault_state(ControlState::HARD_DISABLED, "SAFETY_HARD_FAULT", e.what());
             return;
+        } catch (const std::exception& e) {
+            // Recoverable: hold the last safely sent command and retry;
+            // escalate to a latched position hold if it persists.
+            handle_control_exception(e, recoverable_since, recoverable_active);
         }
 
         iteration_count++;
@@ -329,13 +364,13 @@ void ArmRobot::control_loop() {
                           << MAX_SLOW_PERIODS << ")" << std::endl;
 
                 if (consecutive_slow >= MAX_SLOW_PERIODS) {
-                    std::cerr << "[ArmRobot] Frequency below " << min_freq_hz_
-                              << " Hz for " << consecutive_slow * FREQ_CHECK_INTERVAL
-                              << "s — emergency stop!" << std::endl;
-                    send_zero_torque_and_disable();
-                    running_ = false;
-                    control_state_ = ControlState::HARD_DISABLED;
-                    return;
+                    // Python parity: latch a position hold, keep the loop alive
+                    // instead of disabling the motors.
+                    hold_position("Frequency below " + std::to_string(min_freq_hz_) +
+                                      " Hz for " +
+                                      std::to_string((int)(consecutive_slow * FREQ_CHECK_INTERVAL)) + "s",
+                                  "CONTROL_FREQUENCY_LOW");
+                    consecutive_slow = 0;
                 }
             } else {
                 consecutive_slow = 0;
@@ -387,23 +422,50 @@ void ArmRobot::update() {
         cmd = command_;
     }
 
-    // 5) Compute inverse dynamics (gravity compensation)
-    JointVector tau_id = {};
-    if (gravity_model_ && gravity_comp_factor_ > 0.0) {
-        tau_id = gravity_model_->compute_inverse_dynamics(
-            state_.pos, cmd.vel, cmd.acc
-        );
-
-        // Scale and clip
-        for (size_t i = 0; i < 6; ++i) {
-            tau_id[i] *= gravity_torque_scale_[i] * gravity_comp_factor_;
-            if (std::abs(tau_id[i]) > max_gravity_torque_[i]) {
-                tau_id[i] = std::copysign(max_gravity_torque_[i], tau_id[i]);
-            }
+    // 5) Validate command/feedback finiteness (Python parity)
+    for (size_t i = 0; i < 6; ++i) {
+        if (!std::isfinite(cmd.pos[i]) || !std::isfinite(cmd.vel[i]) ||
+            !std::isfinite(cmd.acc[i]) || !std::isfinite(cmd.kp[i]) ||
+            !std::isfinite(cmd.kd[i]) || !std::isfinite(cmd.torque_ff[i])) {
+            throw RecoverableControlFault(
+                "Non-finite value reached the internal joint command",
+                "CMD_NON_FINITE");
+        }
+        if (!std::isfinite(state_.pos[i])) {
+            throw HardSafetyFault("Non-finite motor feedback position");
         }
     }
 
-    // 6) Combine torques
+    // 6) Compute inverse dynamics (gravity compensation)
+    JointVector tau_id = {};
+    if (gravity_model_ && gravity_comp_factor_ > 0.0) {
+        try {
+            tau_id = gravity_model_->compute_inverse_dynamics(
+                state_.pos, cmd.vel, cmd.acc
+            );
+        } catch (const std::exception& e) {
+            throw RecoverableControlFault(
+                std::string("Inverse dynamics computation failed: ") + e.what(),
+                "ID_FAILED");
+        }
+        for (size_t i = 0; i < 6; ++i) {
+            if (!std::isfinite(tau_id[i])) {
+                throw RecoverableControlFault(
+                    "Inverse dynamics returned a non-finite vector", "ID_INVALID");
+            }
+            // Python treats oversized model torque as a fault (model/pose
+            // anomaly), not as a value to silently clip.
+            if (std::abs(tau_id[i]) > max_gravity_torque_[i]) {
+                throw RecoverableControlFault(
+                    "Inverse dynamics torque too large on joint " +
+                        std::to_string(i + 1),
+                    "ID_TORQUE_LARGE");
+            }
+            tau_id[i] *= gravity_torque_scale_[i] * gravity_comp_factor_;
+        }
+    }
+
+    // 7) Combine torques
     JointVector motor_torques;
     for (size_t i = 0; i < 6; ++i) {
         double torque_urdf = cmd.torque_ff[i] + tau_id[i];
@@ -413,7 +475,35 @@ void ArmRobot::update() {
         );
     }
 
-    // 7) Send commands to motor chain
+    // 8) Safe-hold fallback frame: with any feedforward motion in the
+    // command, the fallback is gravity-only at the measured pose (Python
+    // _static_hold_motor_torque); otherwise it is the frame just sent.
+    JointVector safe_torque = motor_torques;
+    bool has_feedforward = false;
+    for (size_t i = 0; i < 6; ++i) {
+        if (cmd.vel[i] != 0.0 || cmd.acc[i] != 0.0 || cmd.torque_ff[i] != 0.0) {
+            has_feedforward = true;
+            break;
+        }
+    }
+    if (has_feedforward && gravity_model_ && gravity_comp_factor_ > 0.0) {
+        JointVector zero = {};
+        JointVector tau_hold;
+        try {
+            tau_hold = gravity_model_->compute_inverse_dynamics(state_.pos, zero, zero);
+        } catch (const std::exception& e) {
+            throw RecoverableControlFault(
+                std::string("Static-hold inverse dynamics failed: ") + e.what(),
+                "ID_FAILED");
+        }
+        for (size_t i = 0; i < 6; ++i) {
+            double t = tau_hold[i] * gravity_torque_scale_[i] * gravity_comp_factor_;
+            safe_torque[i] = std::clamp(t * joint_sign_[i],
+                                        -torque_clip_[i], torque_clip_[i]);
+        }
+    }
+
+    // 9) Send commands to motor chain
     JointVector motor_pos, motor_vel;
     for (size_t i = 0; i < 6; ++i) {
         motor_pos[i] = cmd.pos[i] * joint_sign_[i];
@@ -422,7 +512,20 @@ void ArmRobot::update() {
 
     motor_chain_->send_commands(motor_pos, motor_vel, cmd.kp, cmd.kd, motor_torques);
 
-    // 8) Send gripper command
+    // 10) Cache the sent command and its gravity-only fallback for the
+    // recoverable-fault policy
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        last_sent_command_ = cmd;
+        has_sent_command_ = true;
+        last_safe_hold_frame_.pos = motor_pos;
+        last_safe_hold_frame_.vel.fill(0.0);
+        last_safe_hold_frame_.kp = cmd.kp;
+        last_safe_hold_frame_.kd = cmd.kd;
+        last_safe_hold_frame_.torque = safe_torque;
+    }
+
+    // 11) Send gripper command
     if (gripper_) {
         // SOP-06: leave a bus slot for the last arm motor's feedback before
         // the gripper frame, same as the Python SDK.
@@ -484,7 +587,9 @@ void ArmRobot::check_feedback_stale() {
     }
 
     if (any_stale) {
-        throw std::runtime_error("CAN feedback stale - bus or motor feedback may be down");
+        throw RecoverableControlFault(
+            "CAN feedback stale - bus or motor feedback may be down",
+            "FEEDBACK_STALE");
     }
 
     if (any_warning) {
@@ -503,8 +608,8 @@ void ArmRobot::check_motor_errors() {
         int code = state_.error_codes[i];
         if (code != 0x0 && code != 0x1) {
             // Hardware fault
-            throw std::runtime_error("Motor fault on joint " + std::to_string(i + 1) +
-                                     ": error_code=0x" + std::to_string(code));
+            throw HardSafetyFault("Motor fault on joint " + std::to_string(i + 1) +
+                                  ": error_code=0x" + std::to_string(code));
         }
     }
 }
@@ -514,12 +619,12 @@ void ArmRobot::check_motor_temps() {
 
     for (size_t i = 0; i < 6; ++i) {
         if (state_.temp_mos[i] > temp_mos_estop_c_) {
-            throw std::runtime_error("MOS over-temperature on joint " +
-                                     std::to_string(i + 1));
+            throw HardSafetyFault("MOS over-temperature on joint " +
+                                  std::to_string(i + 1));
         }
         if (state_.temp_rotor[i] > temp_rotor_estop_c_) {
-            throw std::runtime_error("Motor coil over-temperature on joint " +
-                                     std::to_string(i + 1));
+            throw HardSafetyFault("Motor coil over-temperature on joint " +
+                                  std::to_string(i + 1));
         }
     }
 
@@ -543,8 +648,8 @@ void ArmRobot::check_velocity_limits() {
 
     for (size_t i = 0; i < 6; ++i) {
         if (std::abs(state_.vel[i]) > vel_limit_[i]) {
-            throw std::runtime_error("Joint velocity limit exceeded on joint " +
-                                     std::to_string(i + 1));
+            throw HardSafetyFault("Joint velocity limit exceeded on joint " +
+                                  std::to_string(i + 1));
         }
     }
 }
@@ -630,6 +735,107 @@ void ArmRobot::set_fault_state(ControlState state, const std::string& code,
     control_state_ = state;
     fault_code_ = code;
     fault_reason_ = reason;
+}
+
+void ArmRobot::write_last_sent_hold_locked() {
+    // Caller owns command_mutex_. Restore the last fully transmitted target
+    // and PD gains; clear motion/torque feedforward.
+    if (has_sent_command_) {
+        command_.pos = last_sent_command_.pos;
+        command_.kp = last_sent_command_.kp;
+        command_.kd = last_sent_command_.kd;
+    }
+    command_.vel.fill(0.0);
+    command_.acc.fill(0.0);
+    command_.torque_ff.fill(0.0);
+}
+
+void ArmRobot::resend_last_safe_hold() {
+    MotorCommandFrame frame;
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        if (!has_sent_command_) {
+            throw RecoverableControlFault(
+                "No successfully queued safe MIT hold frame is available");
+        }
+        frame = last_safe_hold_frame_;
+    }
+    motor_chain_->send_commands(frame.pos, frame.vel, frame.kp, frame.kd,
+                                frame.torque);
+}
+
+void ArmRobot::hold_position(const std::string& reason,
+                             const std::string& fault_code) {
+    if (control_state_ == ControlState::HARD_DISABLED ||
+        control_state_ == ControlState::HARD_DISABLE_UNCONFIRMED ||
+        control_state_ == ControlState::STOPPED) {
+        return;
+    }
+    if (control_state_ == ControlState::FAULT_HOLD && fault_code_ == fault_code) {
+        return;  // already holding with the same code
+    }
+
+    commands_blocked_ = true;
+    {
+        // Strict MIT position hold at the measured pose; the control loop
+        // stays alive and gravity compensation keeps running.
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+        command_.pos = state_.pos;
+        command_.vel.fill(0.0);
+        command_.acc.fill(0.0);
+        command_.kp = default_kp_;
+        command_.kd = default_kd_;
+        command_.torque_ff.fill(0.0);
+    }
+    set_fault_state(ControlState::FAULT_HOLD, fault_code, reason);
+    std::cerr << "[ArmRobot] Fault hold engaged (" << fault_code << "): "
+              << reason << std::endl;
+}
+
+bool ArmRobot::handle_control_exception(
+        const std::exception& e,
+        std::chrono::steady_clock::time_point& recoverable_since,
+        bool& recoverable_active) {
+    auto now = std::chrono::steady_clock::now();
+
+    std::string code = "INTERNAL_ERROR";
+    if (const auto* rcf = dynamic_cast<const RecoverableControlFault*>(&e)) {
+        code = rcf->fault_code();
+    }
+
+    bool first_error = !recoverable_active;
+    if (first_error) {
+        recoverable_active = true;
+        recoverable_since = now;
+        std::cerr << "[ArmRobot] Recoverable control error (" << code
+                  << "); holding last command while retrying: " << e.what()
+                  << std::endl;
+    }
+
+    // Keep the last fully transmitted target, clear motion feedforward.
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        write_last_sent_hold_locked();
+    }
+
+    // Resend the cached gravity-only hold frame without using stale dynamics.
+    try {
+        resend_last_safe_hold();
+    } catch (const std::exception& resend_exc) {
+        if (first_error) {
+            std::cerr << "[ArmRobot] Cached MIT hold resend failed: "
+                      << resend_exc.what() << std::endl;
+        }
+    }
+
+    double elapsed = std::chrono::duration<double>(now - recoverable_since).count();
+    if (elapsed >= RECOVERABLE_TIMEOUT_S) {
+        hold_position(std::string(e.what()) + " (no successful control update for " +
+                          std::to_string(elapsed) + "s)",
+                      code + "_PERSISTENT");
+    }
+    return true;
 }
 
 void ArmRobot::send_zero_torque_and_disable() {
