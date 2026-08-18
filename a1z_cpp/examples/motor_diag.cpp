@@ -59,16 +59,25 @@ void print_usage(const char* prog) {
 // the firmware as "keep previous value" — a stale nonzero kp/kd combined
 // with p_des at the range endpoint drives the joint to its limit.
 // MotorB gets set_ctrl_mode(1) before enable, mirroring Python enable_all.
+//
+// The probe frame is resent on every retry: motors answer one feedback per
+// MIT frame, and a single reply lost anywhere on the g4ros path
+// (ROS -> SPI -> main board -> CAN) would otherwise read as NO RESPONSE.
 static bool probe_motor(std::shared_ptr<Transport> transport,
                         const JointConfig& config, double* pos_out) {
     bool got = false;
+    const int max_attempts = 25;  // ~500ms at 20ms per attempt
+
+    // Drop stale frames so retries are not wasted popping old replies.
+    for (int i = 0; i < 100 && transport->receive(0); ++i) {
+    }
 
     if (config.type == "MOTOR_A") {
         MotorA motor(config.can_id, transport, MotorARanges(),
                      /*use_new_enable_protocol=*/true);
         motor.enable();
-        motor.send_mit_command(0.0, 0.0, 0.0, 0.05, 0.0);
-        for (int retry = 0; retry < 10 && !got; ++retry) {
+        for (int retry = 0; retry < max_attempts && !got; ++retry) {
+            motor.send_mit_command(0.0, 0.0, 0.0, 0.05, 0.0);
             auto frame = transport->receive(20);
             if (frame && frame->id == static_cast<uint32_t>(config.can_id)) {
                 auto fb = motor.parse_feedback(*frame);
@@ -85,8 +94,8 @@ static bool probe_motor(std::shared_ptr<Transport> transport,
     MotorB motor(config.can_id, transport);
     motor.set_ctrl_mode(1);  // MIT mode
     motor.enable();
-    motor.send_mit_command(0.0, 0.0, 0.0, 0.05, 0.0);
-    for (int retry = 0; retry < 10 && !got; ++retry) {
+    for (int retry = 0; retry < max_attempts && !got; ++retry) {
+        motor.send_mit_command(0.0, 0.0, 0.0, 0.05, 0.0);
         auto frame = transport->receive(20);
         if (frame && frame->id == static_cast<uint32_t>(config.can_id)) {
             auto fb = motor.parse_feedback(*frame);
