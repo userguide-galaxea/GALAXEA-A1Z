@@ -77,6 +77,15 @@ int cmd_scan(std::shared_ptr<Transport> transport) {
             missing++;
             continue;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        // MotorA enable is a broadcast frame with no reply, so request
+        // feedback with a zero MIT command (kp=kd=0 -> no torque).
+        CanFrame mit_frame;
+        mit_frame.id = config.can_id;
+        mit_frame.dlc = 8;
+        std::memset(mit_frame.data.data(), 0, 8);
+        transport->send(mit_frame);
 
         // Wait for feedback (up to 200ms)
         bool got_feedback = false;
@@ -114,6 +123,14 @@ int cmd_scan(std::shared_ptr<Transport> transport) {
             std::cout << "NO RESPONSE" << std::endl;
             missing++;
         }
+
+        // Disable the motor again so scan leaves nothing enabled.
+        CanFrame disable_frame;
+        disable_frame.id = config.can_id;
+        disable_frame.dlc = 8;
+        std::memset(disable_frame.data.data(), 0xFF, 7);
+        disable_frame.data[7] = 0xFD;  // Disable command
+        transport->send(disable_frame);
 
         // Small delay between motors
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
