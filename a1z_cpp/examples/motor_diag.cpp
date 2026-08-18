@@ -53,6 +53,44 @@ void print_usage(const char* prog) {
               << "  --help              Show this help\n";
 }
 
+// MotorA enable/disable use the 0x7FF broadcast config frame
+// ([id_hi, id_lo, 0x00, cmd], no reply); MotorB uses per-ID 0xFC/0xFD.
+static void send_enable_frame(Transport& transport, const JointConfig& config) {
+    CanFrame frame;
+    if (config.type == "MOTOR_A") {
+        frame.id = 0x7FF;
+        frame.dlc = 4;
+        frame.data[0] = (config.can_id >> 8) & 0xFF;
+        frame.data[1] = config.can_id & 0xFF;
+        frame.data[2] = 0x00;
+        frame.data[3] = 0x01;  // enable
+    } else {
+        frame.id = config.can_id;
+        frame.dlc = 8;
+        std::memset(frame.data.data(), 0xFF, 7);
+        frame.data[7] = 0xFC;
+    }
+    transport.send(frame);
+}
+
+static void send_disable_frame(Transport& transport, const JointConfig& config) {
+    CanFrame frame;
+    if (config.type == "MOTOR_A") {
+        frame.id = 0x7FF;
+        frame.dlc = 4;
+        frame.data[0] = (config.can_id >> 8) & 0xFF;
+        frame.data[1] = config.can_id & 0xFF;
+        frame.data[2] = 0x00;
+        frame.data[3] = 0x02;  // disable
+    } else {
+        frame.id = config.can_id;
+        frame.dlc = 8;
+        std::memset(frame.data.data(), 0xFF, 7);
+        frame.data[7] = 0xFD;
+    }
+    transport.send(frame);
+}
+
 int cmd_scan(std::shared_ptr<Transport> transport) {
     std::cout << "Scanning motors..." << std::endl;
     std::cout << "===================" << std::endl;
@@ -66,17 +104,7 @@ int cmd_scan(std::shared_ptr<Transport> transport) {
                   << std::hex << config.can_id << std::dec << "): ";
 
         // Send enable command to trigger feedback
-        CanFrame enable_frame;
-        enable_frame.id = config.can_id;
-        enable_frame.dlc = 8;
-        std::memset(enable_frame.data.data(), 0xFF, 7);
-        enable_frame.data[7] = 0xFC;  // Enable command
-
-        if (!transport->send(enable_frame)) {
-            std::cout << "SEND FAILED" << std::endl;
-            missing++;
-            continue;
-        }
+        send_enable_frame(*transport, config);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         // MotorA enable is a broadcast frame with no reply, so request
@@ -125,12 +153,7 @@ int cmd_scan(std::shared_ptr<Transport> transport) {
         }
 
         // Disable the motor again so scan leaves nothing enabled.
-        CanFrame disable_frame;
-        disable_frame.id = config.can_id;
-        disable_frame.dlc = 8;
-        std::memset(disable_frame.data.data(), 0xFF, 7);
-        disable_frame.data[7] = 0xFD;  // Disable command
-        transport->send(disable_frame);
+        send_disable_frame(*transport, config);
 
         // Small delay between motors
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -258,12 +281,7 @@ int cmd_probe(std::shared_ptr<Transport> transport, int joint_id) {
 
     // Enable motor
     std::cout << "  Enabling..." << std::endl;
-    CanFrame enable_frame;
-    enable_frame.id = config.can_id;
-    enable_frame.dlc = 8;
-    std::memset(enable_frame.data.data(), 0xFF, 7);
-    enable_frame.data[7] = 0xFC;
-    transport->send(enable_frame);
+    send_enable_frame(*transport, config);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Send zero MIT command
@@ -288,12 +306,7 @@ int cmd_probe(std::shared_ptr<Transport> transport, int joint_id) {
 
     // Disable motor
     std::cout << "  Disabling..." << std::endl;
-    CanFrame disable_frame;
-    disable_frame.id = config.can_id;
-    disable_frame.dlc = 8;
-    std::memset(disable_frame.data.data(), 0xFF, 7);
-    disable_frame.data[7] = 0xFD;
-    transport->send(disable_frame);
+    send_disable_frame(*transport, config);
 
     return 0;
 }

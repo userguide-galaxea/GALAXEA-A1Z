@@ -57,11 +57,13 @@ public:
      * @param transport Transport interface (SocketCAN or G4Ros)
      * @param ranges Physical ranges for scaling
      * @param use_new_enable_protocol Use 0x7FF config frame instead of legacy
+     *        (current firmware expects the 0x7FF broadcast, same as the
+     *        Python SDK, so it defaults to true)
      */
     explicit MotorA(int motor_id,
                     std::shared_ptr<Transport> transport,
                     const MotorARanges& ranges = MotorARanges(),
-                    bool use_new_enable_protocol = false);
+                    bool use_new_enable_protocol = true);
 
     /**
      * @brief Send motor enable command.

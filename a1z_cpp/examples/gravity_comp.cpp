@@ -109,7 +109,8 @@ int main(int argc, char* argv[]) {
 
     // MotorA: joints 1-3 (CAN ID 0x01-0x03)
     for (int i = 1; i <= 3; ++i) {
-        auto motor = std::make_shared<MotorA>(i, transport);
+        auto motor = std::make_shared<MotorA>(i, transport, MotorARanges(),
+                                              /*use_new_enable_protocol=*/true);
         motor_a_list.push_back(motor);
     }
 
