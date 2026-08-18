@@ -36,6 +36,9 @@ struct MotorAFeedback {
     int error = 0;
     double temperature = 0.0;      // Motor coil temperature (°C)
     double temperature_mos = 0.0;  // MOS temperature (°C)
+    // False for non-type-1 report frames (error/config/query/brake replies):
+    // their payload is not pos/vel/current and must never be parsed as such.
+    bool valid_position = true;
 };
 
 /**
@@ -68,12 +71,12 @@ public:
     /**
      * @brief Send motor enable command.
      */
-    void enable();
+    bool enable();
 
     /**
      * @brief Send motor disable command.
      */
-    void disable();
+    bool disable();
 
     /**
      * @brief Send MIT mixed-control command.
@@ -100,6 +103,14 @@ public:
     const std::optional<MotorAFeedback>& last_feedback() const { return last_feedback_; }
 
     /**
+     * @brief Error code latched from non-type-1 report frames.
+     *
+     * Takes priority over the error field of regular feedback frames
+     * (matches the Python SDK behavior).
+     */
+    int last_reported_error() const { return last_reported_error_; }
+
+    /**
      * @brief Get motor ID.
      */
     int motor_id() const { return motor_id_; }
@@ -115,6 +126,7 @@ private:
     MotorARanges ranges_;
     bool use_new_enable_protocol_;
     std::optional<MotorAFeedback> last_feedback_;
+    int last_reported_error_ = 0;
 
     // Utility functions
     static uint16_t float_to_uint(double x, double x_min, double x_max, int bits);

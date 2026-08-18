@@ -62,25 +62,30 @@ void MixedMotorChain::enable_all() {
 }
 
 bool MixedMotorChain::disable_all() {
-    bool success = true;
+    std::vector<int> failed;
     // Send twice - a single frame can be missed on a busy bus
     for (int i = 0; i < 2; ++i) {
         for (auto& motor : motor_a_list_) {
             try {
-                motor->disable();
+                if (!motor->disable() && i == 1) failed.push_back(motor->motor_id());
             } catch (...) {
-                success = false;
+                if (i == 1) failed.push_back(motor->motor_id());
             }
         }
         for (auto& motor : motor_b_list_) {
             try {
-                motor->disable();
+                if (!motor->disable() && i == 1) failed.push_back(motor->motor_id());
             } catch (...) {
-                success = false;
+                if (i == 1) failed.push_back(motor->motor_id());
             }
         }
     }
-    return success;
+    if (!failed.empty()) {
+        std::cerr << "[MixedMotorChain] WARNING: disable command failed for motor IDs:";
+        for (int id : failed) std::cerr << " " << id;
+        std::cerr << " — these motors may still be ENABLED" << std::endl;
+    }
+    return failed.empty();
 }
 
 int MixedMotorChain::drain_and_update(int timeout_ms) {
@@ -133,7 +138,10 @@ void MixedMotorChain::dispatch_feedback(const CanFrame& frame) {
 
     if (entry.type == MotorEntry::Type::MotorA) {
         auto motor = std::static_pointer_cast<MotorA>(entry.motor);
-        parsed = motor->parse_feedback(frame).has_value();
+        auto fb = motor->parse_feedback(frame);
+        // Non-type-1 report frames only latch the error code; they are not
+        // valid position feedback and must not refresh freshness.
+        parsed = fb.has_value() && fb->valid_position;
     } else {
         auto motor = std::static_pointer_cast<MotorB>(entry.motor);
         parsed = motor->parse_feedback(frame).has_value();
@@ -206,6 +214,10 @@ std::array<int, 6> MixedMotorChain::get_error_codes() const {
         int idx = motor_a_joint_indices_[i];
         const auto& fb = motor_a_list_[i]->last_feedback();
         if (fb) codes[idx] = fb->error;
+        // Error codes from non-type-1 report frames are latched separately
+        // and take priority over the regular feedback error field.
+        int latched = motor_a_list_[i]->last_reported_error();
+        if (latched) codes[idx] = latched;
     }
 
     for (size_t i = 0; i < motor_b_list_.size(); ++i) {

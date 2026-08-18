@@ -18,8 +18,11 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <thread>
+#include <vector>
 
 using namespace a1z;
 
@@ -39,7 +42,7 @@ void print_usage(const char* prog) {
               << "  --transport TYPE    g4ros (default) or socketcan\n"
               << "  --arm-side SIDE     left (default) or right (g4ros only)\n"
               << "  --can CHANNEL       CAN channel (default: can0, socketcan only)\n"
-              << "  --urdf PATH         URDF file path (default: A1Z_G1Z.urdf)\n"
+              << "  --urdf PATH         URDF file path (default: auto-detect A1Z_G1Z.urdf)\n"
               << "  --help              Show this help\n";
 }
 
@@ -116,7 +119,16 @@ int main(int argc, char* argv[]) {
 
     // MotorB: joints 4-6 (CAN ID 0x04-0x06)
     for (int i = 4; i <= 6; ++i) {
-        auto motor = std::make_shared<MotorB>(i, transport);
+        MotorBRanges ranges;
+        if (i == 4) {
+            // Joint 3 (arm_joint4) uses the high-torque range (matches the
+            // Python SDK's _MOTOR_B_RANGES_JOINT3).
+            ranges.vel_min = -10.0;
+            ranges.vel_max = 10.0;
+            ranges.torque_min = -28.0;
+            ranges.torque_max = 28.0;
+        }
+        auto motor = std::make_shared<MotorB>(i, transport, ranges);
         motor_b_list.push_back(motor);
     }
 
@@ -132,15 +144,37 @@ int main(int argc, char* argv[]) {
         0.00025   // 250us gap
     );
 
-    // Create gravity model
+    // Create gravity model. Without --urdf, try the default locations
+    // (repo checkout and the board's ~/a1z layout) before giving up.
+    if (urdf_path.empty()) {
+        const char* home = std::getenv("HOME");
+        std::vector<std::string> candidates = {
+            "a1z/robot_models/a1z/A1Z_G1Z.urdf",
+            "../a1z/robot_models/a1z/A1Z_G1Z.urdf",
+        };
+        if (home) {
+            candidates.push_back(std::string(home) + "/a1z/a1z/robot_models/a1z/A1Z_G1Z.urdf");
+        }
+        for (const auto& path : candidates) {
+            std::ifstream f(path);
+            if (f.good()) {
+                urdf_path = path;
+                break;
+            }
+        }
+    }
+
     std::shared_ptr<GravityModel> gravity_model;
     if (!urdf_path.empty()) {
         try {
             gravity_model = std::make_shared<GravityModel>(urdf_path);
+            std::cout << "  URDF:            " << urdf_path << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Failed to load URDF: " << e.what() << std::endl;
             std::cerr << "Continuing without gravity compensation..." << std::endl;
         }
+    } else {
+        std::cerr << "No URDF found (use --urdf PATH); running without gravity compensation." << std::endl;
     }
 
     // Create gripper (optional)
@@ -157,6 +191,14 @@ int main(int argc, char* argv[]) {
 
     // Set gravity compensation factor
     robot->set_gravity_comp_factor(gravity_factor);
+
+    // Zero-gravity (floating) vs position-hold mode
+    robot->set_gravity_mode(zero_gravity);
+
+    // Joint limits: needed for command validation and the ±π unwrap
+    if (gravity_model) {
+        robot->set_joint_limits(gravity_model->get_joint_limits());
+    }
 
     // Set joint sign convention (lemo defaults)
     JointVector joint_sign = {1.0, 1.0, -1.0, 1.0, -1.0, 1.0};

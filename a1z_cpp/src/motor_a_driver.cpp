@@ -14,7 +14,7 @@ MotorA::MotorA(int motor_id, std::shared_ptr<Transport> transport,
     , ranges_(ranges)
     , use_new_enable_protocol_(use_new_enable_protocol) {}
 
-void MotorA::enable() {
+bool MotorA::enable() {
     CanFrame frame;
     if (use_new_enable_protocol_) {
         // New protocol: 0x7FF config frame
@@ -31,11 +31,12 @@ void MotorA::enable() {
         std::memset(frame.data.data(), 0xFF, 7);
         frame.data[7] = 0xFC;
     }
-    transport_->send(frame);
+    bool ok = transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return ok;
 }
 
-void MotorA::disable() {
+bool MotorA::disable() {
     CanFrame frame;
     if (use_new_enable_protocol_) {
         // New protocol: 0x7FF config frame
@@ -52,8 +53,9 @@ void MotorA::disable() {
         std::memset(frame.data.data(), 0xFF, 7);
         frame.data[7] = 0xFD;
     }
-    transport_->send(frame);
+    bool ok = transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return ok;
 }
 
 void MotorA::send_mit_command(double pos, double vel, double kp, double kd,
@@ -84,7 +86,25 @@ std::optional<MotorAFeedback> MotorA::parse_feedback(const CanFrame& frame) {
         raw = (raw << 8) | frame.data[i];
     }
 
+    int report_type = (raw >> 61) & 0x7;
     int error_code = (raw >> 56) & 0x1F;
+
+    if (report_type != 0x1) {
+        // ENCOS report frames come in 6 types (manual V1.12 §10); only type 1
+        // carries uint16 pos/vel/current. Types 2/3 use a float32 layout and
+        // 0/4/5/6 are reserved/config/query/brake replies. Never parse these
+        // as position — that would read values near the range endpoints
+        // (feedback jump). Only latch the error code.
+        MotorAFeedback fb;
+        fb.motor_id = frame.id;
+        fb.error = error_code;
+        fb.valid_position = false;
+        if (error_code) {
+            last_reported_error_ = error_code;
+        }
+        return fb;
+    }
+
     uint16_t pos_raw = (raw >> 40) & 0xFFFF;
     uint16_t vel_raw = (raw >> 28) & 0xFFF;
     uint16_t curr_raw = (raw >> 16) & 0xFFF;

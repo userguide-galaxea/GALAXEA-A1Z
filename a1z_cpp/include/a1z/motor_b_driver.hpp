@@ -63,12 +63,12 @@ public:
     /**
      * @brief Send motor enable command (0xFC).
      */
-    void enable();
+    bool enable();
 
     /**
      * @brief Send motor disable command (0xFD).
      */
-    void disable();
+    bool disable();
 
     /**
      * @brief Clear motor error (0xFB).

@@ -135,6 +135,15 @@ public:
     void set_joint_limits(const std::array<std::pair<double, double>, 6>& limits);
 
     /**
+     * @brief Switch between zero-gravity (floating) and position-hold mode.
+     *
+     * In zero-gravity mode kp=0 and kd=default*0.5 so the arm follows
+     * gravity compensation only; in position-hold mode the default PD
+     * gains are used. Can be called before start() or at runtime.
+     */
+    void set_gravity_mode(bool enabled);
+
+    /**
      * @brief Enable/disable recording for teaching.
      */
     void set_recording(bool enable);

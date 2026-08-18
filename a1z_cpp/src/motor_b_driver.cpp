@@ -26,24 +26,26 @@ MotorB::MotorB(int motor_id, std::shared_ptr<Transport> transport,
     , transport_(std::move(transport))
     , ranges_(ranges) {}
 
-void MotorB::enable() {
+bool MotorB::enable() {
     CanFrame frame;
     frame.id = motor_id_;
     frame.dlc = 8;
     std::memset(frame.data.data(), 0xFF, 7);
     frame.data[7] = 0xFC;
-    transport_->send(frame);
+    bool ok = transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return ok;
 }
 
-void MotorB::disable() {
+bool MotorB::disable() {
     CanFrame frame;
     frame.id = motor_id_;
     frame.dlc = 8;
     std::memset(frame.data.data(), 0xFF, 7);
     frame.data[7] = 0xFD;
-    transport_->send(frame);
+    bool ok = transport_->send(frame);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return ok;
 }
 
 void MotorB::clear_error() {
@@ -147,6 +149,14 @@ std::optional<MotorBFeedback> MotorB::parse_feedback(const CanFrame& frame) {
     }
 
     const auto& data = frame.data;
+
+    // byte0 low nibble must be this motor's ID (Damiao layout: ID | ERR<<4).
+    // Reject mismatched frames (command echoes, undefined 0x7F alarm frames)
+    // so their payload is never parsed as position — that would read values
+    // near the range endpoints (feedback jump / spurious error codes).
+    if ((data[0] & 0x0F) != (motor_id_ & 0x0F)) {
+        return std::nullopt;
+    }
 
     int error_int = (data[0] & 0xF0) >> 4;
     uint16_t p_int = (data[1] << 8) | data[2];

@@ -24,7 +24,15 @@ void Gripper::enable() {
     // Switch to force-position hybrid mode
     motor_->set_ctrl_mode(4);
 
-    // Read actual position and feed as first hybrid frame to prevent snap
+    // After the mode switch the motor clears p_des to 0 (travel midpoint =
+    // flash zero). Read the actual position and feed it as the first hybrid
+    // frame to prevent a brief snap toward midpoint before home() takes over.
+    if (!motor_->last_feedback()) {
+        auto frame = motor_->transport()->receive(50);
+        if (frame && frame->id == static_cast<uint32_t>(motor_->motor_id())) {
+            motor_->parse_feedback(*frame);
+        }
+    }
     auto fb = motor_->last_feedback();
     if (fb) {
         motor_->send_hybrid_command(fb->position, 0.0, 0.0);
@@ -49,9 +57,12 @@ bool Gripper::home(double timeout_s) {
 
         motor_->send_hybrid_command(open_rad_, GRIPPER_HOME_VEL, i_home);
 
-        // Try to receive feedback
-        // Note: This requires the CAN interface to be in a state where we can read
-        // In practice, the caller should ensure feedback is being drained
+        // Read feedback directly from the transport. This runs before the
+        // control thread starts, so nobody else is draining the bus.
+        auto frame = motor_->transport()->receive(10);
+        if (frame && frame->id == static_cast<uint32_t>(motor_->motor_id())) {
+            motor_->parse_feedback(*frame);
+        }
         auto fb = motor_->last_feedback();
         if (fb && std::abs(fb->position - open_rad_) < 0.1) {
             std::cout << "[Gripper] Open at " << fb->position << " rad ("

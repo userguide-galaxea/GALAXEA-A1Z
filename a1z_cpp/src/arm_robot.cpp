@@ -45,23 +45,44 @@ void ArmRobot::start(const JointVector* initial_kp, const JointVector* initial_k
     if (gripper_) {
         gripper_->enable();
         gripper_->home();
+        // Route gripper CAN feedback through drain_and_update so its
+        // last_feedback stays fresh (matches the Python SDK).
+        motor_chain_->register_external_motor(gripper_->motor());
     }
 
-    // Wait for initial feedback
+    // MotorA does not return feedback on enable alone — it needs at least
+    // one MIT command first. Send zero-position-gain probe frames so the
+    // motors answer without applying a position correction.
     std::cout << "[ArmRobot] Waiting for feedback..." << std::endl;
-    auto start_time = std::chrono::steady_clock::now();
+    JointVector zero = {};
+    JointVector probe_kd;
+    probe_kd.fill(0.05);
+
     bool feedback_ok = false;
-    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() < 2.0) {
-        read_state();
-        if (motor_chain_->all_feedback_fresh(0.2)) {
-            feedback_ok = true;
-            break;
-        }
+    for (int attempt = 0; attempt < 3 && !feedback_ok; ++attempt) {
+        motor_chain_->send_commands(zero, zero, zero, probe_kd, zero);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        auto start_time = std::chrono::steady_clock::now();
+        while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() < 0.5) {
+            read_state();
+            if (motor_chain_->all_feedback_fresh(0.2)) {
+                feedback_ok = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (!feedback_ok) {
+            std::cout << "[ArmRobot] Startup probe incomplete, retrying ("
+                      << (attempt + 2) << "/3)..." << std::endl;
+        }
     }
 
     if (!feedback_ok) {
-        motor_chain_->disable_all();
+        if (!motor_chain_->disable_all()) {
+            std::cerr << "[ArmRobot] ERROR: failed to disable all motors after "
+                         "startup failure — check motor state manually!" << std::endl;
+        }
         throw std::runtime_error("Failed to receive feedback from all joints");
     }
 
@@ -235,6 +256,22 @@ void ArmRobot::set_joint_limits(const std::array<std::pair<double, double>, 6>& 
     joint_limits_ = limits;
 }
 
+void ArmRobot::set_gravity_mode(bool enabled) {
+    {
+        std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+        if (enabled) {
+            command_.kp.fill(0.0);
+            for (size_t i = 0; i < 6; ++i) {
+                command_.kd[i] = default_kd_[i] * 0.5;
+            }
+        } else {
+            command_.kp = default_kp_;
+            command_.kd = default_kd_;
+        }
+    }
+    zero_gravity_mode_ = enabled;
+}
+
 void ArmRobot::set_recording(bool enable) {
     std::lock_guard<std::mutex> lock(record_mutex_);
     recording_ = enable;
@@ -387,6 +424,12 @@ void ArmRobot::update() {
 
     // 8) Send gripper command
     if (gripper_) {
+        // SOP-06: leave a bus slot for the last arm motor's feedback before
+        // the gripper frame, same as the Python SDK.
+        double gap = motor_chain_->inter_cmd_gap_s();
+        if (gap > 0) {
+            std::this_thread::sleep_for(std::chrono::duration<double>(gap));
+        }
         gripper_->step();
     }
 }
@@ -598,7 +641,10 @@ void ArmRobot::send_zero_torque_and_disable() {
     }
 
     try {
-        motor_chain_->disable_all();
+        if (!motor_chain_->disable_all()) {
+            std::cerr << "[ArmRobot] ERROR: failed to disable all motors — "
+                         "check motor state manually!" << std::endl;
+        }
     } catch (...) {
         // Ignore errors during emergency shutdown
     }
