@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/Users/lml/workspace/GALAXEA-A1Z/a1z_cpp/build_mac/cmake_install.cmake",
-		"/Users/lml/workspace/GALAXEA-A1Z/a1z_cpp/build_mac/tests/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

@@ -1,2 +1,0 @@
-/usr/bin/ar qc liba1z_cpp.a CMakeFiles/a1z_cpp.dir/src/can_interface.cpp.o CMakeFiles/a1z_cpp.dir/src/motor_a_driver.cpp.o CMakeFiles/a1z_cpp.dir/src/motor_b_driver.cpp.o CMakeFiles/a1z_cpp.dir/src/mixed_motor_chain.cpp.o CMakeFiles/a1z_cpp.dir/src/gripper.cpp.o CMakeFiles/a1z_cpp.dir/src/arm_robot.cpp.o CMakeFiles/a1z_cpp.dir/src/transport_socketcan.cpp.o CMakeFiles/a1z_cpp.dir/src/transport_g4ros.cpp.o CMakeFiles/a1z_cpp.dir/src/gravity_model.cpp.o
-/usr/bin/ranlib liba1z_cpp.a
