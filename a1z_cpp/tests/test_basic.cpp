@@ -24,13 +24,6 @@ void test_motor_a_packing() {
     // Test float_to_uint conversion
     auto ranges = MotorARanges();
 
-    // Test position conversion (mid-range)
-    double pos_mid = (ranges.pos_min + ranges.pos_max) / 2.0;
-    // This should map to mid-scale (32768 for 16-bit)
-
-    // Test velocity conversion
-    double vel_max = ranges.vel_max;
-
     std::cout << "  MotorA ranges: pos [" << ranges.pos_min << ", " << ranges.pos_max
               << "], vel [" << ranges.vel_min << ", " << ranges.vel_max << "]" << std::endl;
     std::cout << "  MotorA MIT packing test passed" << std::endl;

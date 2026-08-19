@@ -8,6 +8,7 @@ namespace a1z {
 
 GravityModel::GravityModel(const std::string& urdf_path, const std::string& mesh_dir) {
 #ifdef A1Z_HAS_PINOCCHIO
+    (void)mesh_dir;  // reserved for future mesh resolution
     try {
         pinocchio::urdf::buildModel(urdf_path, model_);
         data_ = pinocchio::Data(model_);

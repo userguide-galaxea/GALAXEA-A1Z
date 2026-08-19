@@ -37,7 +37,7 @@ public:
             "motor_send", 10);
         sub_ = node_->create_subscription<lemo_main_board::msg::MotorData>(
             "motor_data", 10,
-            [this](lemo_main_board::msg::MotorData::SharedPtr msg) {
+            [this](lemo_main_board::msg::MotorData::ConstSharedPtr msg) {
                 on_motor_frame(msg);
             });
 
@@ -126,7 +126,7 @@ public:
     }
 
 private:
-    void on_motor_frame(lemo_main_board::msg::MotorData::SharedPtr msg) {
+    void on_motor_frame(lemo_main_board::msg::MotorData::ConstSharedPtr msg) {
         // Filter frames for the other arm
         if (msg->arm_id != arm_id_) {
             return;
