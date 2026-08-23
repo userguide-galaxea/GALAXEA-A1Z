@@ -37,4 +37,17 @@ enum class ControlState {
     HARD_DISABLE_UNCONFIRMED
 };
 
+inline const char* to_string(ControlState s) {
+    switch (s) {
+    case ControlState::STOPPED: return "STOPPED";
+    case ControlState::RUNNING: return "RUNNING";
+    case ControlState::SOFT_ESTOP: return "SOFT_ESTOP";
+    case ControlState::COMMAND_HOLD: return "COMMAND_HOLD";
+    case ControlState::FAULT_HOLD: return "FAULT_HOLD";
+    case ControlState::HARD_DISABLED: return "HARD_DISABLED";
+    case ControlState::HARD_DISABLE_UNCONFIRMED: return "HARD_DISABLE_UNCONFIRMED";
+    }
+    return "UNKNOWN";
+}
+
 } // namespace a1z

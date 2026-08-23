@@ -172,7 +172,11 @@ ControlState ArmRobot::control_state() const {
 
 bool ArmRobot::command_joint_state(const JointCommand& cmd) {
     if (commands_blocked_) {
-        std::cerr << "[ArmRobot] Command rejected: robot is blocked" << std::endl;
+        std::cerr << "[ArmRobot] Command rejected: robot is blocked (state="
+                  << to_string(control_state_)
+                  << ", fault_code=" << (fault_code_.empty() ? "-" : fault_code_)
+                  << ", reason=" << (fault_reason_.empty() ? "-" : fault_reason_)
+                  << ")" << std::endl;
         return false;
     }
 
@@ -320,8 +324,11 @@ void ArmRobot::move_joints(const JointVector& target_pos, double speed,
                            const JointVector* kp, const JointVector* kd,
                            std::optional<double> max_jump_rad) {
     if (commands_blocked_) {
-        std::cerr << "[ArmRobot] move_joints rejected: robot is in estop"
-                  << std::endl;
+        std::cerr << "[ArmRobot] move_joints rejected: robot is blocked (state="
+                  << to_string(control_state_)
+                  << ", fault_code=" << (fault_code_.empty() ? "-" : fault_code_)
+                  << ", reason=" << (fault_reason_.empty() ? "-" : fault_reason_)
+                  << ")" << std::endl;
         return;
     }
     // Minimum-jerk peak velocity is 1.875 x average. Reject upfront so we
