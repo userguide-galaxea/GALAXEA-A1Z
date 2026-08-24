@@ -85,7 +85,48 @@ bool MixedMotorChain::disable_all() {
         for (int id : failed) std::cerr << " " << id;
         std::cerr << " — these motors may still be ENABLED" << std::endl;
     }
-    return failed.empty();
+
+    // MotorB 失能确认：达妙反馈的状态字段 0x0=disabled, 0x1=enabled，
+    // 电机执行失能后会回一帧状态帧。发送成功 ≠ 电机执行（2026-08 实测
+    // MotorB 在 stop 后仍保持使能），未确认的补发重试，最多 3 轮。
+    // MotorA（ENCOS）反馈不携带使能状态且失能是广播帧，无法验证，跳过。
+    bool all_confirmed = true;
+    for (int round = 0; round < 3; ++round) {
+        drain_and_update(120);  // 收确认帧
+        std::vector<int> unconfirmed;
+        for (auto& motor : motor_b_list_) {
+            const auto& fb = motor->last_feedback();
+            if (!fb || fb->error != 0x0) {
+                unconfirmed.push_back(motor->motor_id());
+            }
+        }
+        if (unconfirmed.empty()) {
+            all_confirmed = true;
+            break;
+        }
+        all_confirmed = false;
+        for (auto& motor : motor_b_list_) {
+            if (std::find(unconfirmed.begin(), unconfirmed.end(),
+                          motor->motor_id()) != unconfirmed.end()) {
+                try {
+                    motor->disable();
+                } catch (...) {
+                }
+            }
+        }
+    }
+    if (!all_confirmed) {
+        std::cerr << "[MixedMotorChain] WARNING: MotorB disable NOT confirmed "
+                     "after retries for motor IDs:";
+        for (auto& motor : motor_b_list_) {
+            const auto& fb = motor->last_feedback();
+            if (!fb || fb->error != 0x0) {
+                std::cerr << " " << motor->motor_id();
+            }
+        }
+        std::cerr << " — check motor state manually before powering!" << std::endl;
+    }
+    return failed.empty() && all_confirmed;
 }
 
 int MixedMotorChain::drain_and_update(int timeout_ms) {

@@ -40,7 +40,27 @@ void Gripper::enable() {
 }
 
 void Gripper::disable() {
-    motor_->disable();
+    // 达妙状态字段 0x0=disabled, 0x1=enabled：发送失能后读回确认帧验证，
+    // 未确认则补发，最多 3 轮。发送成功 ≠ 电机执行（2026-08 实测 MotorB
+    // 在 stop 后仍保持使能）。
+    for (int round = 0; round < 3; ++round) {
+        motor_->disable();
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(120);
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto frame = motor_->transport()->receive(20);
+            if (frame &&
+                frame->id == static_cast<uint32_t>(motor_->motor_id())) {
+                motor_->parse_feedback(*frame);
+            }
+        }
+        auto fb = motor_->last_feedback();
+        if (fb && fb->error == 0x0) {
+            return;  // 已确认失能
+        }
+    }
+    std::cerr << "[Gripper] WARNING: disable NOT confirmed after retries — "
+                 "check gripper state manually" << std::endl;
 }
 
 bool Gripper::home(double timeout_s) {
