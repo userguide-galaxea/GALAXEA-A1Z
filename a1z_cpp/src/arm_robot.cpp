@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 
 namespace a1z {
 
@@ -872,7 +873,15 @@ void ArmRobot::check_feedback_stale() {
     if (any_warning) {
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration<double>(now - last_stale_warn_time_).count() > 1.0) {
-            std::cerr << "[ArmRobot] Warning: CAN feedback delayed" << std::endl;
+            std::ostringstream oss;
+            oss << "[ArmRobot] Warning: CAN feedback delayed:";
+            for (size_t i = 0; i < 6; ++i) {
+                if (ages[i] > stale_feedback_warn_s_) {
+                    oss << " joint" << (i + 1) << "=" << static_cast<int>(ages[i] * 1000)
+                        << "ms/" << static_cast<int>(stale_feedback_warn_s_ * 1000) << "ms";
+                }
+            }
+            std::cerr << oss.str() << std::endl;
             last_stale_warn_time_ = now;
         }
     }
