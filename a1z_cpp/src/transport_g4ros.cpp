@@ -43,8 +43,11 @@ public:
         // measured severe receive degradation with depth 1000).
         pub_ = node_->create_publisher<lemo_main_board::msg::MotorData>(
             "motor_send", 100);
+        // Explicit RELIABLE (matches the rclcpp default and g4spi_node's
+        // publisher); written out so nobody "optimizes" it to best-effort,
+        // which would silently drop motor feedback under load.
         sub_ = node_->create_subscription<lemo_main_board::msg::MotorData>(
-            "motor_data", 100,
+            "motor_data", rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
             [this](lemo_main_board::msg::MotorData::ConstSharedPtr msg) {
                 on_motor_frame(msg);
             });
