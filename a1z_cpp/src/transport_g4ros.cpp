@@ -32,11 +32,19 @@ public:
             ("a1z_g4ros_" + arm_side) : node_name;
         node_ = rclcpp::Node::make_shared(name);
 
-        // Create publisher and subscription
+        // Queue depth 100: /motor_send and /motor_data each carry both arms at
+        // ~2700 msg/s; the old depth of 10 covered only ~3.7 ms of traffic, and
+        // KEEP_LAST overflow drops the OLDEST frame first — which is always the
+        // earliest-replying motor (can_id 1/2) in each control cycle.
+        // 100 gives ~37 ms of slack; do NOT raise much further — with FastDDS
+        // SHM transport each queued sample holds a shared-memory buffer, and
+        // very deep reader queues can exhaust the writer-side SHM pool and
+        // throttle g4spi_node's publisher for every subscriber (2026-08
+        // measured severe receive degradation with depth 1000).
         pub_ = node_->create_publisher<lemo_main_board::msg::MotorData>(
-            "motor_send", 10);
+            "motor_send", 100);
         sub_ = node_->create_subscription<lemo_main_board::msg::MotorData>(
-            "motor_data", 10,
+            "motor_data", 100,
             [this](lemo_main_board::msg::MotorData::ConstSharedPtr msg) {
                 on_motor_frame(msg);
             });
