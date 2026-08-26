@@ -581,6 +581,27 @@ void ArmRobot::control_loop() {
         iteration_count++;
         auto now = std::chrono::steady_clock::now();
 
+        // Auto-release watchdog: a latched feedback-stale FAULT_HOLD must not
+        // turn a transient gap into a permanent teleop stop (2026-08-26
+        // dual-arm latch after a 200 ms system stall). Release only after
+        // feedback has been continuously healthy for 0.5 s.
+        if (control_state_ == ControlState::FAULT_HOLD &&
+            fault_code_.find("FEEDBACK_STALE") != std::string::npos) {
+            if (motor_chain_->all_feedback_fresh(stale_feedback_warn_s_)) {
+                if (!fault_hold_healthy_since_set_) {
+                    fault_hold_healthy_since_ = now;
+                    fault_hold_healthy_since_set_ = true;
+                } else if (std::chrono::duration<double>(
+                               now - fault_hold_healthy_since_).count() >= 0.5) {
+                    auto_release_fault_hold();
+                }
+            } else {
+                fault_hold_healthy_since_set_ = false;
+            }
+        } else {
+            fault_hold_healthy_since_set_ = false;
+        }
+
         // Frequency monitoring
         double elapsed_since_check = std::chrono::duration<double>(now - last_check_time).count();
         if (elapsed_since_check >= FREQ_CHECK_INTERVAL) {
@@ -1023,6 +1044,43 @@ void ArmRobot::set_fault_state(ControlState state, const std::string& code,
     fault_reason_ = reason;
 }
 
+std::string ArmRobot::feedback_state_dump() const {
+    auto ages = motor_chain_->get_feedback_ages();
+    auto codes = motor_chain_->get_error_codes();
+    std::ostringstream oss;
+    oss << "feedback ages(ms)=[";
+    for (size_t i = 0; i < 6; ++i) {
+        oss << (i ? "," : "") << (std::isinf(ages[i]) ? -1 : static_cast<int>(ages[i] * 1000));
+    }
+    oss << "] err=[";
+    for (size_t i = 0; i < 6; ++i) {
+        oss << (i ? "," : "") << codes[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+void ArmRobot::auto_release_fault_hold() {
+    const std::string released_code = fault_code_;
+    {
+        // Re-anchor at the measured pose before accepting commands again
+        // (same as release()): the arm may have sagged during the hold.
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        std::lock_guard<std::mutex> cmd_lock(command_mutex_);
+        command_.pos = state_.pos;
+        command_.vel.fill(0.0);
+        command_.acc.fill(0.0);
+        command_.torque_ff.fill(0.0);
+    }
+    commands_blocked_ = false;
+    set_fault_state(ControlState::RUNNING, "", "");
+    reset_integral_state();
+    fault_hold_healthy_since_set_ = false;
+    std::cerr << "[ArmRobot] Fault hold AUTO-RELEASED (" << released_code
+              << "): feedback healthy >= 0.5s, re-anchored at current pose. "
+              << feedback_state_dump() << std::endl;
+}
+
 void ArmRobot::write_last_sent_hold_locked() {
     // Caller owns command_mutex_. Restore the last fully transmitted target
     // and PD gains; clear motion/torque feedforward.
@@ -1077,7 +1135,7 @@ void ArmRobot::hold_position(const std::string& reason,
     set_fault_state(ControlState::FAULT_HOLD, fault_code, reason);
     reset_integral_state();
     std::cerr << "[ArmRobot] Fault hold engaged (" << fault_code << "): "
-              << reason << std::endl;
+              << reason << ". " << feedback_state_dump() << std::endl;
 }
 
 bool ArmRobot::handle_control_exception(

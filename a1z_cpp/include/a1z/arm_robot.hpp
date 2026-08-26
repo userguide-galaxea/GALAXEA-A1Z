@@ -400,11 +400,20 @@ private:
     double now_seconds() const;
     void set_fault_state(ControlState state, const std::string& code, const std::string& reason);
     void send_zero_torque_and_disable();
+    // Auto-release a feedback-stale FAULT_HOLD after feedback has been
+    // continuously healthy (see control_loop watchdog); re-anchors at the
+    // measured pose like release().
+    void auto_release_fault_hold();
+    std::string feedback_state_dump() const;
 
     // Last successfully transmitted command and its gravity-only fallback
     JointCommand last_sent_command_;
     MotorCommandFrame last_safe_hold_frame_;
     bool has_sent_command_ = false;
+
+    // Watchdog state for auto-release of feedback-stale fault holds
+    bool fault_hold_healthy_since_set_ = false;
+    std::chrono::steady_clock::time_point fault_hold_healthy_since_{};
 };
 
 } // namespace a1z

@@ -147,14 +147,19 @@ private:
 
         // Inter-arrival gap monitor: gaps >100 ms mean the DDS delivery or
         // this executor's spin thread stalled (2026-08-26 right-arm 305 ms
-        // feedback outage — root cause still unknown, this catches it live).
+        // feedback outage). The publish-stamp age tells WHERE it stalled:
+        // fresh stamp + late callback = DDS/subscriber thread stall;
+        // old stamp = upstream publish gap.
         const auto now = std::chrono::steady_clock::now();
         if (last_cb_time_.time_since_epoch().count() != 0) {
             const double gap_ms =
                 std::chrono::duration<double, std::milli>(now - last_cb_time_).count();
             if (gap_ms > 100.0) {
+                const double transit_ms =
+                    (node_->now() - msg->header.stamp).seconds() * 1000.0;
                 std::cerr << "[G4Ros:" << arm_side_ << "] motor_data gap "
-                          << gap_ms << " ms" << std::endl;
+                          << gap_ms << " ms (this msg transit " << transit_ms
+                          << " ms)" << std::endl;
             }
         }
         last_cb_time_ = now;
