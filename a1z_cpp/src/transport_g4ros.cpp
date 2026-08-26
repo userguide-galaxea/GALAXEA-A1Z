@@ -4,8 +4,10 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <lemo_main_board/msg/motor_data.hpp>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <iostream>
 #include <mutex>
 #include <thread>
 
@@ -143,6 +145,20 @@ private:
             return;
         }
 
+        // Inter-arrival gap monitor: gaps >100 ms mean the DDS delivery or
+        // this executor's spin thread stalled (2026-08-26 right-arm 305 ms
+        // feedback outage — root cause still unknown, this catches it live).
+        const auto now = std::chrono::steady_clock::now();
+        if (last_cb_time_.time_since_epoch().count() != 0) {
+            const double gap_ms =
+                std::chrono::duration<double, std::milli>(now - last_cb_time_).count();
+            if (gap_ms > 100.0) {
+                std::cerr << "[G4Ros:" << arm_side_ << "] motor_data gap "
+                          << gap_ms << " ms" << std::endl;
+            }
+        }
+        last_cb_time_ = now;
+
         CanFrame frame;
         frame.id = msg->can_id;
         frame.dlc = std::min(static_cast<size_t>(msg->data.size()),
@@ -158,6 +174,7 @@ private:
     std::string arm_side_;
     uint8_t arm_id_;
     bool owns_context_ = false;
+    std::chrono::steady_clock::time_point last_cb_time_{};
 
     rclcpp::Node::SharedPtr node_;
     rclcpp::Publisher<lemo_main_board::msg::MotorData>::SharedPtr pub_;
