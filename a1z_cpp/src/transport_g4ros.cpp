@@ -45,11 +45,13 @@ public:
         // measured severe receive degradation with depth 1000).
         pub_ = node_->create_publisher<lemo_main_board::msg::MotorData>(
             "motor_send", 100);
-        // Explicit RELIABLE (matches the rclcpp default and g4spi_node's
-        // publisher); written out so nobody "optimizes" it to best-effort,
-        // which would silently drop motor feedback under load.
+        // motor_data 用 BEST_EFFORT：反馈是 200Hz 状态流，丢一帧 5ms 后就有
+        // 下一帧；RELIABLE 在订阅者瞬时变慢时不会"只丢一帧"，而是触发 ~300ms
+        // 的修复停顿（2026-08-28 实测：recorder 启动 CPU 尖峰 → 修复停顿 →
+        // SDK FEEDBACK_STALE 锁存抖动）。旧注释担心 BE"静默丢反馈"，但 SDK
+        // 侧本来就把超龄帧当丢帧处理，BE 的丢失是显性的、可度量的。
         sub_ = node_->create_subscription<lemo_main_board::msg::MotorData>(
-            "motor_data", rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
+            "motor_data", rclcpp::QoS(rclcpp::KeepLast(100)).best_effort(),
             [this](lemo_main_board::msg::MotorData::ConstSharedPtr msg) {
                 on_motor_frame(msg);
             });
