@@ -10,6 +10,10 @@
 
 A1Z 六轴机械臂的开源 Python SDK，面向机器人研发、算法验证和上层应用集成。项目提供跨平台 CAN 通信、电机控制、Pinocchio 动力学与运动学、重力补偿、零力示教、位置保持及可选 G1Z 夹爪控制。
 
+代码仓库：[gitlab.galaxea-ai.com/menglian.li/a1z](https://gitlab.galaxea-ai.com/menglian.li/a1z/)
+
+当前跨平台验证分支：`codex/cross-platform-g1z-fixes`
+
 > [!CAUTION]
 > 本 SDK 会直接使能和控制真实机械臂，不是经认证的功能安全系统。首次运行任何主动命令前，请固定机械臂、清空工作空间、确保急停可触及，并从低补偿系数和低速度开始。
 
@@ -115,10 +119,10 @@ a1z/
 
 ```bash
 
-# 当前跨平台开发版（包含 Windows HHS USB-CANFD 支持）
-git clone -b dev --single-branch https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+# 克隆当前跨平台验证分支
+git clone --branch codex/cross-platform-g1z-fixes --single-branch https://gitlab.galaxea-ai.com/menglian.li/a1z.git GALAXEA-A1Z
 
-cd /path/to/GALAXEA-A1Z
+cd GALAXEA-A1Z
 
 # Linux/macOS 建议使用虚拟环境；Windows 请使用下文的 Conda 流程
 # 解释器必须 >= 3.10；若系统 python3 版本过低，请显式指定 python3.10+
@@ -690,7 +694,7 @@ python -m pytest -q
 
 ## 获取帮助与报告问题
 
-报告问题前，请先查阅 [CAN 通信故障排查](#can-通信故障排查) 并搜索现有 [GitHub Issues](https://github.com/userguide-galaxea/GALAXEA-A1Z/issues)。新 Issue 建议包含：
+报告问题前，请先查阅 [CAN 通信故障排查](#can-通信故障排查) 并搜索现有 [GitLab Issues](https://gitlab.galaxea-ai.com/menglian.li/a1z/-/issues)。新 Issue 建议包含：
 
 - 操作系统及版本、Python 版本、仓库分支/提交号。
 - CAN 适配器型号和 VID:PID、后端类型、通道及波特率。
@@ -728,6 +732,10 @@ python -m pytest -q
 </p>
 
 An open-source Python SDK for A1Z six-axis robotic-arm research, algorithm validation, and application integration. It provides cross-platform CAN communication, motor control, Pinocchio-based dynamics and kinematics, gravity compensation, zero-force teaching, position hold, and optional G1Z gripper control.
+
+Repository: [gitlab.galaxea-ai.com/menglian.li/a1z](https://gitlab.galaxea-ai.com/menglian.li/a1z/)
+
+Current cross-platform validation branch: `codex/cross-platform-g1z-fixes`
 
 > [!CAUTION]
 > This SDK directly enables and controls physical robot hardware. It is not a certified functional-safety system. Before running any active command for the first time, secure the arm, clear the workspace, keep the emergency stop within reach, and begin with a low gravity-compensation factor and low speed.
@@ -832,10 +840,10 @@ a1z/
 ### Install the SDK
 
 ```bash
-# Current cross-platform development version (including Windows HHS USB-CANFD support)
-git clone -b dev --single-branch https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+# Clone the current cross-platform validation branch
+git clone --branch codex/cross-platform-g1z-fixes --single-branch https://gitlab.galaxea-ai.com/menglian.li/a1z.git GALAXEA-A1Z
 
-cd /path/to/GALAXEA-A1Z
+cd GALAXEA-A1Z
 
 # Use a virtual environment on Linux/macOS; follow the Conda workflow below on Windows
 # Python must be >= 3.10; explicitly select python3.10+ if the system interpreter is older
@@ -1384,7 +1392,7 @@ Before opening a pull request, confirm that:
 
 ## Getting Help and Reporting Issues
 
-Before reporting a problem, review [CAN Communication Troubleshooting](#can-communication-troubleshooting) and search existing [GitHub Issues](https://github.com/userguide-galaxea/GALAXEA-A1Z/issues). A useful new issue includes:
+Before reporting a problem, review [CAN Communication Troubleshooting](#can-communication-troubleshooting) and search existing [GitLab Issues](https://gitlab.galaxea-ai.com/menglian.li/a1z/-/issues). A useful new issue includes:
 
 - Operating system and version, Python version, and repository branch/commit.
 - CAN adapter model and VID:PID, backend, channel, and bitrate.
