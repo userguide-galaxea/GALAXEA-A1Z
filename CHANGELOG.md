@@ -13,13 +13,15 @@
 |------|----------|----------|------------------|------|
 | macOS | 无夹爪 | HHS `a8fa:8598` 实机通过 | 250 Hz | 已验证 |
 | macOS | G1Z 夹爪 | HHS `a8fa:8598` 实机通过 | 250 Hz | 已验证 |
-| Windows / Python 3.11 | G1Z 夹爪 | HHS 实机通信与控制通过 | 约 168–176 Hz | 可运行，未达到 250 Hz |
+| Windows / Python 3.11 | 无夹爪 | HHS 实机通信与重力补偿通过 | 250 Hz 调度已修复 | QPC 基准 249.99 Hz，真机终验待补 |
+| Windows / Python 3.11 | G1Z 夹爪 | HHS 实机通信与控制通过 | 修复前约 168–176 Hz | 需基于 QPC 修复重新实测 |
 | Windows / Python 3.10 | G1Z 夹爪 | HHS 实机通信与控制通过 | 约 65–70 Hz | 不建议用于当前控制配置 |
 
 - macOS 已确认有无 G1Z 夹爪都能保持 250 Hz，因此增加夹爪通信帧并不是
   Windows 约 172 Hz 的通用根因。
-- Windows 已完成适配器打开、1 Mbps 配置、六关节反馈及重力补偿实测，但
-  当前不得宣称 250 Hz 已通过验证。
+- Windows 已完成适配器打开、1 Mbps 配置、六关节反馈及重力补偿实测。
+  profiler 证明控制工作本身显著低于 4 ms；Windows 250 Hz 调度问题已修复，
+  但在补充修复后的真机频率日志和稳定性测试前，不宣称完整硬件验证通过。
 - 测试机现有驱动可直接被 libusb 访问，因此未使用 Zadig；其他 Windows
   机器仅在设备无法被 libusb 打开时才需要按 `README.md` 排查驱动。
 
@@ -27,12 +29,17 @@
 
 #### 控制循环与诊断
 
-- 将 `dev` 中缺失的绝对期限调度重新整合到控制循环，使用
-  `time.monotonic()` 计算下一周期，避免相对 `sleep()` 持续累积漂移。
+- 将 `dev` 中缺失的绝对期限调度重新整合到控制循环，避免相对 `sleep()`
+  持续累积漂移。
+- Windows Anaconda Python 3.11.16 实测 `time.monotonic()` 使用
+  `GetTickCount64()`，分辨率仅 15.625 ms，无法表达 250 Hz 的 4 ms 截止
+  时间。控制循环调度与频率统计改用 QPC 支撑的 `time.perf_counter()`；
+  逐关节反馈安全计时保持原逻辑不变。
 - `examples/gravity_comp.py` 新增 `--profile-loop`，并保留
   `A1Z_PROFILE_LOOP=1` 环境变量入口。
-- profiler 改为在 `_update()` 内独立统计和每 2 秒输出，使不同控制路径都能
-  产生一致的阶段耗时日志；启动时会明确提示 profiling 已启用。
+- profiler 在 `_update()` 内统计，并与每 2 秒一次的真实频率窗口同步输出，
+  使 Windows 终端也能可靠获得一致的阶段耗时日志；启动时会明确提示
+  profiling 已启用。
 - profiling 模式下状态信息使用普通日志输出，避免 `\r` 刷新覆盖频率和耗时
   诊断结果。
 - 支持 `A1Z_TRACE_CAN=1` 输出 CAN 收发诊断，便于继续定位 Windows USB
@@ -92,12 +99,26 @@ git clone --branch codex/cross-platform-g1z-fixes --single-branch \
 - `python -m unittest discover -q tests`：19 项测试通过。
 - Python 编译检查通过。
 - `git diff --check` 通过。
+- 同一 Windows / Anaconda Python 3.11 环境的 2,000 周期空载调度基准：
+  `249.99 Hz`，平均周期 `4.000 ms`，P99 `4.987 ms`。
+
+### Windows 250 Hz 定位结果
+
+- 修复前的无夹爪真机重力补偿频率为约 `203.5–207.5 Hz`；同一窗口的
+  `_update()` 平均总耗时仅 `1.243–1.325 ms`，其中六轴 `arm_tx` 为
+  `0.819–0.893 ms`，排除了 CAN 提交和动力学计算超出 4 ms 预算的假设。
+- 同一解释器的时钟检查结果：`time.monotonic()` 基于 `GetTickCount64()`、
+  分辨率 `15.625 ms`；`time.perf_counter()` 基于
+  `QueryPerformanceCounter()`、分辨率 `0.1 µs`。
+- 使用原 `monotonic()` 调度的 2,000 周期空载基准约为 `218.05 Hz`，周期
+  P99 和最大值均出现 `16 ms` 量化；切换 QPC 后恢复到 `249.99 Hz`。
+- 该修复不改变 CAN 位时序、电机命令、控制增益、反馈超时或急停逻辑。
 
 ### 已知限制与后续工作
 
-- Windows + HHS + G1Z 当前稳定在约 168–176 Hz，尚未达到配置目标 250 Hz；
-  后续应使用 `--profile-loop` 和 `A1Z_TRACE_CAN=1` 区分 USB 提交、反馈接收、
-  动力学计算和 Windows 调度器开销。
+- Windows 250 Hz 的粗粒度时钟根因和调度代码已修复；仍需补充修复后的
+  无夹爪/G1Z 真机短测，以及 250 Hz 下反馈延迟、丢帧、急停和至少 300 秒
+  稳定性验证。
 - Windows Python 3.10 的约 65–70 Hz 结果明显较差，当前文档推荐 3.11，
   但尚未完成更多 Python/Windows 版本的系统性对照。
 - Zadig 是否需要取决于设备当前绑定的 Windows 驱动。驱动已支持 libusb 时
