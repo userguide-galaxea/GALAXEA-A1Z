@@ -130,10 +130,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # 开发模式安装（推荐）
-pip install -e .
+python -m pip install -e .
 
 # 或直接安装
-pip install .
+python -m pip install .
 ```
 
 依赖会自动安装：`numpy`、`python-can>=4.0`、`pyyaml`，Linux/macOS 还会通过 pip 安装 `pin`（Pinocchio）。Windows 上不由 pip 处理 `pin`，请按下文使用 Conda 安装 `pinocchio`。
@@ -141,7 +141,7 @@ pip install .
 macOS / Windows 用户请改用以下命令安装（含 gs_usb 用户态后端和 libusb 运行时）：
 
 ```bash
-pip install -e ".[gs_usb]"
+python -m pip install -e ".[gs_usb]"
 ```
 
 > 注意：macOS 默认的 zsh 会把 `[...]` 当作通配符并报 `no matches found`，所以引号不能省。Windows 还需要允许 libusb 访问设备的驱动；现有驱动可用时不要强制替换。
@@ -198,7 +198,7 @@ macOS 没有 SocketCAN，SDK 会自动检测平台并使用 gs_usb 用户态后�
 
 ```bash
 # 1. 安装 SDK + gs_usb extras（含内置 libusb，通常无需 brew）
-pip install -e ".[gs_usb]"
+python -m pip install -e ".[gs_usb]"
 
 # 2. 验证 CAN 通信（可选）
 bash tools/verify_can_mac.sh
@@ -241,11 +241,11 @@ SDK 默认按平台自动选择 CAN 后端：
 
 | 平台 | 适配器 | 安装 | 使用 |
 |------|--------|------|------|
-| Linux | SocketCAN 内核驱动 | `pip install -e .` | `--can can0` |
-| **macOS** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"` | （默认）`gs_usb` |
-| **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB 运行时 | `--bustype pcan --can PCAN_USBBUS1` |
-| **Windows** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"`；仅驱动不兼容时使用 Zadig/WinUSB | （默认）`gs_usb` |
-| **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK 官方驱动 | `--bustype pcan --can PCAN_USBBUS1` |
+| Linux | SocketCAN 内核驱动 | `python -m pip install -e .` | `--can can0` |
+| **macOS** | **HHS**（`a8fa:8598`） | `python -m pip install -e ".[gs_usb]"` | （默认）`gs_usb` |
+| **macOS** | **PEAK PCAN-USB** | `python -m pip install -e ".[pcan]"` + MacCAN PCBUSB 运行时 | `--bustype pcan --can PCAN_USBBUS1` |
+| **Windows** | **HHS**（`a8fa:8598`） | `python -m pip install -e ".[gs_usb]"`；仅驱动不兼容时使用 Zadig/WinUSB | （默认）`gs_usb` |
+| **Windows** | **PEAK PCAN-USB** | `python -m pip install -e ".[pcan]"` + PEAK 官方驱动 | `--bustype pcan --can PCAN_USBBUS1` |
 
 不传 `--bustype` 时使用 OS 默认值：Linux 默认 `socketcan`/`can0`，macOS/Windows 默认 `gs_usb`/设备序号 `0`。
 
@@ -348,19 +348,19 @@ python examples/teach_and_play.py play teach.json --with-gripper
 
 ```bash
 # 终端 1：启动服务端（默认无夹爪；加 --with-gripper 启用夹爪）
-python3 tools/a1zctl serve
+python tools/a1zctl serve
 
 # 终端 1（带夹爪）：
-python3 tools/a1zctl serve --with-gripper
+python tools/a1zctl serve --with-gripper
 
 # 终端 2：发送控制指令
-python3 tools/a1zctl status              # 查看关节状态（含夹爪开度）
-python3 tools/a1zctl move --preset home  # 移动到预置位
-python3 tools/a1zctl move 0,60,-60,0,0,0 --speed 0.5
-python3 tools/a1zctl gripper 0.5         # 夹爪到 50% 开度
-python3 tools/a1zctl dance --moves salute,wave,nod
-python3 tools/a1zctl info                # 查看所有预置位与限位
-python3 tools/a1zctl stop               # 停止服务端
+python tools/a1zctl status              # 查看关节状态（含夹爪开度）
+python tools/a1zctl move --preset home  # 移动到预置位
+python tools/a1zctl move 0,60,-60,0,0,0 --speed 0.5
+python tools/a1zctl gripper 0.5         # 夹爪到 50% 开度
+python tools/a1zctl dance --moves salute,wave,nod
+python tools/a1zctl info                # 查看所有预置位与限位
+python tools/a1zctl stop               # 停止服务端
 ```
 
 ## CAN 通信故障排查
@@ -851,10 +851,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # Development mode (recommended)
-pip install -e .
+python -m pip install -e .
 
 # Or standard install
-pip install .
+python -m pip install .
 ```
 
 Dependencies installed automatically include `numpy`, `python-can>=4.0`, and `pyyaml`. On Linux/macOS, pip also installs `pin` (Pinocchio). On Windows, pip skips `pin`; install the Conda package `pinocchio` as described below.
@@ -862,7 +862,7 @@ Dependencies installed automatically include `numpy`, `python-can>=4.0`, and `py
 On macOS / Windows, install with the gs_usb extras instead (includes the gs_usb userspace backend and libusb runtime):
 
 ```bash
-pip install -e ".[gs_usb]"
+python -m pip install -e ".[gs_usb]"
 ```
 
 > Note: zsh (the default macOS shell) treats `[...]` as a glob and fails with `no matches found` — the quotes are required. Windows also needs a driver that permits libusb access; do not replace a working existing driver unnecessarily.
@@ -919,7 +919,7 @@ macOS has no SocketCAN. The SDK automatically detects the platform and uses the 
 
 ```bash
 # 1. Install SDK + gs_usb extras (includes bundled libusb; usually no brew needed)
-pip install -e ".[gs_usb]"
+python -m pip install -e ".[gs_usb]"
 
 # 2. Verify CAN communication (optional)
 bash tools/verify_can_mac.sh
@@ -962,11 +962,11 @@ The SDK automatically selects the CAN backend by platform:
 
 | Platform | Adapter | Install | Usage |
 |----------|---------|---------|-------|
-| Linux | SocketCAN kernel driver | `pip install -e .` | `--can can0` |
-| **macOS** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"` | (default) `gs_usb` |
-| **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB runtime | `--bustype pcan --can PCAN_USBBUS1` |
-| **Windows** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"`; use Zadig/WinUSB only for an incompatible driver | (default) `gs_usb` |
-| **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK official driver | `--bustype pcan --can PCAN_USBBUS1` |
+| Linux | SocketCAN kernel driver | `python -m pip install -e .` | `--can can0` |
+| **macOS** | **HHS** (`a8fa:8598`) | `python -m pip install -e ".[gs_usb]"` | (default) `gs_usb` |
+| **macOS** | **PEAK PCAN-USB** | `python -m pip install -e ".[pcan]"` + MacCAN PCBUSB runtime | `--bustype pcan --can PCAN_USBBUS1` |
+| **Windows** | **HHS** (`a8fa:8598`) | `python -m pip install -e ".[gs_usb]"`; use Zadig/WinUSB only for an incompatible driver | (default) `gs_usb` |
+| **Windows** | **PEAK PCAN-USB** | `python -m pip install -e ".[pcan]"` + PEAK official driver | `--bustype pcan --can PCAN_USBBUS1` |
 
 When `--bustype` is omitted, the OS default is used: Linux defaults to `socketcan`/`can0`; macOS/Windows default to `gs_usb`/device index `0`.
 
@@ -1069,19 +1069,19 @@ After playback (or Ctrl+C), the arm returns to zero and disables.
 
 ```bash
 # Terminal 1: start the server (default no gripper; add --with-gripper to enable it)
-python3 tools/a1zctl serve
+python tools/a1zctl serve
 
 # Terminal 1 (with gripper):
-python3 tools/a1zctl serve --with-gripper
+python tools/a1zctl serve --with-gripper
 
 # Terminal 2: send control commands
-python3 tools/a1zctl status              # show joint state (including gripper)
-python3 tools/a1zctl move --preset home  # move to preset position
-python3 tools/a1zctl move 0,60,-60,0,0,0 --speed 0.5
-python3 tools/a1zctl gripper 0.5         # set gripper to 50% open
-python3 tools/a1zctl dance --moves salute,wave,nod
-python3 tools/a1zctl info                # list all presets and limits
-python3 tools/a1zctl stop               # stop the server
+python tools/a1zctl status              # show joint state (including gripper)
+python tools/a1zctl move --preset home  # move to preset position
+python tools/a1zctl move 0,60,-60,0,0,0 --speed 0.5
+python tools/a1zctl gripper 0.5         # set gripper to 50% open
+python tools/a1zctl dance --moves salute,wave,nod
+python tools/a1zctl info                # list all presets and limits
+python tools/a1zctl stop               # stop the server
 ```
 
 ## CAN Communication Troubleshooting

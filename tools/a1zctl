@@ -6,16 +6,16 @@ Start the server first, then send commands from any terminal (including OpenClaw
 Usage
 -----
   # Terminal 1 — keep running:
-  python3 tools/a1zctl serve [--can can0] [--with-gripper] [--gravity-mode]
+  python tools/a1zctl serve [--can can0] [--with-gripper] [--gravity-mode]
 
   # Terminal 2 (or OpenClaw):
-  python3 tools/a1zctl status
-  python3 tools/a1zctl move 0,60,-60,0,0,0
-  python3 tools/a1zctl move --preset home
-  python3 tools/a1zctl gripper 0.5
-  python3 tools/a1zctl dance --moves salute,wave,bow
-  python3 tools/a1zctl info
-  python3 tools/a1zctl stop
+  python tools/a1zctl status
+  python tools/a1zctl move 0,60,-60,0,0,0
+  python tools/a1zctl move --preset home
+  python tools/a1zctl gripper 0.5
+  python tools/a1zctl dance --moves salute,wave,bow
+  python tools/a1zctl info
+  python tools/a1zctl stop
 """
 
 import argparse
@@ -53,10 +53,10 @@ def _send(cmd: str, args: dict | None = None) -> dict:
         return json.loads(data.split(b"\n", 1)[0].decode())
     except FileNotFoundError:
         print(f"[a1zctl] Socket not found: {SOCKET_PATH}")
-        print("[a1zctl] Start the server first:  python3 tools/a1zctl serve")
+        print("[a1zctl] Start the server first:  python tools/a1zctl serve")
         sys.exit(1)
     except ConnectionRefusedError:
-        print("[a1zctl] Server not running.  Start with:  python3 tools/a1zctl serve")
+        print("[a1zctl] Server not running.  Start with:  python tools/a1zctl serve")
         sys.exit(1)
 
 
@@ -160,13 +160,13 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 tools/a1zctl serve --with-gripper
-  python3 tools/a1zctl status
-  python3 tools/a1zctl move 0,60,-60,0,0,0
-  python3 tools/a1zctl move --preset home
-  python3 tools/a1zctl gripper 0.5
-  python3 tools/a1zctl dance --moves salute,wave,bow --speed 0.7
-  python3 tools/a1zctl stop
+  python tools/a1zctl serve --with-gripper
+  python tools/a1zctl status
+  python tools/a1zctl move 0,60,-60,0,0,0
+  python tools/a1zctl move --preset home
+  python tools/a1zctl gripper 0.5
+  python tools/a1zctl dance --moves salute,wave,bow --speed 0.7
+  python tools/a1zctl stop
         """,
     )
     sub = p.add_subparsers(dest="command", required=True)
