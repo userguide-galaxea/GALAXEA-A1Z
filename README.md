@@ -8,7 +8,54 @@
   <img src="docs/images/A1Z_G1Z.png" alt="A1Z 机械臂（带 G1Z 夹爪）" width="500"/>
 </p>
 
-A1Z 六轴机械臂的 Python 控制 SDK，提供 CAN 总线电机驱动、基于 Pinocchio 的重力补偿、正/逆运动学，以及零力示教和位置保持等功能。
+A1Z 六轴机械臂的开源 Python SDK，面向机器人研发、算法验证和上层应用集成。项目提供跨平台 CAN 通信、电机控制、Pinocchio 动力学与运动学、重力补偿、零力示教、位置保持及可选 G1Z 夹爪控制。
+
+> [!CAUTION]
+> 本 SDK 会直接使能和控制真实机械臂，不是经认证的功能安全系统。首次运行任何主动命令前，请固定机械臂、清空工作空间、确保急停可触及，并从低补偿系数和低速度开始。
+
+## 快速导航
+
+- [功能特性](#功能特性)
+- [平台与硬件支持](#平台与硬件支持)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [CAN 通信故障排查](#can-通信故障排查)
+- [API 参考](#api-参考)
+- [安全注意事项](#安全注意事项)
+- [开发与贡献](#开发与贡献)
+
+## 功能特性
+
+- **跨平台 CAN 后端**：Linux 使用 SocketCAN，macOS/Windows 可使用 HHS `gs_usb` 用户态后端，也可选 PEAK PCAN-USB。
+- **六轴机械臂控制**：MotorA/MotorB 混合链、MIT 力位混控、250 Hz 默认控制循环。
+- **动力学与运动学**：基于 Pinocchio 的 RNEA 重力补偿、FK 和 IK。
+- **交互式示例**：重力补偿、位置保持、零力示教与回放、夹爪测试。
+- **诊断与安全收尾**：CAN 检查、被动监听、电机扫描、错误码解析、中断后重复失能。
+- **可配置夹爪模型**：通过 `a1z_g1z.yaml` 同步启用 G1Z 夹爪和对应 URDF 质量模型。
+
+## 平台与硬件支持
+
+| 平台 | 默认后端 | 适配器/运行时 | 说明 |
+|------|----------|----------------|------|
+| Linux | SocketCAN | SocketCAN 兼容 CAN 接口 | 需配置 1 Mbps 接口；部分内核版本可能需要 `gs_usb` 补丁 |
+| macOS | `gs_usb` | HHS USB-CANFD（`a8fa:8598`） | 用户态 USB 后端；当前版本已通过 250 Hz 真机控制验证 |
+| Windows | `gs_usb` | HHS USB-CANFD（`a8fa:8598`）+ libusb 兼容驱动 | 先使用现有驱动；无法打开时再考虑 Zadig/WinUSB |
+| macOS / Windows | `pcan` | PEAK PCAN-USB + 官方运行时 | 通过 `--bustype pcan` 显式选择 |
+
+### 验证层级
+
+为避免把“适配器可打开”误解为“机械臂可安全控制”，本项目将验证分为三层：
+
+1. **适配器层**：USB-CAN 设备可识别、打开并提交发送请求。Windows 可用 `tools/verify_can_win.py`。
+2. **电机通信层**：机械臂已上电、接线和终端电阻正确，所有关节能返回有效反馈。使用 `tools/motor_diag.py --scan`。
+3. **控制层**：在真实负载下验证频率、丢帧/延迟、稳定性、限位和重力补偿方向。该层必须在本地硬件上完成，前两层通过不代表本层通过。
+
+当前真机验证状态（2026-09）：
+
+| 平台/组合 | 结果 |
+|-----------|------|
+| macOS + HHS `a8fa:8598` + 异步用户态后端 | 无夹爪与启用 G1Z 夹爪两种配置均已通过 250 Hz 真机控制验证 |
+| Windows + HHS + G1Z | USB-CAN、电机通信和重力补偿可运行；实测约 168–176 Hz，250 Hz 尚未通过 |
 
 ## 项目结构
 
@@ -68,15 +115,15 @@ a1z/
 
 ```bash
 
-# 拉取本仓库（main 分支已包含可选夹爪支持）
-git clone https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+# 当前跨平台开发版（包含 Windows HHS USB-CANFD 支持）
+git clone -b dev --single-branch https://github.com/userguide-galaxea/GALAXEA-A1Z.git
 
 cd /path/to/GALAXEA-A1Z
 
-# 建议使用虚拟环境，避免污染系统 Python（可选但推荐）
-# 注意解释器必须 >= 3.10；macOS 自带的 python3 是 3.9，请显式指定，如 python3.10
+# Linux/macOS 建议使用虚拟环境；Windows 请使用下文的 Conda 流程
+# 解释器必须 >= 3.10；若系统 python3 版本过低，请显式指定 python3.10+
 python3 -m venv .venv
-source .venv/bin/activate    # Windows 用 .venv\Scripts\activate
+source .venv/bin/activate
 
 # 开发模式安装（推荐）
 pip install -e .
@@ -85,15 +132,15 @@ pip install -e .
 pip install .
 ```
 
-依赖会自动安装：`numpy`、`python-can>=4.0`、`pin`（Pinocchio）、`pyyaml`。
+依赖会自动安装：`numpy`、`python-can>=4.0`、`pyyaml`，Linux/macOS 还会通过 pip 安装 `pin`（Pinocchio）。Windows 上不由 pip 处理 `pin`，请按下文使用 Conda 安装 `pinocchio`。
 
-macOS / Windows 用户请改用以下命令安装（含 gs_usb 用户态后端 + 内置 libusb，无需额外安装驱动库）：
+macOS / Windows 用户请改用以下命令安装（含 gs_usb 用户态后端和 libusb 运行时）：
 
 ```bash
 pip install -e ".[gs_usb]"
 ```
 
-> 注意：macOS 默认的 zsh 会把 `[...]` 当作通配符并报 `no matches found`，所以引号不能省。
+> 注意：macOS 默认的 zsh 会把 `[...]` 当作通配符并报 `no matches found`，所以引号不能省。Windows 还需要允许 libusb 访问设备的驱动；现有驱动可用时不要强制替换。
 
 ### 配置文件（可选）
 
@@ -155,22 +202,34 @@ bash tools/verify_can_mac.sh
 
 #### Windows（gs_usb 用户态模式）
 
-Windows 同样走 gs_usb 用户态后端，但需要先用 **Zadig** 安装 WinUSB 驱动：
+Windows 同样走 gs_usb 用户态后端。`libusb-package` / `libusb1` 由 `.[gs_usb]` extras 安装。如果适配器现有驱动已允许 libusb 访问，无需使用 Zadig；只有在设备无法打开且确认是驱动不兼容时，才需要将设备绑定到 WinUSB。
 
 ```powershell
-# 1. 用 Zadig 将 HHS 适配器驱动替换为 WinUSB
+# 0. 如果当前终端中文乱码，切换为 UTF-8（推荐使用 Windows Terminal）
+chcp 65001
 
-# 2. 安装 Pinocchio（Windows 没有 pip 预编译包，必须用 conda）
-conda install -c conda-forge pin
+# 1. 创建并激活独立 Conda 环境
+# Windows 250 Hz 控制推荐 Python 3.11，其短周期定时精度优于 3.10
+conda create -n a1z python=3.11 -y
+conda activate a1z
 
-# 3. 安装 SDK + gs_usb extras
-pip install -e ".[gs_usb]"
+# 2. 用 Conda 安装 Pinocchio（Windows 包名为 pinocchio）
+conda install -c conda-forge pinocchio -y
 
-# 4. 验证 CAN 通信（可选）
+# 3. 在同一环境中安装 SDK + gs_usb extras
+python -m pip install -e ".[gs_usb]"
+
+# 4. 确认 python/pip 都指向当前 Conda 环境，并检查依赖
+where.exe python
+python --version
+python -m pip --version
+python -c "import pinocchio, can, usb, usb1, gs_usb; print('Environment OK')"
+
+# 5. 验证 USB-CAN 适配器能否打开和发送
 python tools\verify_can_win.py
 ```
 
-> ⚠️ **Zadig 步骤不能省**。Windows 默认会用通用 USB 串行驱动占用 HHS 设备，libusb 抢不到设备会报 `Cannot find device 0`。
+> ⚠️ 先不使用 Zadig 运行 `verify_can_win.py`。如果报 `Cannot find device 0` 或权限/驱动错误，再核对 VID:PID `a8fa:8598` 并考虑用 Zadig 绑定 WinUSB。更换驱动前请记录原驱动，因为这可能影响厂商工具。`verify_can_win.py` 成功仅证明适配器可打开并接受发送调用，不等于电机在线或 250 Hz 重力补偿已验证。
 
 #### 跨平台 CAN 配置
 
@@ -181,7 +240,7 @@ SDK 默认按平台自动选择 CAN 后端：
 | Linux | SocketCAN 内核驱动 | `pip install -e .` | `--can can0` |
 | **macOS** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"` | （默认）`gs_usb` |
 | **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB 运行时 | `--bustype pcan --can PCAN_USBBUS1` |
-| **Windows** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"` + Zadig WinUSB 驱动 | （默认）`gs_usb` |
+| **Windows** | **HHS**（`a8fa:8598`） | `pip install -e ".[gs_usb]"`；仅驱动不兼容时使用 Zadig/WinUSB | （默认）`gs_usb` |
 | **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK 官方驱动 | `--bustype pcan --can PCAN_USBBUS1` |
 
 不传 `--bustype` 时使用 OS 默认值：Linux 默认 `socketcan`/`can0`，macOS/Windows 默认 `gs_usb`/设备序号 `0`。
@@ -302,16 +361,37 @@ python3 tools/a1zctl stop               # 停止服务端
 
 ## CAN 通信故障排查
 
-如果运行 `python examples/gravity_comp.py --gravity_factor 0.3` 报错或机械臂无反应，最常见原因是部分较老或特定版本的 Linux 内核，其内置的 socketcan / `gs_usb` 驱动与本 CAN 盒存在兼容性问题。
+先根据失败阶段定位，不要把所有问题都归因于 Zadig 或内核驱动：
 
-### 1. 检查硬件接线
+| 失败阶段 | 优先检查 |
+|----------|----------|
+| macOS 报 `usb.core.NoBackendError` | 确认使用当前 SDK 的 `verify_can_mac.sh`，并重新安装 `.[gs_usb]`；SDK 会显式加载 `libusb-package` 内置 dylib，通常无需 Homebrew libusb |
+| 找不到 USB 设备 | 适配器供电、USB 线缆/接口、VID:PID；Windows 先检查设备管理器中的当前驱动，不兼容时再考虑 Zadig/WinUSB |
+| 无法打开 CAN 总线 | 适配器型号、gs_usb/SocketCAN 后端、波特率、设备是否被其他程序占用 |
+| 适配器可发送，但电机扫描无响应 | 机械臂上电、CANH/CANL 接线、120 Ω 终端电阻、1 Mbps 波特率、电机 ID/固件模式 |
+| 电机有反馈，但控制不稳定 | 回显帧过滤、控制频率、丢帧/延迟、错误码、供电和机械负载 |
+
+### 1. 先做不使能电机的环境和适配器检查
+
+```bash
+python --version
+python -m pip --version
+python -c "import pinocchio, can; print('Python environment OK')"
+python tools/motor_diag.py --check-can
+```
+
+Windows 可另行运行 `python tools\verify_can_win.py`。该脚本只验证适配器识别、打开和发送，不会验证电机反馈或控制稳定性。
+
+### 2. 检查硬件接线
 
 - CAN 盒（USB-CANFD 适配器）已插入电脑并牢固接触
 - CAN 总线两端接线正确、无松动
 - 机械臂电源已上电
 - CAN 盒的终端电阻正确安装（参见上文"配置 CAN 总线"）
 
-### 2. 检查内核版本并修复（推荐直接执行）
+### 3. Linux：检查内核版本并修复
+
+仅当 Linux SocketCAN 路径在完成上述检查后仍无法通信时，再排查内核 `gs_usb` 兼容性。
 
 查看当前内核版本：
 
@@ -322,7 +402,7 @@ uname -r
 - **方案 A**：升级 Linux 内核到 **6.8.0-124** 或更新版本（如果您有其他工作依赖当前内核，建议按照方案 B 操作）
 - **方案 B**：按官方文档给内核 / 驱动打补丁 —— 详见 [Galaxea 内核补丁指引](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
 
-### 3. 手动确认是否为内核兼容问题（可选）
+### 4. Linux：手动确认是否为内核兼容问题（可选）
 
 如果不确定问题是否出在内核，或按上一步升级 / 打补丁后仍无法通信，可以手动向 J6 电机发送 CAN 指令来复现。
 
@@ -429,6 +509,8 @@ python tools/motor_diag.py --listen --duration 10
 python tools/motor_diag.py --clear-error
 python tools/motor_diag.py --clear-error --joints 3 4
 ```
+
+> ⚠️ `--scan`、`--monitor` 和 `--probe` 不是被动诊断：它们会使能电机并发送控制帧，机械臂可能短暂动作。脚本会要求输入 `YES` 进行确认。执行前请清空周围空间、稳定支撑机械臂、确保急停可触及，运行期间不要接触机械臂。自动化环境只能在已完成等价安全检查时使用 `--yes`。
 
 诊断脚本会自动检测并给出常见问题的排查建议：
 - 电机无响应（未上电 / CAN 线反接 / ID 错误 / 固件模式）
@@ -557,10 +639,13 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 ## 安全注意事项
 
-- 首次使用请将 `gravity_comp_factor` 设为较小值（如 0.3），确认补偿方向正确后再逐步增大
-- 重力扭矩超过每关节安全阈值时会自动紧急停止
-- 停机时会在 0.3s 内平滑衰减重力补偿并增加阻尼，避免突然失能导致机械臂下落
-- 所有目标关节角会被裁剪到 URDF 限位范围内
+- 请将机械臂牢固安装在稳定基座上，清空其全部可达空间，并确保操作者可随时按下物理急停。
+- 首次使用请将 `gravity_comp_factor` 设为较小值（如 `0.3`），确认补偿方向正确后再逐步增大。
+- 带 G1Z 夹爪时必须使用 `a1z_g1z.yaml` 或 `--with-gripper`，否则动力学模型不包含夹爪质量。
+- `--scan`、`--monitor`、`--probe`、示例脚本和 `a1zctl` 都可能使电机动作；不要在机械臂工作空间内停留。
+- 重力扭矩阈值、软限位和平滑停机只是软件保护，不能替代物理限位、防护围栏、急停回路或风险评估。
+- 通信中断、程序异常或行为不符合预期时，立即使用物理急停，然后确认所有电机已失能。
+- 不要将未经本地硬件验证的脚本用于无人值守、生产环境或与人直接协作的场景。
 
 ## 关节限位
 
@@ -586,6 +671,35 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 | MotorA KT | 2.8 (电流→扭矩转换系数) |
 | 控制频率 | 250 Hz |
 
+## 开发与贡献
+
+欢迎提交 Issue 和 Pull Request。建议使用小而可审查的变更，并将平台差异、硬件假设和安全影响写清楚。
+
+```bash
+# 先按本 README 完成当前平台的基础环境安装
+python -m pip install -e ".[dev]"
+python -m pytest -q
+```
+
+提交 PR 前请确认：
+
+- 变更聚焦于单一问题，不包含无关的格式化或生成文件。
+- 新增/修复的行为有对应测试；无法自动测试的硬件路径需说明人工验证步骤和结果。
+- 修改公开 API、CLI、默认参数、配置文件或平台支持时，同步更新中英文 README。
+- 不要仅根据“测试帧发送成功”宣称电机通信或控制稳定性已验证。
+
+## 获取帮助与报告问题
+
+报告问题前，请先查阅 [CAN 通信故障排查](#can-通信故障排查) 并搜索现有 [GitHub Issues](https://github.com/userguide-galaxea/GALAXEA-A1Z/issues)。新 Issue 建议包含：
+
+- 操作系统及版本、Python 版本、仓库分支/提交号。
+- CAN 适配器型号和 VID:PID、后端类型、通道及波特率。
+- 机械臂是否带 G1Z 夹爪、使用的配置文件和完整命令。
+- 失败所在的验证层级、完整错误输出、可稳定复现的最小步骤。
+- 硬件供电、CANH/CANL 接线和终端电阻的检查结果。
+
+公开日志前请删除用户名、本地路径、设备序列号及其他敏感信息。
+
 ## 开源许可
 
 本项目基于 [MIT License](LICENSE) 开源，版权归 **星海图** 所有。
@@ -594,11 +708,12 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 | 依赖 | 许可证 | 说明 |
 |------|--------|------|
-| [numpy](https://numpy.org) | BSD-3-Clause | 数值计算 |
+| [numpy](https://numpy.org) | BSD-3-Clause（发行包还包含其他第三方许可组件） | 数值计算 |
 | [python-can](https://github.com/hardbyte/python-can) | LGPL-3.0 | CAN 总线通信 |
 | [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | 机器人动力学计算 |
+| [PyYAML](https://github.com/yaml/pyyaml) | MIT | YAML 配置文件解析 |
 
-以上依赖均与 MIT 协议兼容，可自由用于商业和非商业项目。
+本项目的 MIT License 适用于本仓库自身的代码和文档。第三方库及可选 CAN 运行时仍受各自许可证约束；分发产品前请核对实际锁定版本的上游许可证文本和合规要求。
 
 ---
 
@@ -606,13 +721,60 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 [中文](#chinese) | [English](#english)
 
-# A1Z — 6-DOF Robotic Arm Python SDK (with G1Z Gripper)
+# A1Z — 6-DOF Robotic Arm Python SDK (Optional G1Z Gripper)
 
 <p align="center">
   <img src="docs/images/A1Z_G1Z.png" alt="A1Z robotic arm with G1Z gripper" width="500"/>
 </p>
 
-A Python control SDK for the A1Z six-axis robotic arm, providing CAN-bus motor drivers, Pinocchio-based gravity compensation, forward/inverse kinematics, zero-force teaching, position hold, with optional G1Z gripper control.
+An open-source Python SDK for A1Z six-axis robotic-arm research, algorithm validation, and application integration. It provides cross-platform CAN communication, motor control, Pinocchio-based dynamics and kinematics, gravity compensation, zero-force teaching, position hold, and optional G1Z gripper control.
+
+> [!CAUTION]
+> This SDK directly enables and controls physical robot hardware. It is not a certified functional-safety system. Before running any active command for the first time, secure the arm, clear the workspace, keep the emergency stop within reach, and begin with a low gravity-compensation factor and low speed.
+
+## Quick Navigation
+
+- [Features](#features)
+- [Platform and Hardware Support](#platform-and-hardware-support)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [CAN Communication Troubleshooting](#can-communication-troubleshooting)
+- [API Reference](#api-reference)
+- [Safety](#safety)
+- [Development and Contributing](#development-and-contributing)
+
+## Features
+
+- **Cross-platform CAN backends**: SocketCAN on Linux; an HHS `gs_usb` userspace backend on macOS/Windows; optional PEAK PCAN-USB support.
+- **Six-axis arm control**: mixed MotorA/MotorB chains, MIT position-velocity-torque control, and a default 250 Hz control loop.
+- **Dynamics and kinematics**: Pinocchio-based RNEA gravity compensation, forward kinematics, and inverse kinematics.
+- **Runnable examples**: gravity compensation, position hold, zero-force teach-and-playback, and gripper testing.
+- **Diagnostics and safe cleanup**: CAN checks, passive listening, motor scans, error-code decoding, and repeated disable on exit.
+- **Gripper-aware configuration**: `a1z_g1z.yaml` enables the G1Z gripper and selects the matching URDF mass model.
+
+## Platform and Hardware Support
+
+| Platform | Default backend | Adapter/runtime | Notes |
+|----------|-----------------|-----------------|-------|
+| Linux | SocketCAN | SocketCAN-compatible CAN interface | Configure the interface at 1 Mbps; some kernels may require a `gs_usb` patch |
+| macOS | `gs_usb` | HHS USB-CANFD (`a8fa:8598`) | Userspace USB backend; the current version has passed 250 Hz hardware control validation |
+| Windows | `gs_usb` | HHS USB-CANFD (`a8fa:8598`) + libusb-compatible driver | Try the existing driver first; use Zadig/WinUSB only if the device cannot be opened |
+| macOS / Windows | `pcan` | PEAK PCAN-USB + vendor runtime | Select explicitly with `--bustype pcan` |
+
+### Validation Levels
+
+To avoid treating “the adapter opens” as “the arm is safe to control,” validation is divided into three levels:
+
+1. **Adapter level**: the USB-CAN device can be discovered, opened, and given a send request. On Windows, use `tools/verify_can_win.py`.
+2. **Motor-communication level**: the arm is powered, wiring and termination are correct, and every joint returns valid feedback. Use `tools/motor_diag.py --scan`.
+3. **Control level**: verify loop frequency, loss/latency, stability, joint limits, and gravity-compensation direction under the real payload. This level must be completed on the local hardware; passing the first two levels does not imply that it has passed.
+
+Current hardware-validation status (2026-09):
+
+| Platform/configuration | Result |
+|------------------------|--------|
+| macOS + HHS `a8fa:8598` + asynchronous userspace backend | 250 Hz hardware control validated both without a gripper and with the G1Z gripper enabled |
+| Windows + HHS + G1Z | USB-CAN, motor communication, and gravity compensation run; measured at approximately 168–176 Hz, so 250 Hz is not yet validated |
 
 ## Project Structure
 
@@ -670,15 +832,15 @@ a1z/
 ### Install the SDK
 
 ```bash
-# Clone the repository (gripper support is now optional on main)
-git clone https://github.com/userguide-galaxea/GALAXEA-A1Z.git
+# Current cross-platform development version (including Windows HHS USB-CANFD support)
+git clone -b dev --single-branch https://github.com/userguide-galaxea/GALAXEA-A1Z.git
 
 cd /path/to/GALAXEA-A1Z
 
-# A virtual environment is recommended to keep your system Python clean
-# The interpreter must be >= 3.10; the macOS system python3 is 3.9, so specify one explicitly, e.g. python3.10
+# Use a virtual environment on Linux/macOS; follow the Conda workflow below on Windows
+# Python must be >= 3.10; explicitly select python3.10+ if the system interpreter is older
 python3 -m venv .venv
-source .venv/bin/activate    # on Windows: .venv\Scripts\activate
+source .venv/bin/activate
 
 # Development mode (recommended)
 pip install -e .
@@ -687,15 +849,15 @@ pip install -e .
 pip install .
 ```
 
-Dependencies are installed automatically: `numpy`, `python-can>=4.0`, `pin` (Pinocchio), `pyyaml`.
+Dependencies installed automatically include `numpy`, `python-can>=4.0`, and `pyyaml`. On Linux/macOS, pip also installs `pin` (Pinocchio). On Windows, pip skips `pin`; install the Conda package `pinocchio` as described below.
 
-On macOS / Windows, install with the gs_usb extras instead (includes the gs_usb userspace backend + bundled libusb — no extra driver library needed):
+On macOS / Windows, install with the gs_usb extras instead (includes the gs_usb userspace backend and libusb runtime):
 
 ```bash
 pip install -e ".[gs_usb]"
 ```
 
-> Note: zsh (the default macOS shell) treats `[...]` as a glob and fails with `no matches found` — the quotes are required.
+> Note: zsh (the default macOS shell) treats `[...]` as a glob and fails with `no matches found` — the quotes are required. Windows also needs a driver that permits libusb access; do not replace a working existing driver unnecessarily.
 
 ### Configuration File (Optional)
 
@@ -757,22 +919,34 @@ bash tools/verify_can_mac.sh
 
 #### Windows (gs_usb userspace mode)
 
-Windows also uses the gs_usb userspace backend, but you must first install a WinUSB driver with **Zadig**:
+Windows also uses the gs_usb userspace backend. The `.[gs_usb]` extras install `libusb-package` and `libusb1`. Zadig is unnecessary when the adapter's existing driver already permits libusb access; bind the device to WinUSB only when it cannot be opened and the installed driver is confirmed incompatible.
 
 ```powershell
-# 1. Use Zadig to replace the HHS adapter driver with WinUSB
+# 0. If Chinese output is garbled, switch the console to UTF-8 (Windows Terminal is recommended)
+chcp 65001
 
-# 2. Install Pinocchio (no pip prebuilt package on Windows; conda is required)
-conda install -c conda-forge pin
+# 1. Create and activate an isolated Conda environment
+# Python 3.11 is recommended for Windows 250 Hz control because its short-period timer is more precise than 3.10
+conda create -n a1z python=3.11 -y
+conda activate a1z
 
-# 3. Install SDK + gs_usb extras
-pip install -e ".[gs_usb]"
+# 2. Install Pinocchio with Conda (the Windows package name is pinocchio)
+conda install -c conda-forge pinocchio -y
 
-# 4. Verify CAN communication (optional)
+# 3. Install the SDK + gs_usb extras in the same environment
+python -m pip install -e ".[gs_usb]"
+
+# 4. Confirm python/pip point to the active Conda environment and check imports
+where.exe python
+python --version
+python -m pip --version
+python -c "import pinocchio, can, usb, usb1, gs_usb; print('Environment OK')"
+
+# 5. Verify that the USB-CAN adapter opens and can submit a test frame
 python tools\verify_can_win.py
 ```
 
-> ⚠️ **The Zadig step is mandatory.** Windows will otherwise occupy the HHS device with the generic USB-serial driver, and libusb will report `Cannot find device 0`.
+> ⚠️ Run `verify_can_win.py` without Zadig first. If it reports `Cannot find device 0` or a permission/driver error, confirm VID:PID `a8fa:8598` and then consider binding WinUSB with Zadig. Record the original driver first because changing it may affect vendor tools. A successful check proves only that the adapter opens and accepts a send call; it does not prove motor feedback or validated 250 Hz gravity compensation.
 
 #### Cross-Platform CAN Configuration
 
@@ -783,7 +957,7 @@ The SDK automatically selects the CAN backend by platform:
 | Linux | SocketCAN kernel driver | `pip install -e .` | `--can can0` |
 | **macOS** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"` | (default) `gs_usb` |
 | **macOS** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + MacCAN PCBUSB runtime | `--bustype pcan --can PCAN_USBBUS1` |
-| **Windows** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"` + Zadig WinUSB driver | (default) `gs_usb` |
+| **Windows** | **HHS** (`a8fa:8598`) | `pip install -e ".[gs_usb]"`; use Zadig/WinUSB only for an incompatible driver | (default) `gs_usb` |
 | **Windows** | **PEAK PCAN-USB** | `pip install -e ".[pcan]"` + PEAK official driver | `--bustype pcan --can PCAN_USBBUS1` |
 
 When `--bustype` is omitted, the OS default is used: Linux defaults to `socketcan`/`can0`; macOS/Windows default to `gs_usb`/device index `0`.
@@ -904,16 +1078,37 @@ python3 tools/a1zctl stop               # stop the server
 
 ## CAN Communication Troubleshooting
 
-If `python examples/gravity_comp.py --gravity_factor 0.3` errors out or the arm does not respond, the most common cause is a compatibility issue between the built-in SocketCAN / `gs_usb` driver in some older or specific Linux kernel versions and this CAN adapter.
+Start by identifying the stage that fails. Do not attribute every failure to Zadig or a kernel driver:
 
-### 1. Check the wiring
+| Failure stage | Check first |
+|---------------|-------------|
+| macOS reports `usb.core.NoBackendError` | Use the current SDK's `verify_can_mac.sh` and reinstall `.[gs_usb]`; the SDK explicitly loads the dylib bundled by `libusb-package`, so Homebrew libusb is normally unnecessary |
+| USB device not found | Adapter power, USB cable/port, and VID:PID; on Windows, inspect the current Device Manager driver before considering Zadig/WinUSB |
+| CAN bus cannot be opened | Adapter model, gs_usb/SocketCAN backend, bitrate, and whether another process owns the device |
+| Adapter can send, but motor scan gets no response | Arm power, CANH/CANL wiring, 120 Ω termination, 1 Mbps bitrate, motor IDs, and firmware mode |
+| Motors reply, but control is unstable | Echo filtering, control frequency, loss/latency, error codes, power supply, and mechanical load |
+
+### 1. Run environment and adapter checks that do not enable motors
+
+```bash
+python --version
+python -m pip --version
+python -c "import pinocchio, can; print('Python environment OK')"
+python tools/motor_diag.py --check-can
+```
+
+On Windows, also run `python tools\verify_can_win.py`. It checks only adapter discovery, opening, and send submission; it does not verify motor feedback or control-loop stability.
+
+### 2. Check the wiring
 
 - The USB-CANFD adapter is plugged in and seated firmly
 - Both ends of the CAN bus are wired correctly and not loose
 - The arm is powered on
 - The CAN termination resistor is installed correctly (see "Configure the CAN Bus" above)
 
-### 2. Check the kernel version and fix (recommended path)
+### 3. Linux: check the kernel version and fix
+
+Investigate kernel `gs_usb` compatibility only when the Linux SocketCAN path still fails after the checks above.
 
 Check your current kernel version:
 
@@ -924,9 +1119,9 @@ uname -r
 - **Option A**: upgrade the Linux kernel to **6.8.0-124** or newer (if you have other work that depends on the current kernel, prefer Option B)
 - **Option B**: patch the kernel / driver as described in the [Galaxea kernel patch guide](https://galaxea-ai.feishu.cn/docx/XF2ed4pmhoervNxODlfc11Gvnbb?from=from_copylink)
 
-### 3. Manually confirm the kernel compatibility issue (optional)
+### 4. Linux: manually confirm the kernel compatibility issue (optional)
 
-If you are not sure the kernel is the culprit, or CAN still does not work after step 2, manually reproduce the issue by sending CAN commands to the J6 motor.
+If you are not sure the kernel is the culprit, or CAN still does not work after step 3, manually reproduce the issue by sending CAN commands to the J6 motor.
 
 Open two terminals. **Terminal A** monitors bus traffic with `candump can0`; **Terminal B** sends the enable / motion / disable commands to J6 in sequence. Watch Terminal A for feedback frames and check whether J6 actually rotates.
 
@@ -1032,6 +1227,8 @@ python tools/motor_diag.py --clear-error
 python tools/motor_diag.py --clear-error --joints 3 4
 ```
 
+> ⚠️ `--scan`, `--monitor`, and `--probe` are not passive diagnostics: they enable motors and send control frames, so the arm may move briefly. The script requires typing `YES` before continuing. Clear the workspace, support the arm securely, keep the emergency stop within reach, and do not touch the arm while the command runs. Use `--yes` for automation only after equivalent safety checks have been completed.
+
 The diagnostic script automatically detects and suggests remedies for common issues:
 - Motor not responding (unpowered / reversed CAN wiring / wrong ID / firmware mode)
 - MotorB error codes (overvoltage / undervoltage / overcurrent / overtemperature / comm loss / overload)
@@ -1136,10 +1333,13 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 ## Safety
 
-- For first use, set `gravity_comp_factor` to a small value (e.g. 0.3) and confirm compensation direction before increasing
-- An emergency stop triggers automatically if gravity torques exceed per-joint safety thresholds
-- On shutdown, gravity compensation decays smoothly over 0.3 s with increased damping to prevent sudden drops
-- All target joint angles are clipped to the URDF joint limits
+- Mount the arm securely on a stable base, clear its entire reachable workspace, and keep a physical emergency stop within immediate reach.
+- For first use, set `gravity_comp_factor` to a small value such as `0.3`; confirm the compensation direction before increasing it.
+- When a G1Z gripper is attached, use `a1z_g1z.yaml` or `--with-gripper` so the dynamics model includes the gripper mass.
+- `--scan`, `--monitor`, `--probe`, the example scripts, and `a1zctl` may move motors. Keep people outside the arm's workspace while they run.
+- Gravity-torque thresholds, software joint limits, and smooth shutdown are software safeguards; they do not replace physical limits, guarding, an emergency-stop circuit, or a risk assessment.
+- If communication stops, the process fails, or motion is unexpected, use the physical emergency stop immediately and then confirm that all motors are disabled.
+- Do not use unvalidated scripts for unattended operation, production machinery, or direct human collaboration.
 
 ## Joint Limits
 
@@ -1165,6 +1365,35 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 | MotorA KT | 2.8 (current-to-torque conversion factor) |
 | Control frequency | 250 Hz |
 
+## Development and Contributing
+
+Issues and pull requests are welcome. Prefer small, reviewable changes, and document platform differences, hardware assumptions, and safety implications explicitly.
+
+```bash
+# First complete the base environment setup for your platform as documented above
+python -m pip install -e ".[dev]"
+python -m pytest -q
+```
+
+Before opening a pull request, confirm that:
+
+- The change addresses one focused problem and does not include unrelated formatting or generated files.
+- New or fixed behavior has tests. For hardware paths that cannot be automated, document the manual procedure and result.
+- Changes to public APIs, CLI behavior, defaults, configuration, or platform support update both the Chinese and English README sections.
+- A successful test-frame send is not presented as proof of motor communication or control-loop stability.
+
+## Getting Help and Reporting Issues
+
+Before reporting a problem, review [CAN Communication Troubleshooting](#can-communication-troubleshooting) and search existing [GitHub Issues](https://github.com/userguide-galaxea/GALAXEA-A1Z/issues). A useful new issue includes:
+
+- Operating system and version, Python version, and repository branch/commit.
+- CAN adapter model and VID:PID, backend, channel, and bitrate.
+- Whether a G1Z gripper is attached, the configuration file used, and the complete command.
+- The validation level that failed, complete error output, and minimal reproducible steps.
+- Results of checking arm power, CANH/CANL wiring, and termination resistance.
+
+Remove usernames, local paths, device serial numbers, and other sensitive information before posting logs publicly.
+
 ## License
 
 This project is open-sourced under the [MIT License](LICENSE), copyright © **Galaxea**.
@@ -1173,8 +1402,9 @@ This project is open-sourced under the [MIT License](LICENSE), copyright © **Ga
 
 | Dependency | License | Description |
 |------------|---------|-------------|
-| [numpy](https://numpy.org) | BSD-3-Clause | Numerical computation |
+| [numpy](https://numpy.org) | BSD-3-Clause (distributions also include separately licensed components) | Numerical computation |
 | [python-can](https://github.com/hardbyte/python-can) | LGPL-3.0 | CAN bus communication |
 | [pinocchio (pin)](https://github.com/stack-of-tasks/pinocchio) | BSD-2-Clause | Robot dynamics computation |
+| [PyYAML](https://github.com/yaml/pyyaml) | MIT | YAML configuration parsing |
 
-All dependencies are compatible with the MIT license and may be used freely in commercial and non-commercial projects.
+The repository's MIT License applies to this repository's own code and documentation. Third-party libraries and optional CAN runtimes remain subject to their own licenses. Before redistribution, review the upstream license text and compliance requirements for the exact versions you ship.

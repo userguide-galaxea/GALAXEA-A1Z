@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Windows CAN 通信验证脚本（HHS USB-CANFD 适配器，gs_usb 用户态后端）。
 
-1. 检查 gs_usb 运行时（libusb-package / WinUSB 驱动）
+1. 检查 gs_usb Python 运行时（python-can / PyUSB / gs_usb）
 2. 列出已识别的 CAN 适配器
-3. 打开总线、发一帧测试报文、检查 tx 状态
+3. 打开总线、发一帧测试报文、检查 TX 状态
+
+注意：该脚本只验证 USB-CAN 适配器的识别、打开和发送能力，
+不验证电机在线状态、接线/终端电阻、控制回路或重力补偿。
 
 用法:
     python tools\\verify_can_win.py
@@ -22,7 +25,7 @@ def step1_check_runtime() -> None:
     missing = [p for p in ("usb", "gs_usb", "can") if importlib.util.find_spec(p) is None]
     if missing:
         print(f"  [FAIL] 缺少 Python 包: {', '.join(missing)}")
-        print("         请执行: pip install -e .[gs_usb]")
+        print('         请执行: python -m pip install -e ".[gs_usb]"')
         sys.exit(1)
     print("  [OK] python-can / pyusb / gs_usb 已安装")
 
@@ -35,13 +38,14 @@ def step2_scan_adapters() -> None:
         devs = list(usb.core.find(find_all=True, idVendor=HHS_VID, idProduct=HHS_PID))
     except usb.core.USBError as e:
         print(f"  [FAIL] USB 访问失败: {e}")
-        print("         大概率是 WinUSB 驱动未安装——请用 Zadig 将 a8fa:8598 的驱动替换为 WinUSB")
+        print("         检查 Zadig 中 a8fa:8598 是否已绑定 WinUSB，并确认设备未被其他程序占用")
         sys.exit(1)
 
     if not devs:
         print("  [FAIL] 未找到 HHS 适配器 (a8fa:8598)")
-        print("         1. 检查 USB 连接")
-        print("         2. 确认已用 Zadig 安装 WinUSB 驱动（Windows 默认驱动会占用设备）")
+        print("         1. 检查适配器供电、USB 线缆和接口")
+        print("         2. 在设备管理器/Zadig 中确认 VID:PID 为 a8fa:8598")
+        print("         3. 确认已用 Zadig 将该设备绑定到 WinUSB")
         sys.exit(1)
 
     for i, d in enumerate(devs):
@@ -57,17 +61,26 @@ def step3_open_bus() -> None:
         bus = open_can_bus(bitrate=1_000_000)
     except Exception as e:
         print(f"  [FAIL] 无法打开 CAN 总线: {e}")
-        print("         若提示 Cannot find device，请确认 Zadig WinUSB 驱动已安装")
+        print("         检查 WinUSB 绑定、gs_usb/libusb 运行时、适配器型号及设备占用情况")
         sys.exit(1)
 
     try:
-        # 发一帧无害报文（不存在的 CAN ID，电机不会响应）
+        # 发送一帧标准 CAN 测试报文。成功只代表主机侧发送调用完成。
         msg = can.Message(arbitration_id=0x7FF, data=[0] * 8, is_extended_id=False)
-        bus.send(msg)
-        time.sleep(0.1)
-        print("  [OK] 测试帧已发送，总线工作正常")
+        try:
+            bus.send(msg)
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"  [FAIL] 测试帧发送失败: {e}")
+            print("         检查适配器状态、CAN 接口配置及是否被其他程序占用")
+            sys.exit(1)
+
+        print("  [OK] USB-CAN 适配器已打开，测试帧发送调用成功")
         print()
-        print("验证通过，A1Z SDK 可以在此机器上运行。")
+        print("适配器打开与发送测试通过。")
+        print("未验证：CANH/CANL 接线、终端电阻、机械臂上电、电机反馈、")
+        print("6 个关节在线状态、250 Hz 控制稳定性或重力补偿安全性。")
+        print("如需验证电机通信，请在完成安全检查后运行: python tools\\motor_diag.py --scan")
     finally:
         bus.shutdown()
 

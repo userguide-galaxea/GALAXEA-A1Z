@@ -11,7 +11,7 @@ dynamic = ["description"]
 dependencies = [
     "numpy",
     "python-can>=4.0",
-    "pin",
+    "pin; platform_system != 'Windows'",
     "pyyaml",
 ]
 

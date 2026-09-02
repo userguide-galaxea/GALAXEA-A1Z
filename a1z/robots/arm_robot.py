@@ -197,8 +197,17 @@ class ArmRobot:
         # thread. cProfile only profiles the main thread by default, so enable
         # this with A1Z_PROFILE_LOOP=1 when diagnosing loop-frequency issues.
         self._profile_loop = os.getenv("A1Z_PROFILE_LOOP", "").lower() in ("1", "true", "yes")
-        self._profile_sums = np.zeros(5, dtype=np.float64)
+        # read/safety, command prep, dynamics, torque prep, arm TX, gripper,
+        # and total cycle time.  Keep this diagnostic allocation outside the
+        # control loop so enabling it adds only timestamp reads and additions.
+        self._profile_sums = np.zeros(7, dtype=np.float64)
         self._profile_count = 0
+        self._profile_last_log_t = time.perf_counter()
+        if self._profile_loop:
+            logger.info(
+                "Control loop profiling enabled by A1Z_PROFILE_LOOP=%r",
+                os.getenv("A1Z_PROFILE_LOOP"),
+            )
         self._trace_control = os.getenv("A1Z_TRACE_CONTROL") == "1"
         self._trace_control_last_t = 0.0
 
@@ -872,11 +881,11 @@ class ArmRobot:
         _MAX_SLOW_PERIODS = 3  # emergency stop after 3 consecutive slow periods (6s)
 
         last_check_time = time.monotonic()
+        next_deadline = last_check_time
         iteration_count = 0
         consecutive_slow = 0
 
         while not self._stop_event.is_set():
-            loop_start = time.monotonic()
             try:
                 self._update()
             except Exception as e:
@@ -919,10 +928,19 @@ class ArmRobot:
                 last_check_time = now
                 iteration_count = 0
 
-            elapsed = time.monotonic() - loop_start
-            sleep_time = self._control_period_s - elapsed
+            # Schedule against an absolute monotonic deadline. Relative
+            # ``sleep(period - work_time)`` permanently accumulates scheduler
+            # overshoot on every iteration. That reduced the Windows loop to
+            # about 67 Hz on Python 3.10 and 170 Hz on Python 3.11 despite the
+            # actual control work fitting inside the 4 ms budget.
+            next_deadline += self._control_period_s
+            sleep_time = next_deadline - time.monotonic()
             if sleep_time > 0:
                 time.sleep(sleep_time)
+            elif sleep_time < -self._control_period_s:
+                # A real overrun missed at least one complete period. Avoid a
+                # burst of back-to-back catch-up iterations.
+                next_deadline = time.monotonic()
 
         # Send zero-torque first so motors cache a safe state, then disable immediately
         # from this thread — guarantees disable frames follow the last command in-order
@@ -1022,6 +1040,9 @@ class ArmRobot:
         torques_urdf = cmd.torque_ff + tau_id_scaled * self.gravity_comp_factor
         motor_torques = np.clip(torques_urdf * self._joint_sign, -self._torque_clip, self._torque_clip)
 
+        if profile:
+            profile_before_send = time.perf_counter()
+
         # 6) Send commands to motor chain (convert position/velocity to motor frame)
         self._motor_chain.send_commands(
             pos=cmd.pos * self._joint_sign,
@@ -1030,6 +1051,9 @@ class ArmRobot:
             kd=cmd.kd,
             torque=motor_torques,
         )
+
+        if profile:
+            profile_after_arm_send = time.perf_counter()
 
         # 7) Send gripper command (independent of arm gravity comp)
         if self.gripper is not None:
@@ -1044,10 +1068,24 @@ class ArmRobot:
                 profile_after_read - profile_start,
                 profile_before_dynamics - profile_after_read,
                 profile_after_dynamics - profile_before_dynamics,
-                profile_end - profile_after_dynamics,
+                profile_before_send - profile_after_dynamics,
+                profile_after_arm_send - profile_before_send,
+                profile_end - profile_after_arm_send,
                 profile_end - profile_start,
             )
             self._profile_count += 1
+            if profile_end - self._profile_last_log_t >= 2.0:
+                profile_ms = 1000.0 * self._profile_sums / self._profile_count
+                logger.info(
+                    "Loop profile avg over %d cycles (ms): "
+                    "read+safety=%.3f command=%.3f dynamics=%.3f "
+                    "torque=%.3f arm_tx=%.3f gripper=%.3f total=%.3f",
+                    self._profile_count,
+                    *profile_ms,
+                )
+                self._profile_sums.fill(0.0)
+                self._profile_count = 0
+                self._profile_last_log_t = profile_end
 
     def _read_state(self) -> None:
         """Read all motor feedback and update internal state."""

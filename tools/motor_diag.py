@@ -29,6 +29,10 @@
 
   # 带 G1Z 夹爪时扫描/监控 7 个电机
   python tools/motor_diag.py --scan --with-gripper
+
+安全：
+  --scan、--monitor 和 --probe 会使能电机并发送控制帧。
+  执行前需输入 YES 确认安全条件；自动化环境可显式传入 --yes。
 """
 
 import argparse
@@ -471,6 +475,30 @@ def print_scan_results(results: List[MotorStatus]):
             print(f"    → 清除错误：发送 0xFF*7+0xFB 到 CAN ID 0x{s.can_id:02X}")
 
 
+def confirm_active_motor_operation(action: str, assume_yes: bool = False) -> None:
+    """Require an explicit safety acknowledgement before enabling motors."""
+    print()
+    print("!" * 60)
+    print(f"  安全警告：{action}会使能电机并发送控制帧，机械臂可能短暂动作。")
+    print("  - 清空机械臂周围空间，确认本体稳定支撑")
+    print("  - 确保急停按钮可立即触及，执行期间不要接触机械臂")
+    print("  - 异常中断后确认所有电机已失能")
+    print("!" * 60)
+
+    if assume_yes:
+        print("已通过 --yes 确认安全条件。")
+        return
+
+    try:
+        answer = input("输入 YES 继续，其他输入取消: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n未完成安全确认，已取消。")
+        raise SystemExit(2)
+    if answer != "YES":
+        print("未完成安全确认，已取消。")
+        raise SystemExit(2)
+
+
 # ── 持续监控 ─────────────────────────────────────────
 
 def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
@@ -839,6 +867,8 @@ def main():
     parser.add_argument("--type", choices=["all", "motor_a", "motor_b"], default="all", help="电机类型筛选")
     parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5, 6 with --with-gripper)")
     parser.add_argument("--duration", type=float, default=5.0, help="监听时长/秒 (默认: 5)")
+    parser.add_argument("--yes", action="store_true",
+                        help="确认已完成安全检查，跳过交互式确认（用于自动化）")
     parser.add_argument("--with-gripper", action="store_true", default=None,
                         help="包含 G1Z 夹爪电机 (joint 6)")
     add_config_argument(parser)
@@ -871,6 +901,10 @@ def main():
     print("=" * 60)
     print("  A1Z 电机诊断工具")
     print("=" * 60)
+
+    if args.scan or args.monitor or args.probe is not None:
+        operation = "电机扫描" if args.scan else "电机监控" if args.monitor else "关节探测"
+        confirm_active_motor_operation(operation, assume_yes=args.yes)
 
     # check-can 不需要打开 CAN 总线
     if args.check_can:

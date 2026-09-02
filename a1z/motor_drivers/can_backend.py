@@ -50,6 +50,29 @@ _IS_LINUX = _SYSTEM == "Linux"
 _patched = False
 
 
+def _load_usb1_runtime(usb1_module) -> None:
+    """Load libusb1, preferring the binary bundled by libusb-package.
+
+    The ``libusb1`` Python binding does not search the ``libusb-package``
+    resource directory by default on macOS.  Importing both packages can
+    therefore succeed while the first ``USBContext`` operation still raises
+    ``FileNotFoundError: cannot find a suitable libusb-1.0``.  Load the
+    bundled library explicitly before creating a context, with the system
+    loader retained as a fallback for installations that omit the bundle.
+    """
+    try:
+        import ctypes
+        import libusb_package
+
+        library_path = libusb_package.get_library_path()
+        if library_path is not None:
+            usb1_module.loadLibrary(ctypes.CDLL(str(library_path)))
+            return
+    except ImportError:
+        pass
+    usb1_module.loadLibrary()
+
+
 def _send_hhs_ep01(self, frame) -> bool:
     """Send through HHS endpoint 0x01 using the negotiated frame format.
 
@@ -79,8 +102,21 @@ def _ensure_hhs_recognized() -> None:
         return
 
     import usb.core
+    import usb.backend.libusb1
     from gs_usb.constants import GS_CAN_MODE_HW_TIMESTAMP, GS_CAN_MODE_NORMAL
     from gs_usb.gs_usb import GsUsb
+
+    # gs_usb calls PyUSB's default libusb backend directly. Point that lookup
+    # at the binary bundled by libusb-package when available, matching the
+    # explicit usb1 runtime used by AsyncHhsBus.
+    try:
+        import libusb_package
+
+        bundled_backend = libusb_package.get_libusb1_backend()
+        if bundled_backend is not None:
+            usb.backend.libusb1.get_backend = lambda *args, **kwargs: bundled_backend
+    except ImportError:
+        pass
 
     # 1. Whitelist HHS VID/PID
     _orig = GsUsb.is_gs_usb_device
@@ -543,6 +579,8 @@ class AsyncHhsBus(can.BusABC):
         import usb1
         from gs_usb.constants import CAN_EFF_FLAG, CAN_ERR_FLAG, CAN_RTR_FLAG
 
+        _load_usb1_runtime(usb1)
+
         if bitrate != 1_000_000:
             raise can.CanInitializationError(
                 "AsyncHhsBus only supports 1 Mbps on the HHS adapter "
@@ -937,6 +975,7 @@ def _selected_gs_usb_is_hhs(channel: Union[str, int]) -> bool:
     try:
         import usb1
 
+        _load_usb1_runtime(usb1)
         index = int(channel)
         if index < 0:
             return False

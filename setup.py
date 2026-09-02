@@ -13,7 +13,7 @@ setuptools.setup(
     install_requires=[
         "numpy",
         "python-can>=4.0",
-        "pin",
+        "pin; platform_system != 'Windows'",
         "pyyaml",
     ],
     extras_require={

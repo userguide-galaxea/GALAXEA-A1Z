@@ -24,7 +24,10 @@ if missing:
     sys.exit(1)
 try:
     import libusb_package
-    print("  [OK] libusb-package (内置 libusb)")
+    backend = libusb_package.get_libusb1_backend()
+    if backend is None:
+        raise RuntimeError("libusb-package 未能创建 PyUSB backend")
+    print(f"  [OK] libusb-package: {libusb_package.get_library_path()}")
 except ImportError:
     # 回退检查系统 libusb
     import ctypes.util
@@ -37,9 +40,14 @@ EOF
 
 echo "==> [2/3] 扫描 USB CAN 适配器"
 "$PY" - <<'EOF'
-import usb.core
+try:
+    import libusb_package
+    usb_find = libusb_package.find
+except ImportError:
+    import usb.core
+    usb_find = usb.core.find
 HHS_VID, HHS_PID = 0xA8FA, 0x8598
-devs = list(usb.core.find(find_all=True, idVendor=HHS_VID, idProduct=HHS_PID))
+devs = list(usb_find(find_all=True, idVendor=HHS_VID, idProduct=HHS_PID))
 if not devs:
     print("  [FAIL] 未找到 HHS 适配器 (a8fa:8598)。检查 USB 连接。")
     raise SystemExit(1)

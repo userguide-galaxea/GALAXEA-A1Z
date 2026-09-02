@@ -25,6 +25,7 @@ Available URDF models (a1z/robot_models/a1z/):
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -53,6 +54,11 @@ def main():
                         help="Automatically stop after N seconds; 0 runs until Ctrl+C.")
     parser.add_argument("--with-gripper", action="store_true",
                         help="Enable G1Z gripper (overrides config if set).")
+    parser.add_argument(
+        "--profile-loop",
+        action="store_true",
+        help="Log average control-loop stage timings every 2 seconds.",
+    )
     parser.add_argument("--kd", type=str, default=None,
                         help="Override kd gains, comma-separated (6 values). "
                              "E.g. --kd 0.2,0.2,0.2,0.1,0.1,0.1")
@@ -118,6 +124,15 @@ def main():
     print("=" * 60)
 
     robot = get_a1z_robot(**kwargs)
+    profile_loop = args.profile_loop or os.getenv(
+        "A1Z_PROFILE_LOOP", ""
+    ).lower() in ("1", "true", "yes")
+    if profile_loop:
+        # Set the instance explicitly as well as supporting the environment
+        # variable. This keeps diagnostics reliable when a shell or launcher
+        # imports modules before configuring its environment.
+        robot._profile_loop = True
+        logging.info("Control loop profiling is active")
 
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
@@ -135,11 +150,17 @@ def main():
             state = robot.get_joint_state()
             pos_deg = np.degrees(state["pos"])
             eff = state["eff"]
-            print(
-                f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]  "
-                f"eff(Nm): [{', '.join(f'{e:6.2f}' for e in eff)}]",
-                end="\r",
+            status = (
+                f"pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]  "
+                f"eff(Nm): [{', '.join(f'{e:6.2f}' for e in eff)}]"
             )
+            if profile_loop:
+                # A carriage-return status line can overwrite background-thread
+                # profile logs in Windows terminals. Emit a normal log line while
+                # profiling so every timing sample remains visible and copyable.
+                logging.info(status)
+            else:
+                print(f"  {status}", end="\r")
             time.sleep(0.5)
 
     except KeyboardInterrupt:
