@@ -221,7 +221,7 @@ conda create -n a1z python=3.11 -y
 conda activate a1z
 
 # 2. 用 Conda 安装 Pinocchio（Windows 包名为 pinocchio）
-conda install -c conda-forge pinocchio -y
+conda install -c conda-forge pinocchio libusb -y
 
 # 3. 在同一环境中安装 SDK + gs_usb extras
 python -m pip install -e ".[gs_usb]"
