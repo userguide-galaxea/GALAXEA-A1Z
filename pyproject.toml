@@ -6,7 +6,18 @@ build-backend = "flit_core.buildapi"
 name = "a1z"
 version = "0.0.1"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dynamic = ["description"]
 dependencies = [
     "numpy",
@@ -30,6 +41,10 @@ gs_usb = [
 pcan = [
     "python-can[pcan]",
 ]
+
+[project.urls]
+Repository = "https://gitlab.galaxea-ai.com/menglian.li/a1z"
+Changelog = "https://gitlab.galaxea-ai.com/menglian.li/a1z/-/blob/codex/cross-platform-g1z-fixes/CHANGELOG.md"
 
 [tool.flit.module]
 name = "a1z"

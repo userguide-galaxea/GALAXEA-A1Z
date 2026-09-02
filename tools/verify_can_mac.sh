@@ -20,7 +20,7 @@ missing = [p for p in ("usb", "gs_usb", "can") if importlib.util.find_spec(p) is
 if missing:
     print(f"  [FAIL] 缺少 Python 包: {', '.join(missing)}")
     print(f"         当前解释器: {sys.executable}")
-    print("         请确认在正确的环境中执行: pip install -e .[gs_usb]")
+    print('         请确认在正确的环境中执行: python -m pip install -e ".[gs_usb]"')
     sys.exit(1)
 try:
     import libusb_package
@@ -34,7 +34,7 @@ except ImportError:
     if ctypes.util.find_library("usb-1.0"):
         print("  [OK] 系统 libusb（brew）")
     else:
-        print("  [FAIL] 未找到 libusb。请执行: pip install libusb-package  或  brew install libusb")
+        print("  [FAIL] 未找到 libusb。请执行: python -m pip install libusb-package  或  brew install libusb")
         sys.exit(1)
 EOF
 

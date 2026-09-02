@@ -59,7 +59,7 @@ A1Z 六轴机械臂的开源 Python SDK，面向机器人研发、算法验证�
 | 平台/组合 | 结果 |
 |-----------|------|
 | macOS + HHS `a8fa:8598` + 异步用户态后端 | 无夹爪与启用 G1Z 夹爪两种配置均已通过 250 Hz 真机控制验证 |
-| Windows + HHS + G1Z | USB-CAN、电机通信和重力补偿可运行；实测约 168–176 Hz，250 Hz 尚未通过 |
+| Windows + HHS | USB-CAN、电机通信和重力补偿可运行；QPC 调度基准达到 249.99 Hz，修复后真机终验待补 |
 
 ## 项目结构
 
@@ -68,6 +68,9 @@ a1z/
 ├── pyproject.toml                 # 构建配置 (flit)
 ├── setup.py                       # setuptools 后备
 ├── README.md
+├── CHANGELOG.md                   # 版本变更与跨平台实测记录
+├── LICENSE                        # MIT 开源许可
+├── .python-version                # 统一的 Python 3.11 环境提示
 ├── a1z/                       # SDK 主包
 │   ├── dynamics/
 │   │   └── gravity_model.py       # Pinocchio RNEA 重力补偿
@@ -82,7 +85,7 @@ a1z/
 │   │   ├── arm_robot.py           # ArmRobot 实现 (控制回路+重力补偿)
 │   │   ├── get_robot.py           # 工厂函数 get_a1z_robot()
 │   │   ├── gripper.py             # Gripper 控制 (MotorB CAN ID 0x07)
-│   │   ├── server.py              # Unix socket 控制服务端
+│   │   ├── server.py              # 跨平台本机控制服务端（Unix socket / Windows TCP）
 │   │   └── kinematics.py          # FK/IK (Pinocchio)
 │   ├── robot_models/
 │   │   └── a1z/               # URDF 模型文件 (A1Z_Flange.urdf 默认，A1Z_G1Z.urdf 用于夹爪配置)
@@ -93,7 +96,7 @@ a1z/
 │   ├── position_hold.py           # 位置保持示例
 │   ├── teach_and_play.py          # 零力示教录制与回放
 │   └── gripper_hybrid_test.py     # 夹爪测试：自由行程 + 力矩饱和验证
-└── tools/
+├── tools/
     ├── a1zctl                     # 机械臂控制 CLI（serve/move/gripper/dance/stop）
     ├── gripper_set_zero.py        # 夹爪零点标定（出厂已完成，一般无需执行）
     ├── motor_diag.py              # 电机通信诊断与故障排查
@@ -101,6 +104,7 @@ a1z/
     ├── setup_can.sh               # Linux SocketCAN 一键配置
     ├── verify_can_mac.sh          # macOS CAN 通信验证
     └── verify_can_win.py          # Windows CAN 通信验证
+└── tests/                         # 跨平台后端、控制安全和服务传输回归测试
 ```
 
 
@@ -108,7 +112,7 @@ a1z/
 
 ### 依赖
 
-- Python >= 3.10
+- Python >= 3.11（所有平台统一支持基线）
 - **Linux**：SocketCAN（需硬件 CAN 接口）
 - **macOS / Windows**：通过 HHS USB-CANFD 适配器（VID:PID `a8fa:8598`）连接，SDK 自动使用 gs_usb 用户态后端
 - URDF 模型文件（包内自带，见 `a1z/robot_models/a1z/`。默认使用 `A1Z_Flange.urdf`；启用夹爪时使用 `A1Z_G1Z.urdf`）
@@ -124,9 +128,8 @@ git clone --branch codex/cross-platform-g1z-fixes --single-branch https://gitlab
 
 cd GALAXEA-A1Z
 
-# Linux/macOS 建议使用虚拟环境；Windows 请使用下文的 Conda 流程
-# 解释器必须 >= 3.10；若系统 python3 版本过低，请显式指定 python3.10+
-python3 -m venv .venv
+# Linux/macOS 使用 Python 3.11 创建虚拟环境；Windows 请使用下文的 Conda 流程
+python3.11 -m venv .venv
 source .venv/bin/activate
 
 # 开发模式安装（推荐）
@@ -213,7 +216,7 @@ Windows 同样走 gs_usb 用户态后端。`libusb-package` / `libusb1` 由 `.[g
 chcp 65001
 
 # 1. 创建并激活独立 Conda 环境
-# Windows 250 Hz 控制推荐 Python 3.11，其短周期定时精度优于 3.10
+# 项目统一使用 Python 3.11
 conda create -n a1z python=3.11 -y
 conda activate a1z
 
@@ -362,6 +365,10 @@ python tools/a1zctl dance --moves salute,wave,nod
 python tools/a1zctl info                # 查看所有预置位与限位
 python tools/a1zctl stop               # 停止服务端
 ```
+
+服务仅接受本机连接：Linux/macOS 使用 `/tmp/a1z.sock` Unix socket；Windows
+使用 `tcp://127.0.0.1:43110` 回环 TCP，以兼容没有 `socket.AF_UNIX` 的 Python
+发行版。客户端会自动选择对应传输，无需额外参数或开放防火墙端口。
 
 ## CAN 通信故障排查
 
@@ -677,7 +684,7 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 ## 开发与贡献
 
-欢迎提交 Issue 和 Pull Request。建议使用小而可审查的变更，并将平台差异、硬件假设和安全影响写清楚。
+欢迎提交 Issue 和 Merge Request（MR）。建议使用小而可审查的变更，并将平台差异、硬件假设和安全影响写清楚。
 
 ```bash
 # 先按本 README 完成当前平台的基础环境安装
@@ -685,7 +692,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-提交 PR 前请确认：
+提交 MR 前请确认：
 
 - 变更聚焦于单一问题，不包含无关的格式化或生成文件。
 - 新增/修复的行为有对应测试；无法自动测试的硬件路径需说明人工验证步骤和结果。
@@ -782,7 +789,7 @@ Current hardware-validation status (2026-09):
 | Platform/configuration | Result |
 |------------------------|--------|
 | macOS + HHS `a8fa:8598` + asynchronous userspace backend | 250 Hz hardware control validated both without a gripper and with the G1Z gripper enabled |
-| Windows + HHS + G1Z | USB-CAN, motor communication, and gravity compensation run; measured at approximately 168–176 Hz, so 250 Hz is not yet validated |
+| Windows + HHS | USB-CAN, motor communication, and gravity compensation run; the QPC scheduler benchmark reaches 249.99 Hz, with post-fix hardware validation still pending |
 
 ## Project Structure
 
@@ -791,6 +798,9 @@ a1z/
 ├── pyproject.toml                 # Build config (flit)
 ├── setup.py                       # setuptools fallback
 ├── README.md
+├── CHANGELOG.md                   # Release changes and cross-platform hardware results
+├── LICENSE                        # MIT open-source license
+├── .python-version                # Shared Python 3.11 environment hint
 ├── a1z/                       # SDK main package
 │   ├── dynamics/
 │   │   └── gravity_model.py       # Pinocchio RNEA gravity compensation
@@ -805,7 +815,7 @@ a1z/
 │   │   ├── arm_robot.py           # ArmRobot implementation (control loop + gravity comp)
 │   │   ├── get_robot.py           # Factory function get_a1z_robot()
 │   │   ├── gripper.py             # Gripper control (MotorB CAN ID 0x07)
-│   │   ├── server.py              # Unix socket control server
+│   │   ├── server.py              # Cross-platform local server (Unix socket / Windows TCP)
 │   │   └── kinematics.py          # FK/IK (Pinocchio)
 │   ├── robot_models/
 │   │   └── a1z/               # URDF model files (defaults to A1Z_Flange.urdf; use A1Z_G1Z.urdf when the gripper is attached)
@@ -816,7 +826,7 @@ a1z/
 │   ├── position_hold.py           # Position hold example
 │   ├── teach_and_play.py          # Zero-force teach recording and playback
 │   └── gripper_hybrid_test.py     # Gripper test: free travel + torque saturation
-└── tools/
+├── tools/
     ├── a1zctl                     # Arm control CLI (serve/move/gripper/dance/stop)
     ├── gripper_set_zero.py        # Gripper zero calibration (factory-done, rarely needed)
     ├── motor_diag.py              # Motor communication diagnostics
@@ -824,13 +834,14 @@ a1z/
     ├── setup_can.sh               # Linux SocketCAN one-step setup
     ├── verify_can_mac.sh          # macOS CAN communication verification
     └── verify_can_win.py          # Windows CAN communication verification
+└── tests/                         # Backend, control-safety, and server-transport regression tests
 ```
 
 ## Installation
 
 ### Prerequisites
 
-- Python >= 3.10
+- Python >= 3.11 (the common supported baseline on all platforms)
 - **Linux**: SocketCAN (hardware CAN interface required)
 - **macOS / Windows**: Connects via the HHS USB-CANFD adapter (VID:PID `a8fa:8598`); the SDK automatically uses the gs_usb userspace backend
 - URDF model files (bundled, see `a1z/robot_models/a1z/`; defaults to `A1Z_Flange.urdf`, use `A1Z_G1Z.urdf` with `with_gripper=True`)
@@ -845,9 +856,8 @@ git clone --branch codex/cross-platform-g1z-fixes --single-branch https://gitlab
 
 cd GALAXEA-A1Z
 
-# Use a virtual environment on Linux/macOS; follow the Conda workflow below on Windows
-# Python must be >= 3.10; explicitly select python3.10+ if the system interpreter is older
-python3 -m venv .venv
+# Create the environment with Python 3.11 on Linux/macOS; follow the Conda workflow below on Windows
+python3.11 -m venv .venv
 source .venv/bin/activate
 
 # Development mode (recommended)
@@ -934,7 +944,7 @@ Windows also uses the gs_usb userspace backend. The `.[gs_usb]` extras install `
 chcp 65001
 
 # 1. Create and activate an isolated Conda environment
-# Python 3.11 is recommended for Windows 250 Hz control because its short-period timer is more precise than 3.10
+# The project uses Python 3.11 consistently across platforms
 conda create -n a1z python=3.11 -y
 conda activate a1z
 
@@ -1083,6 +1093,12 @@ python tools/a1zctl dance --moves salute,wave,nod
 python tools/a1zctl info                # list all presets and limits
 python tools/a1zctl stop               # stop the server
 ```
+
+The service accepts local connections only: Linux/macOS use the
+`/tmp/a1z.sock` Unix socket, while Windows uses loopback TCP at
+`tcp://127.0.0.1:43110` for compatibility with Python distributions that do
+not provide `socket.AF_UNIX`. The client selects the transport automatically;
+no extra argument or firewall port is required.
 
 ## CAN Communication Troubleshooting
 
@@ -1375,7 +1391,7 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 ## Development and Contributing
 
-Issues and pull requests are welcome. Prefer small, reviewable changes, and document platform differences, hardware assumptions, and safety implications explicitly.
+Issues and merge requests (MRs) are welcome. Prefer small, reviewable changes, and document platform differences, hardware assumptions, and safety implications explicitly.
 
 ```bash
 # First complete the base environment setup for your platform as documented above
@@ -1383,7 +1399,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Before opening a pull request, confirm that:
+Before opening a merge request, confirm that:
 
 - The change addresses one focused problem and does not include unrelated formatting or generated files.
 - New or fixed behavior has tests. For hardware paths that cannot be automated, document the manual procedure and result.

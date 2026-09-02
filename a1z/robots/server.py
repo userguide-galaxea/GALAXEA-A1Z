@@ -1,7 +1,8 @@
 """A1Z robot arm control server.
 
-Binds a Unix socket at /tmp/a1z.sock and dispatches JSON commands to a live
-ArmRobot instance.  Start via tools/a1zctl; communicate via the same script.
+Binds a Unix socket at /tmp/a1z.sock on Linux/macOS, or a loopback TCP socket
+on Windows, and dispatches JSON commands to a live ArmRobot instance.  Start
+via tools/a1zctl; communicate via the same script.
 
 Protocol
 --------
@@ -28,6 +29,43 @@ from a1z.robots.get_robot import get_a1z_robot
 from a1z.config import load_config, config_to_robot_kwargs
 
 SOCKET_PATH = "/tmp/a1z.sock"
+TCP_HOST = "127.0.0.1"
+TCP_PORT = 43110
+
+
+def _use_unix_socket() -> bool:
+    """Return whether this platform should use a Unix domain socket."""
+    # Some Windows Python builds expose AF_UNIX while others do not.  Always
+    # use loopback TCP on Windows so the CLI behaves consistently and does not
+    # depend on Unix-path emulation details.
+    return os.name != "nt" and hasattr(socket, "AF_UNIX")
+
+
+def endpoint_label(socket_path: str = SOCKET_PATH) -> str:
+    """Return the user-facing address of the local control endpoint."""
+    if _use_unix_socket():
+        return socket_path
+    return f"tcp://{TCP_HOST}:{TCP_PORT}"
+
+
+def connect_to_server(
+    socket_path: str = SOCKET_PATH,
+    timeout: float = 120.0,
+) -> socket.socket:
+    """Open a client connection using the platform's local transport."""
+    if _use_unix_socket():
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        address = socket_path
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        address = (TCP_HOST, TCP_PORT)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(address)
+    except Exception:
+        sock.close()
+        raise
+    return sock
 
 
 def _deg(*angles: float) -> np.ndarray:
@@ -228,14 +266,20 @@ class RobotServer:
             conn.close()
 
     def run(self, socket_path: str = SOCKET_PATH) -> None:
-        if os.path.exists(socket_path):
-            os.unlink(socket_path)
+        use_unix = _use_unix_socket()
+        if use_unix:
+            if os.path.exists(socket_path):
+                os.unlink(socket_path)
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            address = socket_path
+        else:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            address = (TCP_HOST, TCP_PORT)
 
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(socket_path)
+        srv.bind(address)
         srv.listen(8)
         srv.settimeout(1.0)
-        print(f"[a1z] Listening on {socket_path}")
+        print(f"[a1z] Listening on {endpoint_label(socket_path)}")
 
         try:
             while not self._shutdown.is_set():
@@ -249,7 +293,7 @@ class RobotServer:
                 t.start()
         finally:
             srv.close()
-            if os.path.exists(socket_path):
+            if use_unix and os.path.exists(socket_path):
                 os.unlink(socket_path)
 
 

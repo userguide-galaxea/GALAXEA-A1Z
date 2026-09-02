@@ -4,10 +4,10 @@
 Supports MotorA (joints 0-2) and MotorB (joints 3-5).
 
 Usage:
-    sudo python3 tools/set_zero.py --all
-    sudo python3 tools/set_zero.py --motor-a
-    sudo python3 tools/set_zero.py --motor-b
-    sudo python3 tools/set_zero.py --joints 0 3
+    sudo python tools/set_zero.py --all
+    sudo python tools/set_zero.py --motor-a
+    sudo python tools/set_zero.py --motor-b
+    sudo python tools/set_zero.py --joints 0 3
 """
 
 import argparse
@@ -131,10 +131,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 tools/set_zero.py --all          # All 6 joints
-  sudo python3 tools/set_zero.py --motor-a      # MotorA joints 0-2
-  sudo python3 tools/set_zero.py --motor-b      # MotorB joints 3-5
-  sudo python3 tools/set_zero.py --joints 0 3   # Joints 0 and 3
+  sudo python tools/set_zero.py --all          # All 6 joints
+  sudo python tools/set_zero.py --motor-a      # MotorA joints 0-2
+  sudo python tools/set_zero.py --motor-b      # MotorB joints 3-5
+  sudo python tools/set_zero.py --joints 0 3   # Joints 0 and 3
         """,
     )
     group = parser.add_mutually_exclusive_group(required=True)

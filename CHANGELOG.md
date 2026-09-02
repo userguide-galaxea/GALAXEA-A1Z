@@ -56,6 +56,9 @@
 
 #### Windows、安装与开源文档
 
+- 开源支持基线统一为 Python 3.11：`pyproject.toml`、`setup.py`、README 和
+  `.python-version` 使用同一版本策略；创建环境后所有命令统一使用当前环境的
+  `python` 与 `python -m pip`。
 - Windows 不再通过 pip 安装 `pin`，改为在 Conda 环境安装
   `conda-forge::pinocchio`；项目依赖使用平台 marker 避免包冲突。
 - Windows 推荐 Python 3.11；`.[gs_usb]` 已安装 `libusb-package`、`libusb1`
@@ -65,6 +68,9 @@
   GitHub issue 链接改为 GitLab。
 - README 与 `tools/a1zctl` 的命令统一使用当前环境的 `python` 和
   `python -m pip`，避免 Conda 已激活但 `python3`/裸 `pip` 指向其他解释器。
+- `a1zctl serve` 不再在 Windows 上硬编码 `socket.AF_UNIX`；Windows 自动使用
+  仅绑定 `127.0.0.1:43110` 的本机 TCP，Linux/macOS 保持
+  `/tmp/a1z.sock`，客户端与服务端共享同一传输选择逻辑。
 - 克隆说明指向当前公开开发分支：
 
 ```bash
@@ -85,18 +91,20 @@ git clone --branch codex/cross-platform-g1z-fixes --single-branch \
 | `README.md` | 开源安装、GitLab 克隆、跨平台实测结果、G1Z 与故障排查 |
 | `a1z/motor_drivers/can_backend.py` | macOS bundled libusb 加载及 HHS/PyUSB backend 一致化 |
 | `a1z/robots/arm_robot.py` | 绝对期限调度、控制循环 profiler 与诊断输出 |
+| `a1z/robots/server.py` | Windows 回环 TCP 与 Linux/macOS Unix socket 自动选择 |
 | `a1z/dynamics/gravity_model.py` | Windows Pinocchio 安装提示 |
 | `a1z/robots/kinematics.py` | Windows Pinocchio 安装提示 |
 | `examples/gravity_comp.py` | `--profile-loop` 入口和 profiling 状态输出 |
 | `tools/verify_can_mac.sh` | bundled libusb 设备扫描与验证 |
 | `tools/verify_can_win.py` | Windows 验证说明和检测逻辑 |
 | `tools/motor_diag.py` | 主动诊断命令确认保护 |
-| `tools/a1zctl` | 统一使用当前环境 Python 的帮助命令 |
+| `tools/a1zctl` | 统一使用当前环境 Python，并通过跨平台本机传输连接服务端 |
+| `tests/test_server_transport.py` | Windows TCP fallback、回环绑定及连接失败清理测试 |
 | `pyproject.toml` / `setup.py` | Pinocchio 平台依赖约束 |
 
 ### 软件验证
 
-- `python -m unittest discover -q tests`：19 项测试通过。
+- `python -m unittest discover -q tests`：23 项测试通过。
 - Python 编译检查通过。
 - `git diff --check` 通过。
 - 同一 Windows / Anaconda Python 3.11 环境的 2,000 周期空载调度基准：

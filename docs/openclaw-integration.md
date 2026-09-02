@@ -6,9 +6,10 @@ Adds interactive robot arm control via [OpenClaw](https://openclaw.ai) using a p
 
 ### `a1z/robots/server.py`
 
-Unix socket server that holds a live `ArmRobot` instance and dispatches JSON commands.
+Local server that holds a live `ArmRobot` instance and dispatches JSON commands.
 
-- Socket path: `/tmp/a1z.sock`
+- Linux/macOS endpoint: Unix socket at `/tmp/a1z.sock`
+- Windows endpoint: loopback TCP at `127.0.0.1:43110` (selected automatically)
 - Protocol: one newline-terminated JSON request → one JSON response per connection
 - Commands serialized by a lock; `ArmRobot` runs its own 250 Hz control thread internally
 
@@ -27,7 +28,7 @@ Preset poses (degrees): `home`, `ready`, `salute`, `wave_l`, `wave_r`, `twist_a`
 
 ### `tools/a1zctl`
 
-Executable Python CLI. The `serve` subcommand starts the server in-process; all other subcommands connect to the socket and return once the command completes.
+Executable Python CLI. The `serve` subcommand starts the server in-process; all other subcommands connect through the platform-selected local transport and return once the command completes.
 
 ```
 a1zctl serve [--can can0] [--with-gripper] [--gravity-mode]
@@ -48,13 +49,13 @@ OpenClaw skill descriptor. After OpenClaw loads this file the AI assistant can c
 
 ```bash
 # Terminal 1 — keep running
-python3 tools/a1zctl serve --with-gripper
+python tools/a1zctl serve --with-gripper
 
 # Terminal 2 or OpenClaw
-python3 tools/a1zctl status
-python3 tools/a1zctl move --preset home
-python3 tools/a1zctl gripper 0.5
-python3 tools/a1zctl stop
+python tools/a1zctl status
+python tools/a1zctl move --preset home
+python tools/a1zctl gripper 0.5
+python tools/a1zctl stop
 ```
 
 ## Design Notes

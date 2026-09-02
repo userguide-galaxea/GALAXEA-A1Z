@@ -15,9 +15,9 @@ Protocol (motor manual V1.0, p.10-13):
     Requires 失能 (disabled) mode.
 
 Usage:
-    python3 tools/gripper_set_zero.py
-    python3 tools/gripper_set_zero.py --can can0
-    python3 tools/gripper_set_zero.py --half-travel 2.87 -y
+    python tools/gripper_set_zero.py
+    python tools/gripper_set_zero.py --can can0
+    python tools/gripper_set_zero.py --half-travel 2.87 -y
 """
 
 import argparse
@@ -122,8 +122,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 tools/gripper_set_zero.py
-  python3 tools/gripper_set_zero.py --can can0 --half-travel 2.87 -y
+  python tools/gripper_set_zero.py
+  python tools/gripper_set_zero.py --can can0 --half-travel 2.87 -y
         """,
     )
     parser.add_argument("--can", default=None, help="CAN channel (default: can0)")

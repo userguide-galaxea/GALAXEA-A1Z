@@ -4,12 +4,15 @@ setuptools.setup(
     name="a1z",
     version="0.0.1",
     description="SDK for the A1Z 6-DOF robotic arm",
+    url="https://gitlab.galaxea-ai.com/menglian.li/a1z",
+    license="MIT",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.11",
         "License :: OSI Approved :: MIT License",
     ],
-    python_requires=">=3.10",
+    python_requires=">=3.11",
     install_requires=[
         "numpy",
         "python-can>=4.0",
