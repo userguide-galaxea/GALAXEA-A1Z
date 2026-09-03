@@ -59,7 +59,7 @@ A1Z 六轴机械臂的开源 Python SDK，面向机器人研发、算法验证�
 | 平台/组合 | 结果 |
 |-----------|------|
 | macOS + HHS `a8fa:8598` + 异步用户态后端 | 无夹爪与启用 G1Z 夹爪两种配置均已通过 250 Hz 真机控制验证 |
-| Windows + HHS | USB-CAN、电机通信和重力补偿可运行；QPC 调度基准达到 249.99 Hz，修复后真机终验待补 |
+| Windows + HHS | 无夹爪与启用 G1Z 夹爪两种配置均已通过 250 Hz 真机重力补偿控制验证 |
 
 ## 项目结构
 
@@ -789,7 +789,7 @@ Current hardware-validation status (2026-09):
 | Platform/configuration | Result |
 |------------------------|--------|
 | macOS + HHS `a8fa:8598` + asynchronous userspace backend | 250 Hz hardware control validated both without a gripper and with the G1Z gripper enabled |
-| Windows + HHS | USB-CAN, motor communication, and gravity compensation run; the QPC scheduler benchmark reaches 249.99 Hz, with post-fix hardware validation still pending |
+| Windows + HHS | 250 Hz hardware gravity-compensation control validated both without a gripper and with the G1Z gripper enabled |
 
 ## Project Structure
 

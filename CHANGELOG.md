@@ -13,15 +13,15 @@
 |------|----------|----------|------------------|------|
 | macOS | 无夹爪 | HHS `a8fa:8598` 实机通过 | 250 Hz | 已验证 |
 | macOS | G1Z 夹爪 | HHS `a8fa:8598` 实机通过 | 250 Hz | 已验证 |
-| Windows / Python 3.11 | 无夹爪 | HHS 实机通信与重力补偿通过 | 250 Hz 调度已修复 | QPC 基准 249.99 Hz，真机终验待补 |
-| Windows / Python 3.11 | G1Z 夹爪 | HHS 实机通信与控制通过 | 修复前约 168–176 Hz | 需基于 QPC 修复重新实测 |
+| Windows / Python 3.11 | 无夹爪 | HHS 实机通信与重力补偿通过 | 250 Hz | 已验证 |
+| Windows / Python 3.11 | G1Z 夹爪 | HHS 实机通信与重力补偿通过 | 250 Hz | 已验证 |
 | Windows / Python 3.10 | G1Z 夹爪 | HHS 实机通信与控制通过 | 约 65–70 Hz | 不建议用于当前控制配置 |
 
 - macOS 已确认有无 G1Z 夹爪都能保持 250 Hz，因此增加夹爪通信帧并不是
   Windows 约 172 Hz 的通用根因。
 - Windows 已完成适配器打开、1 Mbps 配置、六关节反馈及重力补偿实测。
-  profiler 证明控制工作本身显著低于 4 ms；Windows 250 Hz 调度问题已修复，
-  但在补充修复后的真机频率日志和稳定性测试前，不宣称完整硬件验证通过。
+  profiler 证明控制工作本身显著低于 4 ms；改用 QPC 高分辨率时钟后，
+  无夹爪和 G1Z 夹爪两种配置均已达到 250 Hz 真机控制频率。
 - 测试机现有驱动可直接被 libusb 访问，因此未使用 Zadig；其他 Windows
   机器仅在设备无法被 libusb 打开时才需要按 `README.md` 排查驱动。
 
@@ -109,6 +109,8 @@ git clone --branch codex/cross-platform-g1z-fixes --single-branch \
 - `git diff --check` 通过。
 - 同一 Windows / Anaconda Python 3.11 环境的 2,000 周期空载调度基准：
   `249.99 Hz`，平均周期 `4.000 ms`，P99 `4.987 ms`。
+- Windows / Python 3.11 + HHS 真机验证：无夹爪和 G1Z 夹爪两种配置的
+  重力补偿控制频率均达到 `250 Hz`。
 
 ### Windows 250 Hz 定位结果
 
@@ -120,13 +122,15 @@ git clone --branch codex/cross-platform-g1z-fixes --single-branch \
   `QueryPerformanceCounter()`、分辨率 `0.1 µs`。
 - 使用原 `monotonic()` 调度的 2,000 周期空载基准约为 `218.05 Hz`，周期
   P99 和最大值均出现 `16 ms` 量化；切换 QPC 后恢复到 `249.99 Hz`。
+- QPC 修复后的 Windows 真机复测确认：无夹爪和 G1Z 夹爪配置均达到
+  `250 Hz`，说明此前降频来自控制循环计时时钟，而不是夹爪 CAN 帧数量。
 - 该修复不改变 CAN 位时序、电机命令、控制增益、反馈超时或急停逻辑。
 
 ### 已知限制与后续工作
 
-- Windows 250 Hz 的粗粒度时钟根因和调度代码已修复；仍需补充修复后的
-  无夹爪/G1Z 真机短测，以及 250 Hz 下反馈延迟、丢帧、急停和至少 300 秒
-  稳定性验证。
+- Windows 250 Hz 的粗粒度时钟根因和调度代码已修复，无夹爪/G1Z 真机
+  短测均已通过；后续仍建议补充 250 Hz 下反馈延迟、丢帧、急停和至少
+  300 秒稳定性验证。
 - Windows Python 3.10 的约 65–70 Hz 结果明显较差，当前文档推荐 3.11，
   但尚未完成更多 Python/Windows 版本的系统性对照。
 - Zadig 是否需要取决于设备当前绑定的 Windows 驱动。驱动已支持 libusb 时
