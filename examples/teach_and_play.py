@@ -3,7 +3,7 @@
 
 Usage
 -----
-    # Record and save:
+    # Record and save (config defaults to the repo-root a1z.yaml):
     python examples/teach_and_play.py record teach.json
     python examples/teach_and_play.py record teach.json --can can1 --sample-hz 100
 
@@ -11,7 +11,7 @@ Usage
     python examples/teach_and_play.py play teach.json
     python examples/teach_and_play.py play teach.json --speed 0.5 --loop
 
-    # With an attached G1Z gripper:
+    # With an attached G1Z gripper (or set with_gripper: true in a1z.yaml):
     python examples/teach_and_play.py record teach.json --with-gripper
     python examples/teach_and_play.py play teach.json --with-gripper
 """
@@ -21,6 +21,7 @@ import logging
 import signal
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -47,6 +48,11 @@ def _build_robot_kwargs(args: argparse.Namespace) -> dict:
 def _safe_stop_robot(robot, *, return_zero: bool, zero_gravity: bool) -> None:
     """Return safely when requested, then perform an uninterruptible stop."""
     try:
+        if robot.is_running and robot.is_estopped:
+            # C2: while estopped/fault-held, move_joints is silently rejected
+            # — never attempt a return-to-zero in that state.
+            print("Arm is estopped; skipping return-to-zero.")
+            return_zero = False
         if robot.is_running and return_zero:
             print("Returning to zero...")
             robot.move_joints(
@@ -63,6 +69,8 @@ def _safe_stop_robot(robot, *, return_zero: bool, zero_gravity: bool) -> None:
     finally:
         previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
+            # V3: stop() no longer shuts down the CAN bus; the bus is closed
+            # by the robot object's destructor at process exit.
             robot.stop()
         finally:
             signal.signal(signal.SIGINT, previous_sigint)
@@ -89,7 +97,14 @@ def cmd_record(args: argparse.Namespace) -> None:
     print(f"  Gripper:    {with_gripper}")
     print("=" * 60)
 
-    robot.start()
+    try:
+        robot.start()
+    except RuntimeError as exc:
+        # V1/V2: start() only admits the STOPPED state; after a hard fault
+        # the object is unrestartable and must be recreated.
+        print(f"[record] Cannot start robot: {exc}")
+        robot.stop()
+        return
     if with_gripper:
         robot.set_gripper_free_drive(True)
         print("[record] Arm in zero-gravity mode; gripper in free-drive (move by hand).\n")
@@ -176,7 +191,14 @@ def cmd_play(args: argparse.Namespace) -> None:
     if not with_gripper:
         trajectory = [(t, pos[:6]) for t, pos in trajectory]
 
-    robot.start()
+    try:
+        robot.start()
+    except RuntimeError as exc:
+        # V1/V2: start() only admits the STOPPED state; after a hard fault
+        # the object is unrestartable and must be recreated.
+        print(f"[play] Cannot start robot: {exc}")
+        robot.stop()
+        return
 
     try:
         start_pos = trajectory[0][1]
@@ -212,6 +234,11 @@ def cmd_play(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # The machine config is the source of truth: default --config to the
+    # repo-root a1z.yaml so record/play need no flags on a properly
+    # configured machine (explicit --config still overrides).
+    _default_config = Path(__file__).resolve().parent.parent / "a1z.yaml"
+
     parser = argparse.ArgumentParser(description="A1Z teach-and-play")
     parser.add_argument("--can", default=None, help="CAN channel (default: can0)")
     parser.add_argument("--bustype", default=None,
@@ -219,7 +246,10 @@ def main() -> None:
                              "Default: socketcan on Linux, gs_usb on macOS/Windows.")
     parser.add_argument("--with-gripper", action="store_true",
                         help="Attach the G1Z gripper (record/play 7th DOF).")
-    add_config_argument(parser)
+    add_config_argument(
+        parser,
+        default=str(_default_config) if _default_config.exists() else None,
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_record = sub.add_parser("record", help="Record a trajectory and save to file")

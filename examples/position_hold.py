@@ -107,7 +107,13 @@ def main():
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     try:
-        robot.start()
+        try:
+            robot.start()
+        except RuntimeError as exc:
+            # V1/V2: start() only admits the STOPPED state; after a hard fault
+            # the object is unrestartable and must be recreated.
+            print(f"\nCannot start robot: {exc}")
+            sys.exit(1)
 
         if q_target.size > 0:
             print(f"\nMoving to target at {args.speed} rad/s...")
@@ -142,9 +148,14 @@ def main():
     finally:
         try:
             if robot.is_running:
-                print("\nReturning to zero...")
-                robot.move_joints(np.zeros(6), speed=args.speed * 0.5)
-                time.sleep(0.3)
+                if robot.is_estopped:
+                    # C2: while estopped/fault-held, move_joints is silently
+                    # rejected — do not assume the arm can still move.
+                    print("\nArm is estopped; skipping return-to-zero...")
+                else:
+                    print("\nReturning to zero...")
+                    robot.move_joints(np.zeros(6), speed=args.speed * 0.5)
+                    time.sleep(0.3)
         except KeyboardInterrupt:
             print("\nReturn-to-zero interrupted; disabling immediately...")
         except Exception:
@@ -153,6 +164,8 @@ def main():
             # A second Ctrl+C must never interrupt the motor-disable sequence.
             previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
             try:
+                # V3: stop() no longer shuts down the CAN bus; the bus is
+                # closed by the robot object's destructor at process exit.
                 robot.stop()
             finally:
                 signal.signal(signal.SIGINT, previous_sigint)

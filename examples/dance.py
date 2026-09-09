@@ -199,26 +199,35 @@ def main() -> None:
 
     def _stop(sig, frame):
         print("\n  Ctrl+C — stopping safely...")
-        if robot.is_running:
+        # C2: while estopped/fault-held, move_joints is silently rejected.
+        if robot.is_running and not robot.is_estopped:
             print("  [zero]")
             robot.move_joints(np.zeros(robot.num_dofs()), speed=args.speed * 0.5)
         robot.stop()
+        # V3: stop() no longer shuts down the CAN bus — close it explicitly.
         robot._bus.shutdown()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _stop)
 
     try:
-        robot.start()
+        try:
+            robot.start()
+        except RuntimeError as exc:
+            # V1/V2: start() only admits the STOPPED state; after a hard fault
+            # the object is unrestartable and must be recreated.
+            print(f"\n  Cannot start robot: {exc}")
+            sys.exit(1)
         dance = Dance(robot, base_speed=args.speed, with_gripper=with_gripper)
         dance.run(order)
     except Exception as exc:
         print(f"\n  Error: {exc}")
     finally:
-        if robot.is_running:
+        if robot.is_running and not robot.is_estopped:
             print("  [zero]")
             robot.move_joints(np.zeros(robot.num_dofs()), speed=args.speed * 0.5)
         robot.stop()
+        # V3: stop() no longer shuts down the CAN bus — close it explicitly.
         robot._bus.shutdown()
         print("  Motors off.")
 

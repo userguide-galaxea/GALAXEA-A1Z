@@ -16,7 +16,10 @@ class SafeReturnTests(unittest.TestCase):
         robot._default_kp = np.array([30.0, 30.0, 30.0, 20.0, 5.0, 5.0])
         robot._default_kd = np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])
         robot._command_lock = threading.Lock()
-        robot._estop_latch = threading.Event()
+        # State-machine fields used by move_joints (P4/P5): interrupt checks
+        # read _commands_blocked; gain overrides go through
+        # _require_gain_vector, which only needs _num_joints.
+        robot._commands_blocked = threading.Event()
         robot._command = JointCommand(
             pos=np.zeros(6),
             kp=np.zeros(6),

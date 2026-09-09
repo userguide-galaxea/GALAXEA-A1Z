@@ -9,6 +9,10 @@ import can
 from a1z.motor_drivers.can_backend import open_can_bus
 from a1z.motor_drivers.utils import ReceiveMode
 
+# Non-blocking send: a stuffed TX queue must raise immediately instead of
+# stalling the caller. Valid for any python-can backend.
+_CAN_SEND_TIMEOUT_S = 0.0
+
 
 class CanInterface:
     """CAN bus send/receive with retry and optional buffered reader."""
@@ -50,7 +54,7 @@ class CanInterface:
         message = can.Message(arbitration_id=id, data=data, is_extended_id=False)
         for _ in range(max_retry):
             try:
-                self.bus.send(message)
+                self.bus.send(message, timeout=_CAN_SEND_TIMEOUT_S)
                 response = self._receive_message(motor_id, timeout=0.2)
                 if expected_id is None:
                     expected_id = self.receive_mode.get_receive_id(motor_id)

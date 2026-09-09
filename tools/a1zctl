@@ -85,6 +85,18 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
 def cmd_status(_args: argparse.Namespace) -> None:
     data = _ok_or_exit(_send("status"))
+    # V11: the server reports the safety state machine alongside telemetry.
+    control_state = data.get("control_state")
+    if control_state is not None:
+        line = f"Control state: {control_state}"
+        fault_code = data.get("fault_code")
+        if fault_code:
+            line += f"   fault: {fault_code}"
+            fault_reason = data.get("fault_reason")
+            if fault_reason:
+                line += f" ({fault_reason})"
+        print(line)
+        print()
     pos = data["pos_deg"]
     vel = data["vel_rad_s"]
     trq = data["torque_nm"]

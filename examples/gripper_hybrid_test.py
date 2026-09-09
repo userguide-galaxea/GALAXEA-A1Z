@@ -79,9 +79,10 @@ def test_free_travel(gripper: Gripper, motor: MotorB) -> None:
             fb = motor.last_feedback
             if fb is not None:
                 norm = gripper.get_feedback_norm()
+                err = f"  [{fb.error_message}]" if fb.error else ""
                 sys.stdout.write(
-                    f"\r  目标={label}({cmd:.1f})  反馈={norm:.3f}  "
-                    f"torque={fb.torque:+5.2f}Nm   "
+                    f"\r  目标={label}({cmd:.1f})  pos={fb.position:+.3f}rad"
+                    f"  反馈={norm:.3f}  torque={fb.torque:+5.2f}Nm{err}   "
                 )
                 sys.stdout.flush()
             time.sleep(0.05)
@@ -111,23 +112,32 @@ def test_torque_clamp(gripper: Gripper, motor: MotorB) -> None:
     input()
 
     gripper.command(0.0)
+    fb0 = motor.last_feedback
+    pos0 = fb0.position if fb0 is not None else None
     t0 = time.time()
     while time.time() - t0 < 5.0:
         _drain(motor)
         fb = motor.last_feedback
         if fb is not None:
             norm = gripper.get_feedback_norm()
+            err = f"  [{fb.error_message}]" if fb.error else ""
             sys.stdout.write(
-                f"\r  norm={norm:.3f}  torque={fb.torque:+5.2f}Nm  "
-                f"vel={fb.velocity:+5.2f}rad/s   "
+                f"\r  norm={norm:.3f}  pos={fb.position:+.3f}rad  "
+                f"torque={fb.torque:+5.2f}Nm  vel={fb.velocity:+5.2f}rad/s{err}   "
             )
             sys.stdout.flush()
         time.sleep(0.05)
     print()
 
+    fb1 = motor.last_feedback
+    if pos0 is not None and fb1 is not None and abs(fb1.position - pos0) < 0.05:
+        print("  ⚠ 位置全程未变化 —— 夹爪未曾运动，本项无有效阻挡，结果无效")
+        print("    （若自由行程项未通过，请先解决运动问题再做力矩饱和）")
+    else:
+        print("  ✓ 力矩饱和测试完成")
+
     gripper.command(1.0)
     time.sleep(1.0)
-    print("  ✓ 力矩饱和测试完成")
 
 
 def main() -> None:

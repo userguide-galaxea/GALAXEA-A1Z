@@ -125,6 +125,8 @@ class RobotServer:
     def _cmd_status(self, _args: dict) -> dict:
         state = self._robot.get_joint_state()
         pos_deg = np.rad2deg(state["pos"]).tolist()
+        # V11: surface the safety state machine alongside the joint telemetry.
+        fault = self._robot.get_fault_status()
         data: dict = {
             "pos_deg":    [round(v, 2) for v in pos_deg],
             "vel_rad_s":  [round(v, 3) for v in state["vel"].tolist()],
@@ -133,6 +135,9 @@ class RobotServer:
             "temp_rotor_c": [round(v, 1) for v in state["temp_rotor"].tolist()],
             "error_codes":  [int(v) for v in state["error_codes"].tolist()],
             "estopped":     bool(self._robot.is_estopped),
+            "control_state": fault["state"],
+            "fault_code":    fault["code"],
+            "fault_reason":  fault["reason"],
         }
         if self._with_gripper:
             gpos = self._robot.get_gripper_pos()
@@ -193,12 +198,23 @@ class RobotServer:
         return {"ok": True, "data": {"message": "Stopping server"}}
 
     def _cmd_estop(self, _args: dict) -> dict:
-        self._robot.estop()
-        return {"ok": True, "data": {"estopped": True}}
+        # V5: estop() returns whether the soft estop was actually engaged.
+        engaged = self._robot.estop()
+        return {
+            "ok": engaged,
+            "data": {"estopped": self._robot.is_estopped},
+            **({} if engaged else {"error": "Robot cannot enter soft estop from its current state"}),
+        }
 
     def _cmd_release(self, _args: dict) -> dict:
-        self._robot.release()
-        return {"ok": True, "data": {"estopped": self._robot.is_estopped}}
+        # V4/V5: release() can fail (stale feedback, state mismatch, wrong
+        # expected fault code) — report failure instead of silent success.
+        released = self._robot.release()
+        return {
+            "ok": released,
+            "data": {"estopped": self._robot.is_estopped},
+            **({} if released else {"error": "Robot fault could not be released"}),
+        }
 
     def _cmd_info(self, _args: dict) -> dict:
         return {
@@ -330,7 +346,15 @@ def serve(
 
     signal.signal(signal.SIGINT, _sigint)
 
-    robot.start()
+    try:
+        robot.start()
+    except RuntimeError as exc:
+        # V1/V2: the state machine refused startup (not STOPPED, or a startup
+        # fault escalated); the object may be unrestartable. Make the failure
+        # explicit instead of serving a dead robot.
+        print(f"[a1z] Arm failed to start: {exc}")
+        robot.stop()
+        raise SystemExit(1)
     print("[a1z] Arm ready.  Press Ctrl+C to stop.")
 
     try:

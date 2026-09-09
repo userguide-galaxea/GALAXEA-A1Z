@@ -56,6 +56,27 @@ class MotorAFeedback:
     error: int = 0
     temperature: float = 0.0      # motor coil temperature (°C)
     temperature_mos: float = 0.0  # MOS temperature (°C)
+    # False when the frame is not a report-type-1 response (error report /
+    # config / query / brake reply): the payload is not a uint16 position, so
+    # position/velocity/current/temperature are not trustworthy.
+    valid_position: bool = True
+
+
+# ENCOS feedback "motor error information" field (uint5).
+#
+# This is an error field, not an enable-state field: 0 means no error and
+# non-zero values are hardware faults.  It must not share the DaMiao/MotorB
+# convention where 0 means disabled and 1 means enabled.
+MOTOR_A_ERROR_CODES = {
+    0x0: "no error",
+    0x1: "motor over temperature",
+    0x2: "over current",
+    0x3: "over voltage",
+    0x4: "under voltage",
+    0x5: "encoder error",
+    0x6: "brake voltage too high",
+    0x7: "DRV driver error",
+}
 
 
 def pack_motor_a_mit(
@@ -103,6 +124,10 @@ class MotorA:
         self.ranges = ranges or MotorARanges()
         self.last_feedback: Optional[MotorAFeedback] = None
         self.use_new_enable_protocol = use_new_enable_protocol
+        # Error code carried by a non-type-1 report frame (e.g. an error
+        # report), written by MixedMotorChain at dispatch time; such frames
+        # use a different payload layout and must not overwrite last_feedback.
+        self.last_reported_error: int = 0
 
     def enable(self) -> None:
         """Send motor enable command.
@@ -137,6 +162,18 @@ class MotorA:
             msg = can.Message(arbitration_id=self.motor_id, data=data, is_extended_id=False)
         self.bus.send(msg)
         time.sleep(0.01)
+
+    @staticmethod
+    def error_is_fault(code: int) -> bool:
+        """Return whether an ENCOS error-information value is a fault."""
+        return int(code) != 0x0
+
+    @staticmethod
+    def describe_error(code: int) -> str:
+        """Describe an ENCOS error-information value."""
+        code = int(code)
+        name = MOTOR_A_ERROR_CODES.get(code, f"unknown({code})")
+        return f"error_code=0x{code:X} ({name})"
 
     def send_mit_command(
         self,
@@ -182,7 +219,19 @@ class MotorA:
         r = self.ranges
 
         frame = int.from_bytes(data, byteorder="big", signed=False)
+        report_type = (frame >> 61) & 0x7
         error_code = (frame >> 56) & 0x1F
+        if report_type != 0x1:
+            # ENCOS response frames come in several report types (manual
+            # V1.12 §10); only type 1 carries uint16 position/velocity/current.
+            # The other types contribute only their error code — never decode
+            # them as position, which would land near the range endpoints.
+            return MotorAFeedback(
+                motor_id=msg.arbitration_id,
+                error=error_code,
+                valid_position=False,
+            )
+
         pos_raw = (frame >> 40) & 0xFFFF
         vel_raw = (frame >> 28) & 0xFFF
         curr_raw = (frame >> 16) & 0xFFF

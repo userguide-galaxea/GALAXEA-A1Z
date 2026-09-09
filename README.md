@@ -82,7 +82,7 @@ a1z/
 │   │   └── utils.py               # 数据结构, float↔uint 转换
 │   ├── robots/
 │   │   ├── robot.py               # Robot Protocol (抽象接口)
-│   │   ├── arm_robot.py           # ArmRobot 实现 (控制回路+重力补偿)
+│   │   ├── arm_robot.py           # ArmRobot 实现 (控制回路+重力补偿+安全状态机)
 │   │   ├── get_robot.py           # 工厂函数 get_a1z_robot()
 │   │   ├── gripper.py             # Gripper 控制 (MotorB CAN ID 0x07)
 │   │   ├── server.py              # 跨平台本机控制服务端（Unix socket / Windows TCP）
@@ -163,6 +163,8 @@ gravity_comp_factor: 1.0
 zero_gravity_mode: true
 with_gripper: false
 ```
+
+> 配置文件中还可覆盖 `default_kp` / `default_kd`（出厂默认值为真机调优增益，见 [默认控制参数](#默认控制参数)）。CAN 帧间隔（`inter_cmd_gap_us`）为 `get_a1z_robot()` 构造参数，不经配置文件设置。
 
 使用示例：
 
@@ -251,6 +253,19 @@ SDK 默认按平台自动选择 CAN 后端：
 | **Windows** | **PEAK PCAN-USB** | `python -m pip install -e ".[pcan]"` + PEAK 官方驱动 | `--bustype pcan --can PCAN_USBBUS1` |
 
 不传 `--bustype` 时使用 OS 默认值：Linux 默认 `socketcan`/`can0`，macOS/Windows 默认 `gs_usb`/设备序号 `0`。
+
+#### CAN 命令帧间隔（Pacing）
+
+每个控制周期 SDK 会向 6 个关节各发一帧 MIT 指令。默认在**相邻命令帧之间插入 250 µs 间隔**，避免前一帧电机的应答时隙被后一帧占用（修复了脉冲式连发时末端腕关节反馈/目标锁存饿死的问题）。该间隔在电机链内部实现，一体化夹爪帧也遵循同样的间隔。
+
+```python
+robot = get_a1z_robot()                          # 默认 250 µs
+robot = get_a1z_robot(inter_cmd_gap_us=0)        # 关闭 pacing（恢复旧的连发行为）
+```
+
+- `inter_cmd_gap_us=None`（默认）→ 250 µs；`0` 关闭；超过 **500 µs** 在构造时抛 `ValueError`（6 段间隔必须容纳在 4 ms 控制周期内）。
+- 该参数是 `get_a1z_robot()` 的构造参数，不经 YAML 配置文件设置，SDK 也不读取相关环境变量。
+- 定时精度依赖 CAN 后端：SocketCAN（内核态）较可靠；gs_usb 用户态后端（macOS/Windows）实际间隔可能偏大，必要时可按后端用 `inter_cmd_gap_us` 重调。
 
 ## 快速开始
 
@@ -462,6 +477,7 @@ get_a1z_robot(
     default_kd=None,              # 覆盖默认速度增益
     with_gripper=False,           # True=启用夹爪 (CAN ID 0x07)
     gripper_max_torque=2.0,       # 夹爪最大夹持力矩 (Nm)，默认 2.0 Nm
+    inter_cmd_gap_us=None,        # CAN 命令帧间隔 (µs)：None=默认 250，0=关闭，上限 500
     bustype=None,                 # CAN 后端（None=OS 默认: Linux→socketcan, macOS/Windows→gs_usb）
 ) -> ArmRobot
 ```
@@ -470,17 +486,23 @@ get_a1z_robot(
 
 | 方法 | 说明 |
 |------|------|
-| `start(initial_kp, initial_kd)` | 使能电机，启动控制回路（含夹爪归零） |
-| `stop()` | 平滑停机（0.8s 衰减），失能电机 |
+| `start(initial_kp, initial_kd)` | 使能电机，启动控制回路（含夹爪归零）；仅 `STOPPED` 状态可启动，否则抛 `RuntimeError`；硬故障后须重建对象 |
+| `stop()` | 停止控制回路并失能所有电机；**不关闭 CAN 总线**（总线由对象析构或外部调用方管理） |
+| `estop(reason, fault_code) -> bool` | 软急停：kp=0、kd 减半、锁定当前位置，重力补偿继续、**电机保持使能**；详见 [安全状态机](#安全状态机) |
+| `release(expected_fault_code=None) -> bool` | 解除软急停/保持并恢复 `RUNNING`；要求反馈新鲜、状态匹配，失败返回 `False` 并保持现状 |
+| `hold_position(reason, fault_code) -> bool` | 锁存全增益 MIT 位置保持（`FAULT_HOLD`），控制回路保持运行 |
+| `hold_last_command() -> bool` | 保持最后一次已下发的位置目标并清零运动前馈（不锁存故障，用于 teleop 输入丢失） |
+| `latch_last_command(reason, fault_code) -> bool` | 锁存最后一次已下发目标（`COMMAND_HOLD`），`release()` 成功前拒绝新命令 |
+| `get_fault_status() -> dict` | 查询安全状态快照：`state` / `code` / `reason` / 反馈健康度 / `restart_allowed` 等 |
 | `get_joint_pos() -> np.ndarray` | 获取当前关节角 (rad)；有夹爪时返回 7 元素数组（第 7 个为夹爪归一化开度） |
 | `get_joint_state() -> dict` | 获取 `{pos, vel, eff}`（仅 6 轴） |
 | `get_observations() -> dict` | 获取 `{joint_pos, joint_vel, joint_eff}`；带夹爪时额外包含 `gripper_pos` |
-| `command_joint_pos(pos)` | 设置目标关节角；可传 7 元素数组，第 7 个为夹爪开度 [0, 1] |
-| `command_joint_state(joint_state)` | 设置目标关节角 + 自定义增益 |
+| `command_joint_pos(pos) -> bool` | 设置目标关节角（越界始终裁剪，见 [关节限位处理](#关节限位处理)）；可传 7 元素数组，第 7 个为夹爪开度 [0, 1]；急停/故障中拒绝并返回 `False` |
+| `command_joint_state(joint_state) -> bool` | 设置目标关节角 + 自定义增益；vel/kp/kd/acc/torque_ff 越界则拒绝整帧并返回 `False` |
 | `command_gripper(value)` | 设置夹爪目标开度 [0.0=关闭, 1.0=全开] |
 | `get_gripper_pos() -> float\|None` | 获取当前夹爪指令开度；无夹爪返回 None |
-| `move_joints(target, speed, kp, kd)` | 线性插值移动到目标位置（阻塞）；可传 7 元素数组 |
-| `is_running` | 控制回路是否在运行 |
+| `move_joints(target, speed, kp, kd, max_jump_rad, sync_to_measured, gain_ramp_s)` | minimum-jerk 插值移动到目标位置（阻塞）；目标越界超出容差抛 `ValueError`；`max_jump_rad` 可拒绝距当前测量位置过远的目标 |
+| `is_running` / `is_estopped` | 控制回路是否在运行 / 是否处于急停或故障保持（兼容属性） |
 
 ### `Kinematics` 运动学
 
@@ -600,27 +622,26 @@ def send_mit_command(self, pos: float, vel: float, kp: float, kd: float, torque:
     # 打包成 8 字节 CAN 帧下发
 ```
 
-SDK 在每个控制周期（默认 250 Hz）的 `_update` 中执行：
+SDK 在每个控制周期（默认 250 Hz）的 `_update` 中执行（发送路径位于 `_send_command_and_cache_hold_locked`）：
 
 ```python
 # arm_robot.py — _update()
 
-# 1. 读取电机反馈
-self._motor_chain.drain_and_update(self._bus)
+# 1. 读取电机反馈，并做每周期安全检查（反馈新鲜度 / 电机错误 / 温度 / 速度）
+self._read_state()
+feedback_fault = self._check_runtime_safety()
+# 反馈失效时：先重发缓存的纯重力补偿 MIT 保持帧，再抛可恢复故障（见"故障策略"）；
+# 过温 / 过速 / 电机错误等硬故障直接失能电机
 
-# 2. Pinocchio RNEA 计算重力补偿扭矩
-tau_g = self._gravity_model.compute_gravity_torque(q)
+# 2. Pinocchio RNEA 逆动力学（重力 + 科氏力 + 惯性）
+tau_id = self._gravity_model.compute_inverse_dynamics(q, cmd.vel, cmd.acc)
 
-# 3. 安全检查
-if np.any(np.abs(tau_g) > self._max_gravity_torque):
-    raise RuntimeError(...)
+# 3. 合成最终扭矩（PD + 重力补偿：torque_ff + 逆动力学补偿）
+torques_urdf  = cmd.torque_ff + tau_id * self._gravity_torque_scale * self.gravity_comp_factor
+motor_torques = np.clip(torques_urdf * self._joint_sign, -self._torque_clip, self._torque_clip)
 
-# 4. 合成最终扭矩
-tau_g_scaled   = tau_g * self._gravity_torque_scale
-torques_urdf   = cmd.torque_ff + tau_g_scaled * self.gravity_comp_factor
-motor_torques  = np.clip(torques_urdf * self._joint_sign, -self._torque_clip, self._torque_clip)
-
-# 5. 下发给所有电机
+# 4. 经电机链下发（相邻命令帧按 inter_cmd_gap_s 间隔 pacing），
+#    并缓存一帧纯重力补偿安全保持帧，供反馈失效时重发
 self._motor_chain.send_commands(
     pos=cmd.pos * self._joint_sign,
     vel=cmd.vel * self._joint_sign,
@@ -643,8 +664,8 @@ self._command.kd = self._default_kd.copy() * 0.5    # 小阻尼
 
 ```python
 # get_a1z_robot(zero_gravity_mode=False) 启动时初始化：
-self._command.kp = self._default_kp.copy()  # [30, 30, 30, 20, 5, 5]
-self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
+self._command.kp = self._default_kp.copy()  # [146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]
+self._command.kd = self._default_kd.copy()  # [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]
 # PD 控制 + 重力补偿，锁定到当前位置
 ```
 
@@ -657,6 +678,34 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 - 重力扭矩阈值、软限位和平滑停机只是软件保护，不能替代物理限位、防护围栏、急停回路或风险评估。
 - 通信中断、程序异常或行为不符合预期时，立即使用物理急停，然后确认所有电机已失能。
 - 不要将未经本地硬件验证的脚本用于无人值守、生产环境或与人直接协作的场景。
+- 首次使用请将 `gravity_comp_factor` 设为较小值（如 0.3），确认补偿方向正确后再逐步增大
+- SDK 由显式安全状态机管理急停与故障行为（见下文"安全状态机"与"故障策略"）
+- 反馈丢失 / 总线瞬态错误时自动重发缓存的安全保持帧并继续尝试恢复；持续 0.2 s 未恢复则锁存位置保持；过温 / 过速 / 电机错误直接失能电机
+- 所有目标关节角都会被裁剪到 URDF 限位范围内（见下文"关节限位处理"）
+
+### 安全状态机
+
+控制回路运行在显式状态机上：`STOPPED` / `RUNNING` / `SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD` / `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED`。
+
+- `start()` 仅允许从 `STOPPED` 状态启动（无存活控制线程、无未清除的致命故障），否则抛 `RuntimeError`。进入 `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED` 后对象不可重启，必须重建 `ArmRobot` 实例。
+- `estop()` 为软急停：kp 清零、kd 减半、命令位置锁定到当前测量位置；**电机保持使能**，重力补偿继续运行，机械臂在负载下不会坠落。从 `STOPPED` / `FAULT_HOLD` / `HARD_*` 状态调用返回 `False`。
+- `estop()` / `release()` 均返回 `bool`。`release(expected_fault_code=None)` 仅在控制回路运行、反馈新鲜完整、状态匹配（`SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD`）时恢复 `RUNNING`；否则返回 `False` 并保持现状。`expected_fault_code` 可防止误释放其他来源的故障。
+- 急停 / 保持期间，`command_joint_pos` / `command_joint_state` / `command_gripper` / `move_joints` 被拒绝（返回 `False` 或提前返回，并记日志）。
+- `stop()` 停止控制回路并失能所有电机；**不再关闭 CAN 总线**——总线在对象析构时关闭（或由外部调用方管理），因此 `stop()` 后可用同一对象再次 `start()`。
+- `get_fault_status()` 返回线程安全的状态快照（`state` / `code` / `reason` / 故障时长 / 逐关节反馈健康度 / `restart_allowed` 等）。
+
+### 故障策略
+
+| 分类 | 触发条件 | 行为 |
+|------|----------|------|
+| 可恢复（recoverable） | 反馈超时（stale）、瞬态 CAN 发送错误（EAGAIN/EWOULDBLOCK/EINTR/ENOBUFS/TX 缓冲区满）、逆动力学计算异常 | 保持最后一次命令并重发缓存的纯重力补偿 MIT 保持帧（电机**不**失能）；持续 0.2 s 未恢复 → 锁存 `FAULT_HOLD`（全增益位置保持），反馈恢复后可 `release()` |
+| 硬故障（hard） | 过温、过速、电机错误码、非有限反馈 | 立即失能所有电机（`HARD_DISABLED`），锁存故障且对象不可重启 |
+
+### 关节限位处理
+
+- 流式命令（`command_joint_pos` / `command_joint_state`，teleop / 轨迹回放场景）：越界目标**始终裁剪**到物理限位，不再拒绝整帧或触发急停，未越界关节继续跟踪。裁剪前按 S¹ 圆拓扑将目标 unwrap 到距当前命令最近的等价角，避免 ±π 回绕导致满行程跳变。超出每关节容差（默认 0.05 rad）的大越界记 ERROR 日志，容差内小越界记 WARNING。
+- `move_joints` 单发运动：目标越界超出容差仍抛 `ValueError` 拒绝执行；新增 `max_jump_rad` 参数，可拒绝距当前测量位置过远的目标（如 IK 翻肘解）。
+- 运行中测量位置漂出软限位只记日志（1 Hz 限频），不再触发急停。
 
 ## 关节限位
 
@@ -673,8 +722,10 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 | 参数 | 值 |
 |------|------|
-| 默认 KP | `[30, 30, 30, 20, 5, 5]` |
-| 默认 KD | `[1, 1, 1, 0.5, 0.5, 0.5]` |
+| 默认 KP | `[146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]` |
+| 默认 KD | `[5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]` |
+| 命令增益上限 | kp ≤ 200，kd ≤ 5（`command_joint_state` / `move_joints` 自定义增益越界拒绝） |
+| CAN 命令帧间隔 | 250 µs（`inter_cmd_gap_us` 可调，0=关闭，上限 500 µs） |
 | 关节坐标系符号 | `[1, 1, -1, 1, -1, 1]` (关节3，5与URDF方向相反) |
 | 重力扭矩缩放 | `[1, 1, 1, 1, 1, 1]` |
 | 最大重力扭矩 | `[50, 50, 50, 24, 10, 10]` Nm |
@@ -812,7 +863,7 @@ a1z/
 │   │   └── utils.py               # Data structures, float↔uint conversion
 │   ├── robots/
 │   │   ├── robot.py               # Robot Protocol (abstract interface)
-│   │   ├── arm_robot.py           # ArmRobot implementation (control loop + gravity comp)
+│   │   ├── arm_robot.py           # ArmRobot implementation (control loop + gravity comp + safety state machine)
 │   │   ├── get_robot.py           # Factory function get_a1z_robot()
 │   │   ├── gripper.py             # Gripper control (MotorB CAN ID 0x07)
 │   │   ├── server.py              # Cross-platform local server (Unix socket / Windows TCP)
@@ -891,6 +942,8 @@ gravity_comp_factor: 1.0
 zero_gravity_mode: true
 with_gripper: false
 ```
+
+> The config file can also override `default_kp` / `default_kd` (factory defaults are hardware-tuned gains, see [Default Control Parameters](#default-control-parameters)). The CAN pacing gap (`inter_cmd_gap_us`) is a `get_a1z_robot()` constructor argument and is not set via the config file.
 
 Example usage:
 
@@ -979,6 +1032,19 @@ The SDK automatically selects the CAN backend by platform:
 | **Windows** | **PEAK PCAN-USB** | `python -m pip install -e ".[pcan]"` + PEAK official driver | `--bustype pcan --can PCAN_USBBUS1` |
 
 When `--bustype` is omitted, the OS default is used: Linux defaults to `socketcan`/`can0`; macOS/Windows default to `gs_usb`/device index `0`.
+
+#### CAN Command Pacing
+
+Each control tick sends one MIT frame per joint. By default the SDK inserts a **250 µs gap between consecutive command frames** so a motor's answer slot is never occupied by its predecessor's answer — this fixes the feedback/target-latch starvation observed on the wrist joint at the end of a back-to-back burst. The gap is implemented inside the motor chain, and the integrated gripper frame honors the same pacing.
+
+```python
+robot = get_a1z_robot()                          # default 250 µs
+robot = get_a1z_robot(inter_cmd_gap_us=0)        # disable pacing (legacy back-to-back burst)
+```
+
+- `inter_cmd_gap_us=None` (default) → 250 µs; `0` disables pacing; values above **500 µs** raise `ValueError` at construction (the 6 paced boundaries must fit inside the 4 ms control tick).
+- The gap is a `get_a1z_robot()` constructor argument — it is not exposed via the YAML config file, and the SDK reads no environment variable for it.
+- Timing precision depends on the CAN backend: SocketCAN (kernel) is reliable; on userspace backends (gs_usb on macOS/Windows) actual gaps may be longer. Retune per backend with `inter_cmd_gap_us` if needed.
 
 ## Quick Start
 
@@ -1192,6 +1258,7 @@ get_a1z_robot(
     default_kd=None,              # Override default velocity gains
     with_gripper=False,           # True=enable gripper (CAN ID 0x07)
     gripper_max_torque=2.0,       # Max gripping torque (Nm), default 2.0 Nm
+    inter_cmd_gap_us=None,        # CAN command pacing gap (µs): None=250 default, 0=off, max 500
     bustype=None,                 # CAN backend (None=OS default: Linux→socketcan, macOS/Windows→gs_usb)
 ) -> ArmRobot
 ```
@@ -1200,17 +1267,23 @@ get_a1z_robot(
 
 | Method | Description |
 |--------|-------------|
-| `start(initial_kp, initial_kd)` | Enable motors and start the control loop (gripper homing included) |
-| `stop()` | Smooth shutdown (0.8 s decay), disable motors |
+| `start(initial_kp, initial_kd)` | Enable motors and start the control loop (gripper homing included); only allowed from `STOPPED` — otherwise raises `RuntimeError`; after a hard fault the object cannot be restarted (recreate it) |
+| `stop()` | Stop the control loop and disable all motors; does **not** shut down the CAN bus (the bus is closed on object destruction or by the owning caller) |
+| `estop(reason, fault_code) -> bool` | Soft emergency stop: kp=0, kd halved, position pinned to the current pose; gravity compensation keeps running and **motors stay enabled**; see [Safety State Machine](#safety-state-machine) |
+| `release(expected_fault_code=None) -> bool` | Release a soft estop / hold back to `RUNNING`; requires fresh feedback and a matching state — returns `False` (and holds) otherwise |
+| `hold_position(reason, fault_code) -> bool` | Latch a strict full-gain MIT position hold (`FAULT_HOLD`) while the control loop stays alive |
+| `hold_last_command() -> bool` | Keep the last queued position target and clear motion feedforward (no fault latched; teleop input-loss behavior) |
+| `latch_last_command(reason, fault_code) -> bool` | Latch the last transmitted target (`COMMAND_HOLD`); new commands are rejected until `release()` succeeds |
+| `get_fault_status() -> dict` | Thread-safe safety snapshot: `state` / `code` / `reason` / per-joint feedback health / `restart_allowed`, etc. |
 | `get_joint_pos() -> np.ndarray` | Get current joint angles (rad); returns 7-element array when gripper is attached (7th = normalized gripper position) |
 | `get_joint_state() -> dict` | Get `{pos, vel, eff}` (arm joints only) |
 | `get_observations() -> dict` | Get `{joint_pos, joint_vel, joint_eff}`; includes `gripper_pos` when a gripper is attached |
-| `command_joint_pos(pos)` | Set target joint angles; accepts 7-element array (7th = gripper [0, 1]) |
-| `command_joint_state(joint_state)` | Set target joint angles + custom gains |
+| `command_joint_pos(pos) -> bool` | Set target joint angles (out-of-limits targets are always clipped, see [Joint Limit Handling](#joint-limit-handling)); accepts 7-element array (7th = gripper [0, 1]); returns `False` when rejected (e.g. while estopped) |
+| `command_joint_state(joint_state) -> bool` | Set target joint angles + custom gains; out-of-range vel/kp/kd/acc/torque_ff rejects the whole frame (`False`) |
 | `command_gripper(value)` | Set gripper target position [0.0=closed, 1.0=fully open] |
 | `get_gripper_pos() -> float\|None` | Get current gripper command position; returns None without gripper |
-| `move_joints(target, speed, kp, kd)` | Interpolate to target position (blocking); accepts 7-element array |
-| `is_running` | Whether the control loop is active |
+| `move_joints(target, speed, kp, kd, max_jump_rad, sync_to_measured, gain_ramp_s)` | Minimum-jerk interpolation to target (blocking); a target beyond the joint-limit tolerance raises `ValueError`; `max_jump_rad` rejects targets too far from the measured pose |
+| `is_running` / `is_estopped` | Whether the control loop is active / whether the robot is in estop or a fault hold (compatibility properties) |
 
 ### `Kinematics`
 
@@ -1329,13 +1402,13 @@ def send_mit_command(self, pos, vel, kp, kd, torque):
     # pack into 8-byte CAN frame and send
 ```
 
-The SDK's `_update()` runs at each control cycle (default 250 Hz):
+The SDK's `_update()` runs at each control cycle (default 250 Hz); the send path lives in `_send_command_and_cache_hold_locked()`:
 
-1. Read motor feedback from the CAN bus
-2. Compute gravity compensation torque `τ_g(q)` via Pinocchio RNEA
-3. Safety check: emergency stop if any `|τ_g|` exceeds the per-joint threshold
-4. Compose final torque: `τ_motor = (user_torque + τ_g × scale × factor) × joint_sign`
-5. Clip to safe range and send to all motors
+1. Read motor feedback from the CAN bus and run per-cycle safety checks (feedback freshness, motor error codes, temperatures, velocities)
+2. On stale/incomplete feedback, first resend the cached gravity-only MIT hold frame, then raise a recoverable fault (see [Fault Policy](#fault-policy)); confirmed hard faults (over-temperature / over-speed / motor errors) disable the motors immediately
+3. Compute full inverse dynamics `τ_id(q, vel, acc)` (gravity + Coriolis + inertia) via Pinocchio RNEA
+4. Compose final torque: `τ = torque_ff + τ_id × scale × factor` — PD + gravity compensation
+5. Clip to the per-joint safe range and send via the motor chain (consecutive frames paced by `inter_cmd_gap_s`), caching a gravity-only safe-hold frame for the feedback-loss resend path
 
 ### Zero-Force Float Mode
 
@@ -1350,8 +1423,8 @@ self._command.kd = self._default_kd.copy() * 0.5    # low damping
 
 ```python
 # get_a1z_robot(zero_gravity_mode=False)
-self._command.kp = self._default_kp.copy()  # [30, 30, 30, 20, 5, 5]
-self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
+self._command.kp = self._default_kp.copy()  # [146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]
+self._command.kd = self._default_kd.copy()  # [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]
 # PD control + gravity compensation, locks to current position
 ```
 
@@ -1364,6 +1437,34 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 - Gravity-torque thresholds, software joint limits, and smooth shutdown are software safeguards; they do not replace physical limits, guarding, an emergency-stop circuit, or a risk assessment.
 - If communication stops, the process fails, or motion is unexpected, use the physical emergency stop immediately and then confirm that all motors are disabled.
 - Do not use unvalidated scripts for unattended operation, production machinery, or direct human collaboration.
+- For first use, set `gravity_comp_factor` to a small value (e.g. 0.3) and confirm compensation direction before increasing
+- Estop and fault behavior is managed by an explicit safety state machine (see "Safety State Machine" and "Fault Policy" below)
+- On feedback loss / transient bus errors the SDK resends the cached safe-hold frame and keeps trying to recover; if the fault persists for 0.2 s it latches a position hold; over-temperature / over-speed / motor errors disable the motors immediately
+- All target joint angles are clipped to the URDF joint limits (see "Joint Limit Handling" below)
+
+### Safety State Machine
+
+The control loop runs on an explicit state machine: `STOPPED` / `RUNNING` / `SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD` / `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED`.
+
+- `start()` is only allowed from `STOPPED` (no live control thread, no sticky lifecycle fault); otherwise it raises `RuntimeError`. After `HARD_DISABLED` / `HARD_DISABLE_UNCONFIRMED` the object cannot be restarted — recreate the `ArmRobot` instance.
+- `estop()` is a **soft** emergency stop: position gain zeroed, damping halved, command position pinned to the current measured pose; **motors stay enabled** and gravity compensation keeps running, so the arm does not collapse under load. Calling it from `STOPPED` / `FAULT_HOLD` / `HARD_*` returns `False`.
+- `estop()` / `release()` both return `bool`. `release(expected_fault_code=None)` returns to `RUNNING` only when the control loop is alive, feedback is fresh and complete, and the state matches (`SOFT_ESTOP` / `COMMAND_HOLD` / `FAULT_HOLD`); otherwise it returns `False` and holds. `expected_fault_code` protects against releasing an unrelated fault source.
+- While estopped / holding, `command_joint_pos` / `command_joint_state` / `command_gripper` / `move_joints` are rejected (return `False` or return early, with a log entry).
+- `stop()` stops the control loop and disables all motors; it **no longer shuts down the CAN bus** — the bus is closed when the object is destroyed (or by the owning caller), so the same object can be started again after `stop()`.
+- `get_fault_status()` returns a thread-safe snapshot (`state` / `code` / `reason` / fault age / per-joint feedback health / `restart_allowed`, etc.).
+
+### Fault Policy
+
+| Class | Triggers | Behavior |
+|-------|----------|----------|
+| Recoverable | Stale feedback, transient CAN TX errors (EAGAIN/EWOULDBLOCK/EINTR/ENOBUFS/TX buffer full), inverse-dynamics computation errors | Hold the last command and resend the cached gravity-only MIT hold frame (motors **not** disabled); if no successful update for 0.2 s → latch `FAULT_HOLD` (full-gain position hold); `release()` once feedback recovers |
+| Hard | Over-temperature, over-speed, motor error codes, non-finite feedback | Immediately disable all motors (`HARD_DISABLED`); the fault is latched and the object cannot be restarted |
+
+### Joint Limit Handling
+
+- Streaming commands (`command_joint_pos` / `command_joint_state`, teleop / trajectory replay): out-of-limits targets are **always clipped** to the physical limits instead of rejecting the frame or engaging estop, so non-violating joints keep tracking. Before clipping, each target is unwrapped on the S¹ circle topology to the equivalent angle nearest the current command, preventing a ±π wrap from producing a full-stroke jump. Large violations beyond the per-joint tolerance (0.05 rad by default) are logged at ERROR; small overshoots within tolerance at WARNING (rate-limited).
+- `move_joints` one-shot moves: a target beyond the limit tolerance still raises `ValueError`; the new `max_jump_rad` argument refuses targets too far from the measured pose (e.g. elbow-flipped IK solutions).
+- A measured position drifting past the soft limits at runtime now only logs (1 Hz rate-limited) instead of triggering an estop.
 
 ## Joint Limits
 
@@ -1380,8 +1481,10 @@ self._command.kd = self._default_kd.copy()  # [1,  1,  1,  0.5, 0.5, 0.5]
 
 | Parameter | Value |
 |-----------|-------|
-| Default KP | `[30, 30, 30, 20, 5, 5]` |
-| Default KD | `[1, 1, 1, 0.5, 0.5, 0.5]` |
+| Default KP | `[146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]` |
+| Default KD | `[5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]` |
+| Command gain caps | kp ≤ 200, kd ≤ 5 (custom gains in `command_joint_state` / `move_joints` are rejected beyond these) |
+| CAN command pacing | 250 µs between frames (tunable via `inter_cmd_gap_us`, 0=off, max 500 µs) |
 | Joint sign | `[1, 1, -1, 1, -1, 1]` (joints 3 and 5 are inverted relative to URDF) |
 | Gravity torque scale | `[1, 1, 1, 1, 1, 1]` |
 | Max gravity torque | `[50, 50, 50, 24, 10, 10]` Nm |

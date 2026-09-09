@@ -27,12 +27,12 @@ class Robot(Protocol):
         """
         ...
 
-    def command_joint_pos(self, joint_pos: np.ndarray) -> None:
-        """Command target joint positions (rad) with default PD gains."""
+    def command_joint_pos(self, joint_pos: np.ndarray) -> bool:
+        """Command target joint positions; return whether the frame was accepted."""
         ...
 
-    def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> None:
-        """Command target joint state (pos, vel, kp, kd)."""
+    def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> bool:
+        """Command target joint state; return whether the frame was accepted."""
         ...
 
     @abstractmethod

@@ -137,7 +137,14 @@ def main():
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     try:
-        robot.start(initial_kd=kd_override)
+        try:
+            robot.start(initial_kd=kd_override)
+        except RuntimeError as exc:
+            # V1/V2: start() only admits the STOPPED state; a hard fault
+            # (HARD_DISABLED / HARD_DISABLE_UNCONFIRMED) permanently forbids
+            # restart — the robot object must be recreated.
+            print(f"\nCannot start robot: {exc}")
+            sys.exit(1)
         print("\nRobot running. Press Ctrl+C to stop.\n")
         stop_deadline = (
             time.monotonic() + args.duration if args.duration > 0 else None
@@ -168,14 +175,19 @@ def main():
     finally:
         try:
             if robot.is_running and args.return_zero:
-                print("\nReturning to zero...")
-                robot.move_joints(
-                    np.zeros(6),
-                    speed=0.3,
-                    sync_to_measured=zero_gravity,
-                    gain_ramp_s=0.75,
-                )
-                time.sleep(0.3)
+                if robot.is_estopped:
+                    # C2: while estopped/fault-held, move_joints is silently
+                    # rejected — do not assume the arm can still move.
+                    print("\nArm is estopped; skipping return-to-zero...")
+                else:
+                    print("\nReturning to zero...")
+                    robot.move_joints(
+                        np.zeros(6),
+                        speed=0.3,
+                        sync_to_measured=zero_gravity,
+                        gain_ramp_s=0.75,
+                    )
+                    time.sleep(0.3)
             elif robot.is_running:
                 print(
                     "\nStopping immediately "
@@ -189,6 +201,8 @@ def main():
             # A second Ctrl+C must never interrupt the motor-disable sequence.
             previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
             try:
+                # V3: stop() no longer shuts down the CAN bus; the bus is
+                # closed by the robot object's destructor at process exit.
                 robot.stop()
             finally:
                 signal.signal(signal.SIGINT, previous_sigint)
