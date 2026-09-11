@@ -567,10 +567,9 @@ class ArmRobot:
                         )
                     self._commands_blocked.clear()
             except BaseException as exc:
-                # GitHub keeps a BaseException-level cleanup (Ctrl+C can arrive
-                # during any startup sleep/read; the GitLab source catches only
-                # Exception): never leave motors powered merely because startup
-                # did not complete.
+                # Catch BaseException, not just Exception (Ctrl+C can arrive
+                # during any startup sleep/read): never leave motors powered
+                # merely because startup did not complete.
                 logger.exception("Robot startup failed; disabling all motors")
                 self._commands_blocked.set()
                 self._stop_event.set()
@@ -708,13 +707,11 @@ class ArmRobot:
             # Safety net: disable again from the main thread after the
             # control-loop shutdown transaction completed.
             disable_errors = self._disable_outputs()
-            # GitHub keeps the bus-level TX flush wait after the safety-net
-            # disable (plan §5 P3 conflict ② / P4 conflict ④): on user-space
-            # backends (e.g. gs_usb) a queued disable frame is only confirmed
-            # once the transport reports the TX queue drained. A flush
-            # timeout/failure is treated as an unconfirmed disable (V2).
-            # ``_disable_outputs`` itself stays flush-free, matching the
-            # GitLab source.
+            # A bus-level TX flush wait follows the safety-net disable: on
+            # user-space backends (e.g. gs_usb) a queued disable frame is only
+            # confirmed once the transport reports the TX queue drained. A
+            # flush timeout/failure is treated as an unconfirmed disable.
+            # ``_disable_outputs`` itself stays flush-free.
             flush_tx = getattr(self._bus, "flush_tx", None)
             if flush_tx is not None:
                 try:
@@ -1451,8 +1448,7 @@ class ArmRobot:
         except Exception as exc:
             errors.append(f"arm: {exc}")
         else:
-            # The chain keeps its GitHub bool contract (P1 deviation from the
-            # GitLab raise-on-failure version): False means at least one
+            # The chain reports a bool contract: False means at least one
             # motor's disable frames were not accepted.
             if arm_result is False:
                 errors.append("arm: one or more motor disable commands failed")
@@ -2301,11 +2297,9 @@ class ArmRobot:
     def _step_integrated_gripper(self) -> None:
         """Send one gripper frame paced after the arm chain frames.
 
-        The name mirrors the GitLab source ("integrated" refers to the
-        gripper sharing the arm CAN chain); keeping it identical reduces
-        future sync drift. The gap comes from the motor
-        chain so this extra frame honors the same CAN pacing as the
-        per-joint arm frames.
+        "Integrated" refers to the gripper sharing the arm CAN chain. The
+        gap comes from the motor chain so this extra frame honors the same
+        CAN pacing as the per-joint arm frames.
         """
         if self.gripper is None:
             return

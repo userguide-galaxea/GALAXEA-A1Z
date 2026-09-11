@@ -43,8 +43,7 @@ pcan = [
 ]
 
 [project.urls]
-Repository = "https://gitlab.galaxea-ai.com/menglian.li/a1z"
-Changelog = "https://gitlab.galaxea-ai.com/menglian.li/a1z/-/blob/codex/cross-platform-g1z-fixes/CHANGELOG.md"
+Repository = "https://github.com/userguide-galaxea/GALAXEA-A1Z"
 
 [tool.flit.module]
 name = "a1z"

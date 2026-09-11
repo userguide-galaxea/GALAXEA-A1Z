@@ -10,9 +10,9 @@
 
 A1Z 六轴机械臂的开源 Python SDK，面向机器人研发、算法验证和上层应用集成。项目提供跨平台 CAN 通信、电机控制、Pinocchio 动力学与运动学、重力补偿、零力示教、位置保持及可选 G1Z 夹爪控制。
 
-代码仓库：[gitlab.galaxea-ai.com/menglian.li/a1z](https://gitlab.galaxea-ai.com/menglian.li/a1z/)
+代码仓库：[github.com/userguide-galaxea/GALAXEA-A1Z](https://github.com/userguide-galaxea/GALAXEA-A1Z)
 
-当前跨平台验证分支：`codex/cross-platform-g1z-fixes`
+当前跨平台验证分支：`feat/cross-platform-g1z-fixes`
 
 > [!CAUTION]
 > 本 SDK 会直接使能和控制真实机械臂，不是经认证的功能安全系统。首次运行任何主动命令前，请固定机械臂、清空工作空间、确保急停可触及，并从低补偿系数和低速度开始。
@@ -124,7 +124,7 @@ a1z/
 ```bash
 
 # 克隆当前跨平台验证分支
-git clone --branch codex/cross-platform-g1z-fixes --single-branch https://gitlab.galaxea-ai.com/menglian.li/a1z.git GALAXEA-A1Z
+git clone --branch feat/cross-platform-g1z-fixes --single-branch https://github.com/userguide-galaxea/GALAXEA-A1Z.git GALAXEA-A1Z
 
 cd GALAXEA-A1Z
 
@@ -735,7 +735,7 @@ self._command.kd = self._default_kd.copy()  # [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.
 
 ## 开发与贡献
 
-欢迎提交 Issue 和 Merge Request（MR）。建议使用小而可审查的变更，并将平台差异、硬件假设和安全影响写清楚。
+欢迎提交 Issue 和 Pull Request（PR）。建议使用小而可审查的变更，并将平台差异、硬件假设和安全影响写清楚。
 
 ```bash
 # 先按本 README 完成当前平台的基础环境安装
@@ -743,7 +743,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-提交 MR 前请确认：
+提交 PR 前请确认：
 
 - 变更聚焦于单一问题，不包含无关的格式化或生成文件。
 - 新增/修复的行为有对应测试；无法自动测试的硬件路径需说明人工验证步骤和结果。
@@ -752,7 +752,7 @@ python -m pytest -q
 
 ## 获取帮助与报告问题
 
-报告问题前，请先查阅 [CAN 通信故障排查](#can-通信故障排查) 并搜索现有 [GitLab Issues](https://gitlab.galaxea-ai.com/menglian.li/a1z/-/issues)。新 Issue 建议包含：
+报告问题前，请先查阅 [CAN 通信故障排查](#can-通信故障排查) 并搜索现有 [GitHub Issues](https://github.com/userguide-galaxea/GALAXEA-A1Z/issues)。新 Issue 建议包含：
 
 - 操作系统及版本、Python 版本、仓库分支/提交号。
 - CAN 适配器型号和 VID:PID、后端类型、通道及波特率。
@@ -791,9 +791,9 @@ python -m pytest -q
 
 An open-source Python SDK for A1Z six-axis robotic-arm research, algorithm validation, and application integration. It provides cross-platform CAN communication, motor control, Pinocchio-based dynamics and kinematics, gravity compensation, zero-force teaching, position hold, and optional G1Z gripper control.
 
-Repository: [gitlab.galaxea-ai.com/menglian.li/a1z](https://gitlab.galaxea-ai.com/menglian.li/a1z/)
+Repository: [github.com/userguide-galaxea/GALAXEA-A1Z](https://github.com/userguide-galaxea/GALAXEA-A1Z)
 
-Current cross-platform validation branch: `codex/cross-platform-g1z-fixes`
+Current cross-platform validation branch: `feat/cross-platform-g1z-fixes`
 
 > [!CAUTION]
 > This SDK directly enables and controls physical robot hardware. It is not a certified functional-safety system. Before running any active command for the first time, secure the arm, clear the workspace, keep the emergency stop within reach, and begin with a low gravity-compensation factor and low speed.
@@ -903,7 +903,7 @@ a1z/
 
 ```bash
 # Clone the current cross-platform validation branch
-git clone --branch codex/cross-platform-g1z-fixes --single-branch https://gitlab.galaxea-ai.com/menglian.li/a1z.git GALAXEA-A1Z
+git clone --branch feat/cross-platform-g1z-fixes --single-branch https://github.com/userguide-galaxea/GALAXEA-A1Z.git GALAXEA-A1Z
 
 cd GALAXEA-A1Z
 
@@ -1494,7 +1494,7 @@ The control loop runs on an explicit state machine: `STOPPED` / `RUNNING` / `SOF
 
 ## Development and Contributing
 
-Issues and merge requests (MRs) are welcome. Prefer small, reviewable changes, and document platform differences, hardware assumptions, and safety implications explicitly.
+Issues and pull requests (PRs) are welcome. Prefer small, reviewable changes, and document platform differences, hardware assumptions, and safety implications explicitly.
 
 ```bash
 # First complete the base environment setup for your platform as documented above
@@ -1502,7 +1502,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Before opening a merge request, confirm that:
+Before opening a pull request, confirm that:
 
 - The change addresses one focused problem and does not include unrelated formatting or generated files.
 - New or fixed behavior has tests. For hardware paths that cannot be automated, document the manual procedure and result.
@@ -1511,7 +1511,7 @@ Before opening a merge request, confirm that:
 
 ## Getting Help and Reporting Issues
 
-Before reporting a problem, review [CAN Communication Troubleshooting](#can-communication-troubleshooting) and search existing [GitLab Issues](https://gitlab.galaxea-ai.com/menglian.li/a1z/-/issues). A useful new issue includes:
+Before reporting a problem, review [CAN Communication Troubleshooting](#can-communication-troubleshooting) and search existing [GitHub Issues](https://github.com/userguide-galaxea/GALAXEA-A1Z/issues). A useful new issue includes:
 
 - Operating system and version, Python version, and repository branch/commit.
 - CAN adapter model and VID:PID, backend, channel, and bitrate.

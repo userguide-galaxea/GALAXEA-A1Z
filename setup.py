@@ -4,7 +4,7 @@ setuptools.setup(
     name="a1z",
     version="0.0.1",
     description="SDK for the A1Z 6-DOF robotic arm",
-    url="https://gitlab.galaxea-ai.com/menglian.li/a1z",
+    url="https://github.com/userguide-galaxea/GALAXEA-A1Z",
     license="MIT",
     packages=setuptools.find_packages(),
     classifiers=[
