@@ -27,9 +27,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest",
-]
 # gs_usb userspace backend (macOS/Windows with HHS adapter)
 # libusb-package bundles the libusb binary (no brew/zadig libusb needed)
 gs_usb = [

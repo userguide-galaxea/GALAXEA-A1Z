@@ -68,7 +68,6 @@ a1z/
 ├── pyproject.toml                 # 构建配置 (flit)
 ├── setup.py                       # setuptools 后备
 ├── README.md
-├── CHANGELOG.md                   # 版本变更与跨平台实测记录
 ├── LICENSE                        # MIT 开源许可
 ├── .python-version                # 统一的 Python 3.11 环境提示
 ├── a1z/                       # SDK 主包
@@ -96,7 +95,7 @@ a1z/
 │   ├── position_hold.py           # 位置保持示例
 │   ├── teach_and_play.py          # 零力示教录制与回放
 │   └── gripper_hybrid_test.py     # 夹爪测试：自由行程 + 力矩饱和验证
-├── tools/
+└── tools/
     ├── a1zctl                     # 机械臂控制 CLI（serve/move/gripper/dance/stop）
     ├── gripper_set_zero.py        # 夹爪零点标定（出厂已完成，一般无需执行）
     ├── motor_diag.py              # 电机通信诊断与故障排查
@@ -104,7 +103,6 @@ a1z/
     ├── setup_can.sh               # Linux SocketCAN 一键配置
     ├── verify_can_mac.sh          # macOS CAN 通信验证
     └── verify_can_win.py          # Windows CAN 通信验证
-└── tests/                         # 跨平台后端、控制安全和服务传输回归测试
 ```
 
 
@@ -737,16 +735,10 @@ self._command.kd = self._default_kd.copy()  # [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.
 
 欢迎提交 Issue 和 Pull Request（PR）。建议使用小而可审查的变更，并将平台差异、硬件假设和安全影响写清楚。
 
-```bash
-# 先按本 README 完成当前平台的基础环境安装
-python -m pip install -e ".[dev]"
-python -m pytest -q
-```
-
 提交 PR 前请确认：
 
 - 变更聚焦于单一问题，不包含无关的格式化或生成文件。
-- 新增/修复的行为有对应测试；无法自动测试的硬件路径需说明人工验证步骤和结果。
+- 无法自动测试的硬件路径需说明完整的人工验证步骤和结果。
 - 修改公开 API、CLI、默认参数、配置文件或平台支持时，同步更新中英文 README。
 - 不要仅根据“测试帧发送成功”宣称电机通信或控制稳定性已验证。
 
@@ -849,7 +841,6 @@ a1z/
 ├── pyproject.toml                 # Build config (flit)
 ├── setup.py                       # setuptools fallback
 ├── README.md
-├── CHANGELOG.md                   # Release changes and cross-platform hardware results
 ├── LICENSE                        # MIT open-source license
 ├── .python-version                # Shared Python 3.11 environment hint
 ├── a1z/                       # SDK main package
@@ -877,7 +868,7 @@ a1z/
 │   ├── position_hold.py           # Position hold example
 │   ├── teach_and_play.py          # Zero-force teach recording and playback
 │   └── gripper_hybrid_test.py     # Gripper test: free travel + torque saturation
-├── tools/
+└── tools/
     ├── a1zctl                     # Arm control CLI (serve/move/gripper/dance/stop)
     ├── gripper_set_zero.py        # Gripper zero calibration (factory-done, rarely needed)
     ├── motor_diag.py              # Motor communication diagnostics
@@ -885,7 +876,6 @@ a1z/
     ├── setup_can.sh               # Linux SocketCAN one-step setup
     ├── verify_can_mac.sh          # macOS CAN communication verification
     └── verify_can_win.py          # Windows CAN communication verification
-└── tests/                         # Backend, control-safety, and server-transport regression tests
 ```
 
 ## Installation
@@ -1496,16 +1486,10 @@ The control loop runs on an explicit state machine: `STOPPED` / `RUNNING` / `SOF
 
 Issues and pull requests (PRs) are welcome. Prefer small, reviewable changes, and document platform differences, hardware assumptions, and safety implications explicitly.
 
-```bash
-# First complete the base environment setup for your platform as documented above
-python -m pip install -e ".[dev]"
-python -m pytest -q
-```
-
 Before opening a pull request, confirm that:
 
 - The change addresses one focused problem and does not include unrelated formatting or generated files.
-- New or fixed behavior has tests. For hardware paths that cannot be automated, document the manual procedure and result.
+- For hardware paths that cannot be automated, document the complete manual verification procedure and result.
 - Changes to public APIs, CLI behavior, defaults, configuration, or platform support update both the Chinese and English README sections.
 - A successful test-frame send is not presented as proof of motor communication or control-loop stability.
 
