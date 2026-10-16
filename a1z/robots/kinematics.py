@@ -7,7 +7,10 @@ import numpy as np
 try:
     import pinocchio
 except ImportError:
-    raise ImportError("Pinocchio is required. Install with: pip install pin")
+    raise ImportError(
+        "Pinocchio is required. On Windows install it with: "
+        "conda install -c conda-forge pinocchio; on Linux/macOS use: pip install pin"
+    )
 
 
 class Kinematics:

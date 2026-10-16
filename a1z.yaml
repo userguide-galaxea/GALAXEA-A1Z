@@ -1,0 +1,42 @@
+# A1Z 默认配置文件（无夹爪）
+# 所有脚本都可以通过 --config a1z.yaml 读取此文件。
+# 带 G1Z 夹爪时请改用 --config a1z_g1z.yaml。
+# 命令行参数会覆盖配置文件中的值。
+
+# CAN 总线接口名
+can_channel: can0
+
+# CAN 后端（可选）：socketcan, gs_usb, pcan, slcan
+# 不设置时自动检测：Linux → socketcan，macOS/Windows → gs_usb
+# bustype: null
+
+# 控制回路频率 (Hz)
+control_freq_hz: 250
+
+# 最小可接受控制频率 (Hz)，低于此值会触发保护性停机
+# min_freq_hz: 80.0
+
+# 重力补偿系数：0=关闭，1=全额
+gravity_comp_factor: 1.0
+
+# True=零力漂浮模式，False=位置保持+重力补偿
+zero_gravity_mode: true
+
+# 是否启用 G1Z 夹爪（启用时会自动使用 A1Z_G1Z.urdf）
+with_gripper: false
+
+# 夹爪最大夹持力矩 (Nm)
+gripper_max_torque: 2.0
+
+# 手动覆盖 URDF 路径（通常不需要；启用夹爪时会自动切换）
+# urdf_path: a1z/robot_models/a1z/A1Z_Flange.urdf
+
+# 默认位置/速度增益（6 个元素数组）
+# 真机优化的调优值，与 get_robot.py 的代码默认值一致；
+# 如需软增益可在此覆盖（例如旧代码默认 KP [30,30,30,20,5,5] / KD [1,1,1,0.5,0.5,0.5]）。
+default_kp: [146.8988, 62.9454, 89.2416, 120.0, 40.0, 100.0]
+default_kd: [5.0, 5.0, 5.0, 2.0776, 1.5059, 1.2553]
+
+# MotorA 使能协议切换：False=旧协议(0xFC)，True=新协议(0x7FF)
+# 仅在确认 MotorA 固件支持新协议时启用
+# motor_a_use_new_enable_protocol: false

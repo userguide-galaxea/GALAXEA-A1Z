@@ -6,7 +6,12 @@ from typing import List, Optional
 
 import can
 
+from a1z.motor_drivers.can_backend import open_can_bus
 from a1z.motor_drivers.utils import ReceiveMode
+
+# Non-blocking send: a stuffed TX queue must raise immediately instead of
+# stalling the caller. Valid for any python-can backend.
+_CAN_SEND_TIMEOUT_S = 0.0
 
 
 class CanInterface:
@@ -15,13 +20,13 @@ class CanInterface:
     def __init__(
         self,
         channel: str = "can0",
-        bustype: str = "socketcan",
+        bustype: Optional[str] = None,
         bitrate: int = 1_000_000,
         name: str = "default_can_interface",
         receive_mode: ReceiveMode = ReceiveMode.same,
         use_buffered_reader: bool = False,
     ):
-        self.bus = can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
+        self.bus = open_can_bus(channel=channel, bitrate=bitrate, bustype=bustype)
         self.busstate = self.bus.state
         self.name = name
         self.receive_mode = receive_mode
@@ -49,7 +54,7 @@ class CanInterface:
         message = can.Message(arbitration_id=id, data=data, is_extended_id=False)
         for _ in range(max_retry):
             try:
-                self.bus.send(message)
+                self.bus.send(message, timeout=_CAN_SEND_TIMEOUT_S)
                 response = self._receive_message(motor_id, timeout=0.2)
                 if expected_id is None:
                     expected_id = self.receive_mode.get_receive_id(motor_id)

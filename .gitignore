@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+test-logs/
+*.log
+logs/
+tools/limit_crossing_poses.json
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+.env
+.env.*
+
+# ZCode session artifacts
+.zcode/

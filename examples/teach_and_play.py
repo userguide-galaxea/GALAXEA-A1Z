@@ -3,24 +3,77 @@
 
 Usage
 -----
-    # Record and save:
+    # Record and save (config defaults to the repo-root a1z.yaml):
     python examples/teach_and_play.py record teach.json
     python examples/teach_and_play.py record teach.json --can can1 --sample-hz 100
 
     # Load and play:
     python examples/teach_and_play.py play teach.json
     python examples/teach_and_play.py play teach.json --speed 0.5 --loop
+
+    # With an attached G1Z gripper (or set with_gripper: true in a1z.yaml):
+    python examples/teach_and_play.py record teach.json --with-gripper
+    python examples/teach_and_play.py play teach.json --with-gripper
 """
 
 import argparse
+import logging
 import signal
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
 from a1z.robots.arm_robot import ArmRobot
 from a1z.robots.get_robot import get_a1z_robot
+from a1z.config import add_config_argument, load_config, config_to_robot_kwargs
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+
+
+def _build_robot_kwargs(args: argparse.Namespace) -> dict:
+    """Merge config file and CLI arguments into get_a1z_robot kwargs."""
+    config = load_config(args.config) if args.config else {}
+    kwargs = config_to_robot_kwargs(config)
+    if args.can is not None:
+        kwargs["can_channel"] = args.can
+    if args.bustype is not None:
+        kwargs["bustype"] = args.bustype
+    if args.with_gripper:
+        kwargs["with_gripper"] = True
+    return kwargs
+
+
+def _safe_stop_robot(robot, *, return_zero: bool, zero_gravity: bool) -> None:
+    """Return safely when requested, then perform an uninterruptible stop."""
+    try:
+        if robot.is_running and robot.is_estopped:
+            # C2: while estopped/fault-held, move_joints is silently rejected
+            # — never attempt a return-to-zero in that state.
+            print("Arm is estopped; skipping return-to-zero.")
+            return_zero = False
+        if robot.is_running and return_zero:
+            print("Returning to zero...")
+            robot.move_joints(
+                np.zeros(6),
+                speed=0.3,
+                sync_to_measured=zero_gravity,
+                gain_ramp_s=0.75,
+            )
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\nReturn-to-zero interrupted; disabling immediately...")
+    except Exception:
+        logging.exception("Return-to-zero failed; disabling immediately")
+    finally:
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            # V3: stop() no longer shuts down the CAN bus; the bus is closed
+            # by the robot object's destructor at process exit.
+            robot.stop()
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 def _wait_enter(prompt: str) -> None:
@@ -29,22 +82,34 @@ def _wait_enter(prompt: str) -> None:
 
 
 def cmd_record(args: argparse.Namespace) -> None:
-    robot = get_a1z_robot(
-        can_channel=args.can,
-        zero_gravity_mode=True,
-        gravity_comp_factor=1.0,
-    )
+    kwargs = _build_robot_kwargs(args)
+    kwargs.setdefault("zero_gravity_mode", True)
+    kwargs.setdefault("gravity_comp_factor", 1.0)
+    robot = get_a1z_robot(**kwargs)
+    with_gripper = kwargs.get("with_gripper", False)
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     print("=" * 60)
     print("  A1Z Teach — Record")
-    print(f"  CAN:        {args.can}")
+    print(f"  CAN:        {kwargs.get('can_channel', 'can0')}")
     print(f"  Sample Hz:  {args.sample_hz}")
     print(f"  Save to:    {args.file}")
+    print(f"  Gripper:    {with_gripper}")
     print("=" * 60)
 
-    robot.start()
-    print("[record] Arm running in zero-gravity mode.\n")
+    try:
+        robot.start()
+    except RuntimeError as exc:
+        # V1/V2: start() only admits the STOPPED state; after a hard fault
+        # the object is unrestartable and must be recreated.
+        print(f"[record] Cannot start robot: {exc}")
+        robot.stop()
+        return
+    if with_gripper:
+        robot.set_gripper_free_drive(True)
+        print("[record] Arm in zero-gravity mode; gripper in free-drive (move by hand).\n")
+    else:
+        print("[record] Arm running in zero-gravity mode.\n")
 
     try:
         _wait_enter("[record] Press ENTER to START recording...")
@@ -57,8 +122,12 @@ def cmd_record(args: argparse.Namespace) -> None:
             while not _stop_display.is_set():
                 state = robot.get_joint_state()
                 pos_deg = np.degrees(state["pos"])
+                grip_str = ""
+                if with_gripper:
+                    grip = robot.get_gripper_pos()
+                    grip_str = f"  grip: {grip:.2f}"
                 print(
-                    f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]",
+                    f"  pos(deg): [{', '.join(f'{p:7.2f}' for p in pos_deg)}]{grip_str}",
                     end="\r",
                 )
                 time.sleep(0.1)
@@ -85,28 +154,31 @@ def cmd_record(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\n[record] Interrupted.")
     finally:
-        if robot.is_running:
-            print("[record] Returning to zero...")
-            robot.move_joints(np.zeros(6), speed=0.3)
-            time.sleep(0.3)
-        robot.stop()
+        if with_gripper:
+            robot.set_gripper_free_drive(False)
+        _safe_stop_robot(
+            robot,
+            return_zero=robot.is_running,
+            zero_gravity=True,
+        )
         print("[record] Stopped.")
 
 
 def cmd_play(args: argparse.Namespace) -> None:
-    robot = get_a1z_robot(
-        can_channel=args.can,
-        zero_gravity_mode=False,
-        gravity_comp_factor=1.0,
-    )
+    kwargs = _build_robot_kwargs(args)
+    kwargs.setdefault("zero_gravity_mode", False)
+    kwargs.setdefault("gravity_comp_factor", 1.0)
+    robot = get_a1z_robot(**kwargs)
+    with_gripper = kwargs.get("with_gripper", False)
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     print("=" * 60)
     print("  A1Z Teach — Play")
-    print(f"  CAN:        {args.can}")
+    print(f"  CAN:        {kwargs.get('can_channel', 'can0')}")
     print(f"  File:       {args.file}")
     print(f"  Speed:      {args.speed}x")
     print(f"  Loop:       {'yes' if args.loop else 'no'}")
+    print(f"  Gripper:    {with_gripper}")
     print("=" * 60)
 
     print(f"[play] Loading trajectory from {args.file}...")
@@ -114,10 +186,24 @@ def cmd_play(args: argparse.Namespace) -> None:
     duration = trajectory[-1][0] if trajectory else 0.0
     print(f"[play] Loaded {len(trajectory)} frames ({duration:.2f}s).\n")
 
-    robot.start()
+    expected_dofs = robot.num_dofs()
+    # If playing without a gripper, ignore any recorded gripper DOF.
+    if not with_gripper:
+        trajectory = [(t, pos[:6]) for t, pos in trajectory]
+
+    try:
+        robot.start()
+    except RuntimeError as exc:
+        # V1/V2: start() only admits the STOPPED state; after a hard fault
+        # the object is unrestartable and must be recreated.
+        print(f"[play] Cannot start robot: {exc}")
+        robot.stop()
+        return
 
     try:
         start_pos = trajectory[0][1]
+        if len(start_pos) > expected_dofs:
+            start_pos = start_pos[:expected_dofs]
         print("[play] Returning to start position...")
         robot.move_joints(start_pos, speed=0.4)
         print("[play] Ready.\n")
@@ -139,17 +225,31 @@ def cmd_play(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\n[play] Interrupted.")
     finally:
-        if robot.is_running:
-            print("[play] Returning to zero...")
-            robot.move_joints(np.zeros(6), speed=0.3)
-            time.sleep(0.3)
-        robot.stop()
+        _safe_stop_robot(
+            robot,
+            return_zero=robot.is_running,
+            zero_gravity=False,
+        )
         print("[play] Stopped.")
 
 
 def main() -> None:
+    # The machine config is the source of truth: default --config to the
+    # repo-root a1z.yaml so record/play need no flags on a properly
+    # configured machine (explicit --config still overrides).
+    _default_config = Path(__file__).resolve().parent.parent / "a1z.yaml"
+
     parser = argparse.ArgumentParser(description="A1Z teach-and-play")
-    parser.add_argument("--can", default="can0", help="CAN channel (default: can0)")
+    parser.add_argument("--can", default=None, help="CAN channel (default: can0)")
+    parser.add_argument("--bustype", default=None,
+                        help="python-can backend: socketcan, gs_usb, pcan, slcan. "
+                             "Default: socketcan on Linux, gs_usb on macOS/Windows.")
+    parser.add_argument("--with-gripper", action="store_true",
+                        help="Attach the G1Z gripper (record/play 7th DOF).")
+    add_config_argument(
+        parser,
+        default=str(_default_config) if _default_config.exists() else None,
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_record = sub.add_parser("record", help="Record a trajectory and save to file")

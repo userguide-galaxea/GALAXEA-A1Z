@@ -14,14 +14,25 @@
   # 扫描所有 6 个电机
   python tools/motor_diag.py --scan
 
+  # 只扫描 MotorA 或 MotorB
+  python tools/motor_diag.py --scan --type motor_a
+  python tools/motor_diag.py --scan --type motor_b
+
   # 持续监控所有电机（Ctrl+C 退出）
   python tools/motor_diag.py --monitor
 
   # 被动监听 CAN 总线 5 秒
   python tools/motor_diag.py --listen --duration 5
 
-  # 探测关节 3（4340）
+  # 探测关节 3
   python tools/motor_diag.py --probe 3
+
+  # 带 G1Z 夹爪时扫描/监控 7 个电机
+  python tools/motor_diag.py --scan --with-gripper
+
+安全：
+  --scan、--monitor 和 --probe 会使能电机并发送控制帧。
+  执行前需输入 YES 确认安全条件；自动化环境可显式传入 --yes。
 """
 
 import argparse
@@ -35,6 +46,11 @@ from typing import Dict, List, Optional, Tuple
 
 import can
 import numpy as np
+
+from a1z.config import add_config_argument, load_config
+from a1z.motor_drivers.can_backend import open_can_bus
+from a1z.motor_drivers.motor_a_driver import MotorA
+from a1z.motor_drivers.motor_b_driver import MotorB
 
 # ── 默认配置（与 get_robot.py 一致） ──────────────────
 
@@ -50,6 +66,7 @@ JOINT_CONFIG = {
     3: ("arm_joint4", "MotorB4340", 0x04),
     4: ("arm_joint5", "MotorB4310", 0x05),
     5: ("arm_joint6", "MotorB4310", 0x06),
+    6: ("gripper",   "MotorB4310", 0x07),
 }
 
 # MotorA 反馈解析范围
@@ -121,8 +138,9 @@ def parse_motor_a_feedback(data: bytes) -> dict:
     vel_raw = (frame >> 28) & 0xFFF
     cur_raw = (frame >> 16) & 0xFFF
     # Temperature encoding: raw = actual_°C * 2 + 50
-    temp_motor = ((frame >> 8) & 0xFF - 50) / 2
-    temp_mos = (frame & 0xFF - 50) / 2
+    # Parentheses required — '-' has higher precedence than '&' in Python.
+    temp_motor = (((frame >> 8) & 0xFF) - 50) / 2
+    temp_mos   = ((frame & 0xFF) - 50) / 2
 
     return {
         "error_code": error_code,
@@ -133,6 +151,31 @@ def parse_motor_a_feedback(data: bytes) -> dict:
         "temp_motor": temp_motor,
         "temp_mos": temp_mos,
     }
+
+
+def _disable_joints_and_flush(bus: can.BusABC, joints: List[int]) -> bool:
+    """Repeatedly disable selected joints and wait for transport completion."""
+    ok = True
+    for _ in range(2):
+        for joint in joints:
+            _, motor_type, can_id = JOINT_CONFIG[joint]
+            try:
+                bus.send(make_disable_message(motor_type, can_id))
+                time.sleep(0.01)
+            except Exception as exc:
+                ok = False
+                print(f"[ERROR] Joint {joint} 失能帧发送失败: {exc}")
+
+    flush_tx = getattr(bus, "flush_tx", None)
+    if flush_tx is not None:
+        try:
+            if not flush_tx(timeout=0.5):
+                ok = False
+                print("[ERROR] 失能帧在 CAN 关闭前未完成发送")
+        except Exception as exc:
+            ok = False
+            print(f"[ERROR] 等待失能帧完成时出错: {exc}")
+    return ok
 
 
 def parse_motor_b_feedback(data: bytes, tor_range: Tuple[float, float]) -> dict:
@@ -161,10 +204,67 @@ def get_motor_b_torque_range(motor_type: str) -> Tuple[float, float]:
     return MOTOR_B_TOR_RANGE_4310
 
 
+def motor_error_is_fault(motor_type: str, code: int) -> bool:
+    """按协议解释原始错误/状态值。"""
+    if motor_type == "MOTOR_A":
+        return MotorA.error_is_fault(code)
+    return MotorB.error_is_fault(code)
+
+
+def describe_motor_error(motor_type: str, code: int) -> str:
+    """按协议生成人类可读的错误/状态描述。"""
+    if motor_type == "MOTOR_A":
+        return MotorA.describe_error(code)
+    return MotorB.describe_error(code)
+
+
+def make_enable_message(motor_type: str, can_id: int) -> can.Message:
+    """生成与电机协议匹配的使能帧。"""
+    if motor_type == "MOTOR_A":
+        data = bytes([(can_id >> 8) & 0xFF, can_id & 0xFF, 0x00, 0x01])
+        arbitration_id = 0x7FF
+    else:
+        data = bytes([0xFF] * 7 + [0xFC])
+        arbitration_id = can_id
+    return can.Message(
+        arbitration_id=arbitration_id,
+        data=data,
+        is_extended_id=False,
+    )
+
+
+def make_disable_message(motor_type: str, can_id: int) -> can.Message:
+    """生成与电机协议匹配的失能帧。"""
+    if motor_type == "MOTOR_A":
+        data = bytes([(can_id >> 8) & 0xFF, can_id & 0xFF, 0x00, 0x02])
+        arbitration_id = 0x7FF
+    else:
+        data = bytes([0xFF] * 7 + [0xFD])
+        arbitration_id = can_id
+    return can.Message(
+        arbitration_id=arbitration_id,
+        data=data,
+        is_extended_id=False,
+    )
+
+
 # ── CAN 接口检查 ─────────────────────────────────────
 
-def check_can_interface(channel: str) -> Tuple[bool, str]:
-    """检查 CAN 接口状态，返回 (是否正常, 详情)。"""
+def check_can_interface(channel: str, bustype: Optional[str] = None) -> Tuple[bool, str]:
+    """检查 CAN 接口状态，返回 (是否正常, 详情)。
+
+    仅 Linux SocketCAN 后端需要检查；gs_usb / pcan 等用户态后端跳过。
+    """
+    import platform
+    from a1z.motor_drivers.can_backend import default_bustype
+
+    if bustype is None:
+        bustype = default_bustype()
+    if bustype != "socketcan":
+        return True, f"{bustype} 用户态后端（无需 SocketCAN 接口检查）"
+    if platform.system() != "Linux":
+        return True, "非 Linux 平台，跳过 SocketCAN 接口检查"
+
     try:
         result = subprocess.run(
             ["ip", "-details", "link", "show", channel],
@@ -248,11 +348,12 @@ def scan_motor(bus: can.BusABC, joint_idx: int, timeout: float = 0.3) -> MotorSt
     while bus.recv(timeout=0.0) is not None:
         pass
 
-    # 发使能帧
-    enable_data = bytes([0xFF] * 7 + [0xFC])
+    # 发协议匹配的使能帧
+    enable_msg = make_enable_message(motor_type, can_id)
+    enable_data = bytes(enable_msg.data)
     t_send = time.time()
     try:
-        bus.send(can.Message(arbitration_id=can_id, data=enable_data, is_extended_id=False))
+        bus.send(enable_msg)
     except (can.CanOperationError, can.CanError, OSError) as e:
         status.error_msg = f"CAN 发送失败: {e}"
         return status
@@ -304,6 +405,11 @@ def scan_motor(bus: can.BusABC, joint_idx: int, timeout: float = 0.3) -> MotorSt
                 status.velocity = fb["velocity"]
                 status.effort = fb["effort"]
                 status.error_code = fb["error_code"]
+                if motor_error_is_fault(motor_type, status.error_code):
+                    status.error_msg = describe_motor_error(
+                        motor_type,
+                        status.error_code,
+                    )
                 status.temp_motor = fb["temp_motor"]
                 status.temp_mos = fb["temp_mos"]
         else:
@@ -320,9 +426,8 @@ def scan_motor(bus: can.BusABC, joint_idx: int, timeout: float = 0.3) -> MotorSt
         break
 
     # 失能
-    disable_data = bytes([0xFF] * 7 + [0xFD])
     try:
-        bus.send(can.Message(arbitration_id=can_id, data=disable_data, is_extended_id=False))
+        bus.send(make_disable_message(motor_type, can_id))
     except Exception:
         pass
 
@@ -354,12 +459,12 @@ def print_scan_results(results: List[MotorStatus]):
         pos_str = f"{np.degrees(s.position):8.2f}" if s.online else "    N/A "
         resp_str = f"{s.response_time_ms:5.1f}  " if s.online else "   N/A "
         error_str = s.error_msg if s.error_msg else "无"
-
-        if s.online and s.motor_type != "MOTOR_A":
-            if s.error_code not in (0x0, 0x1):
-                error_str = MOTOR_B_ERROR_CODES.get(s.error_code, f"code={s.error_code:#x}")
-            else:
-                error_str = "无"
+        if s.online:
+            error_str = (
+                describe_motor_error(s.motor_type, s.error_code)
+                if motor_error_is_fault(s.motor_type, s.error_code)
+                else "无"
+            )
 
         print(
             f"│   {s.joint_idx}   │ {s.name:10s} │ {s.motor_type:8s} │ 0x{s.can_id:02X}   │ {status_str} │ {pos_str}│ {resp_str}│ {error_str:15s} │"
@@ -394,13 +499,20 @@ def print_scan_results(results: List[MotorStatus]):
         for s in hot:
             print(f"  [Joint {s.joint_idx}] {s.name}: 电机温度={s.temp_motor}°C, MOS温度={s.temp_mos}°C")
 
-    # 错误码检查（0x0=未使能, 0x1=正常，均不报错；0x8+ 才是真实故障）
-    errored = [s for s in results if s.online and s.error_code not in (0x0, 0x1) and s.motor_type != "MOTOR_A"]
+    # ENCOS/MotorA 与 DaMiao/MotorB 的原始值语义不同，必须按协议判断。
+    errored = [
+        s
+        for s in results
+        if s.online and motor_error_is_fault(s.motor_type, s.error_code)
+    ]
     if errored:
         print("\n--- 电机错误 ---")
         for s in errored:
-            msg = MOTOR_B_ERROR_CODES.get(s.error_code, f"未知({s.error_code:#x})")
-            print(f"  [Joint {s.joint_idx}] {s.name}: 错误码=0x{s.error_code:X} ({msg})")
+            msg = describe_motor_error(s.motor_type, s.error_code)
+            print(f"  [Joint {s.joint_idx}] {s.name}: {msg}")
+            if s.motor_type == "MOTOR_A":
+                print("    → ENCOS 错误字段非零：按错误名称检查温度、电压、电流或编码器")
+                continue
             if s.error_code == 0xD:
                 print("    → 通信丢失：检查控制回路是否在发送指令，或 MotorB 超时保护触发")
             elif s.error_code in (0xB, 0xC):
@@ -414,17 +526,40 @@ def print_scan_results(results: List[MotorStatus]):
             print(f"    → 清除错误：发送 0xFF*7+0xFB 到 CAN ID 0x{s.can_id:02X}")
 
 
+def confirm_active_motor_operation(action: str, assume_yes: bool = False) -> None:
+    """Require an explicit safety acknowledgement before enabling motors."""
+    print()
+    print("!" * 60)
+    print(f"  安全警告：{action}会使能电机并发送控制帧，机械臂可能短暂动作。")
+    print("  - 清空机械臂周围空间，确认本体稳定支撑")
+    print("  - 确保急停按钮可立即触及，执行期间不要接触机械臂")
+    print("  - 异常中断后确认所有电机已失能")
+    print("!" * 60)
+
+    if assume_yes:
+        print("已通过 --yes 确认安全条件。")
+        return
+
+    try:
+        answer = input("输入 YES 继续，其他输入取消: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n未完成安全确认，已取消。")
+        raise SystemExit(2)
+    if answer != "YES":
+        print("未完成安全确认，已取消。")
+        raise SystemExit(2)
+
+
 # ── 持续监控 ─────────────────────────────────────────
 
 def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
     """持续监控电机状态。"""
     print("持续监控中（Ctrl+C 退出）...\n")
 
-    # 先使能所有电机
+    # 先使能所有电机（协议匹配的使能帧）
     for j in joints:
-        _, _, can_id = JOINT_CONFIG[j]
-        enable_data = bytes([0xFF] * 7 + [0xFC])
-        bus.send(can.Message(arbitration_id=can_id, data=enable_data, is_extended_id=False))
+        _, motor_type, can_id = JOINT_CONFIG[j]
+        bus.send(make_enable_message(motor_type, can_id))
         time.sleep(0.01)
 
     # 为每个电机准备 MotorA 零指令（用于触发持续反馈）
@@ -532,7 +667,11 @@ def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
                     temp_mos = fb.get("temp_mos", 0)
                     comm_str = "OK" if lost == 0 else f"x{lost}"
 
-                    err_str = f"0x{err:X}" if err != 0 else "OK"
+                    err_str = (
+                        f"0x{err:X}"
+                        if motor_error_is_fault(motor_type, err)
+                        else "OK"
+                    )
 
                     print(
                         f"{j:>5} {name:>10} {motor_type:>8} {pos_deg:>10.2f} "
@@ -551,8 +690,9 @@ def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
                         temp_mos = fb.get("temp_mos", 0)
                         if temp_m > 60 or temp_mos > 60:
                             warnings.append(f"  [!] Joint {j}: 温度偏高 (电机={temp_m}°C, MOS={temp_mos}°C)")
-                        if fb["error_code"] not in (0, 1):
-                            msg = MOTOR_B_ERROR_CODES.get(fb["error_code"], f"code=0x{fb['error_code']:X}")
+                        motor_type = JOINT_CONFIG[j][1]
+                        if motor_error_is_fault(motor_type, fb["error_code"]):
+                            msg = describe_motor_error(motor_type, fb["error_code"])
                             warnings.append(f"  [!] Joint {j}: 错误 {msg}")
 
                 if warnings:
@@ -566,12 +706,11 @@ def run_monitor(bus: can.BusABC, joints: List[int], interval: float = 1.0):
     except KeyboardInterrupt:
         pass
     finally:
-        # 失能所有电机
+        # 失能所有电机（协议匹配的失能帧）
         for j in joints:
-            _, _, can_id = JOINT_CONFIG[j]
-            disable_data = bytes([0xFF] * 7 + [0xFD])
+            _, motor_type, can_id = JOINT_CONFIG[j]
             try:
-                bus.send(can.Message(arbitration_id=can_id, data=disable_data, is_extended_id=False))
+                bus.send(make_disable_message(motor_type, can_id))
             except Exception:
                 pass
         print("\n所有电机已失能。")
@@ -647,11 +786,30 @@ def run_probe(bus: can.BusABC, joint_idx: int):
     else:
         print("[1/5] 接收缓冲为空")
 
-    # 步骤 2: 发使能帧
-    print(f"[2/5] 发送使能帧 (0xFC) → ID=0x{can_id:02X} ...")
-    enable_data = bytes([0xFF] * 7 + [0xFC])
+    # 步骤 2: 发协议匹配的使能帧；MotorA 还需 MIT 探测帧才会反馈。
+    enable_msg = make_enable_message(motor_type, can_id)
+    print(f"[2/5] 发送使能帧 → CAN ID=0x{enable_msg.arbitration_id:03X} ...")
     t_send = time.time()
-    bus.send(can.Message(arbitration_id=can_id, data=enable_data, is_extended_id=False))
+    bus.send(enable_msg)
+    if motor_type == "MOTOR_A":
+        from a1z.motor_drivers.motor_a_driver import pack_motor_a_mit
+
+        time.sleep(0.01)
+        probe_data = pack_motor_a_mit(
+            0,
+            float_to_uint(0.0, 0.0, 500.0, 12),
+            float_to_uint(0.5, 0.0, 5.0, 9),
+            float_to_uint(0.0, -12.5, 12.5, 16),
+            float_to_uint(0.0, -18.0, 18.0, 12),
+            float_to_uint(0.0, -70.0, 70.0, 12),
+        )
+        bus.send(
+            can.Message(
+                arbitration_id=can_id,
+                data=probe_data,
+                is_extended_id=False,
+            )
+        )
 
     # 步骤 3: 等待回包
     print("[3/5] 等待回包 (最多 1 秒) ...")
@@ -677,7 +835,7 @@ def run_probe(bus: can.BusABC, joint_idx: int):
             print(f"  4. 尝试清错: 发送 0xFF*7+0xFB 到 0x{can_id:02X}")
             print(f"  5. 检查 MotorB 超时保护是否触发（需重新上电）")
         # 失能
-        bus.send(can.Message(arbitration_id=can_id, data=bytes([0xFF]*7+[0xFD]), is_extended_id=False))
+        bus.send(make_disable_message(motor_type, can_id))
         return
 
     resp_ms = (time.time() - t_send) * 1000
@@ -694,9 +852,12 @@ def run_probe(bus: can.BusABC, joint_idx: int):
             print(f"  速度:     {fb['velocity']:.4f} rad/s")
             print(f"  电流:     {fb['current']:.3f} A")
             print(f"  等效扭矩: {fb['effort']:.3f} Nm (KT={MOTOR_A_KT})")
-            print(f"  错误码:   0x{fb['error_code']:02X}")
+            print(f"  错误信息: {describe_motor_error(motor_type, fb['error_code'])}")
             print(f"  电机温度: {fb['temp_motor']}°C")
             print(f"  MOS温度:  {fb['temp_mos']}°C")
+            if motor_error_is_fault(motor_type, fb["error_code"]):
+                print()
+                print("  *** ENCOS 报告硬件错误，请按错误名称检查 ***")
     else:
         tor_range = get_motor_b_torque_range(motor_type)
         fb = parse_motor_b_feedback(response.data, tor_range)
@@ -708,7 +869,7 @@ def run_probe(bus: can.BusABC, joint_idx: int):
             print(f"  MOS温度:  {fb['temp_mos']}°C")
             print(f"  转子温度: {fb['temp_rotor']}°C")
 
-            if fb["error_code"] not in (0x0, 0x1):
+            if motor_error_is_fault(motor_type, fb["error_code"]):
                 print()
                 print(f"  *** 电机有错误！***")
                 err = fb["error_code"]
@@ -725,9 +886,8 @@ def run_probe(bus: can.BusABC, joint_idx: int):
                 print(f"  → 清除错误: 发送 0xFF*7+0xFB 到 0x{can_id:02X}")
 
     # 步骤 5: 失能
-    print(f"[5/5] 发送失能帧 (0xFD)")
-    disable_data = bytes([0xFF] * 7 + [0xFD])
-    bus.send(can.Message(arbitration_id=can_id, data=disable_data, is_extended_id=False))
+    print("[5/5] 发送协议匹配的失能帧")
+    bus.send(make_disable_message(motor_type, can_id))
     print("  → 完成")
 
 
@@ -762,6 +922,7 @@ def main():
   python tools/motor_diag.py --probe 3             探测关节 3
   python tools/motor_diag.py --clear-error         清除所有 MotorB 错误
   python tools/motor_diag.py --clear-error --joints 3 4  清除指定关节错误
+  python tools/motor_diag.py --scan --with-gripper 扫描带夹爪的 7 个电机
         """,
     )
 
@@ -770,47 +931,67 @@ def main():
     group.add_argument("--scan", action="store_true", help="扫描电机通信")
     group.add_argument("--monitor", action="store_true", help="持续监控电机状态")
     group.add_argument("--listen", action="store_true", help="被动监听 CAN 总线")
-    group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-5)")
+    group.add_argument("--probe", type=int, metavar="JOINT", help="探测指定关节 (0-5, 6 with --with-gripper)")
     group.add_argument("--clear-error", action="store_true", help="清除 MotorB 错误码")
 
-    parser.add_argument("--channel", default=CAN_CHANNEL, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
-    parser.add_argument("--bitrate", type=int, default=CAN_BITRATE, help=f"CAN 波特率 (默认: {CAN_BITRATE})")
+    parser.add_argument("--channel", default=None, help=f"CAN 通道 (默认: {CAN_CHANNEL})")
+    parser.add_argument("--bustype", default=None,
+                        help="python-can 后端: socketcan, gs_usb, pcan, slcan. "
+                             "默认: Linux 用 socketcan, macOS/Windows 用 gs_usb")
+    parser.add_argument("--bitrate", type=int, default=None, help=f"CAN 波特率 (默认: {CAN_BITRATE})")
     parser.add_argument("--type", choices=["all", "motor_a", "motor_b"], default="all", help="电机类型筛选")
-    parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5)")
+    parser.add_argument("--joints", type=int, nargs="+", metavar="J", help="指定关节 (0-5, 6 with --with-gripper)")
     parser.add_argument("--duration", type=float, default=5.0, help="监听时长/秒 (默认: 5)")
+    parser.add_argument("--yes", action="store_true",
+                        help="确认已完成安全检查，跳过交互式确认（用于自动化）")
+    parser.add_argument("--with-gripper", action="store_true", default=None,
+                        help="包含 G1Z 夹爪电机 (joint 6)")
+    add_config_argument(parser)
 
     args = parser.parse_args()
 
+    config = load_config(args.config) if args.config else {}
+    channel = args.channel if args.channel is not None else config.get("can_channel", CAN_CHANNEL)
+    bustype = args.bustype if args.bustype is not None else config.get("bustype")
+    bitrate = args.bitrate if args.bitrate is not None else config.get("bitrate", CAN_BITRATE)
+    with_gripper = args.with_gripper if args.with_gripper is not None else config.get("with_gripper", False)
+
     # 确定要操作的关节
+    max_joint = 6 if with_gripper else 5
     if args.joints:
         joints = args.joints
     elif args.type == "motor_a":
         joints = [0, 1, 2]
     elif args.type == "motor_b":
-        joints = [3, 4, 5]
+        joints = [3, 4, 5, 6] if with_gripper else [3, 4, 5]
     else:
-        joints = list(range(6))
+        joints = list(range(7 if with_gripper else 6))
 
     for j in joints:
-        if j not in JOINT_CONFIG:
-            print(f"错误: 关节 {j} 不存在 (有效范围: 0-5)")
+        if j not in JOINT_CONFIG or j > max_joint:
+            valid_range = f"0-{max_joint}"
+            print(f"错误: 关节 {j} 不存在 (有效范围: {valid_range})")
             sys.exit(1)
 
     print("=" * 60)
     print("  A1Z 电机诊断工具")
     print("=" * 60)
 
+    if args.scan or args.monitor or args.probe is not None:
+        operation = "电机扫描" if args.scan else "电机监控" if args.monitor else "关节探测"
+        confirm_active_motor_operation(operation, assume_yes=args.yes)
+
     # check-can 不需要打开 CAN 总线
     if args.check_can:
-        print(f"\n检查 CAN 接口: {args.channel}")
-        ok, detail = check_can_interface(args.channel)
+        print(f"\n检查 CAN 接口: {channel} (backend: {bustype or 'auto'})")
+        ok, detail = check_can_interface(channel, bustype=bustype)
         if ok:
             print(f"  [OK] {detail}")
         else:
             print(f"  [FAIL] {detail}")
             sys.exit(1)
 
-        err_info = check_can_errors(args.channel)
+        err_info = check_can_errors(channel)
         if err_info:
             print(f"\n  [WARN] {err_info}")
         else:
@@ -818,19 +999,18 @@ def main():
         return
 
     # 其余操作需要打开 CAN 总线
-    print(f"\nCAN 通道: {args.channel}  波特率: {args.bitrate}")
+    print(f"\nCAN 通道: {channel}  波特率: {bitrate}  后端: {bustype or 'auto'}")
 
-    # 先检查接口
-    ok, detail = check_can_interface(args.channel)
+    # 先检查接口（用户态后端自动跳过 SocketCAN 检查）
+    ok, detail = check_can_interface(channel, bustype=bustype)
     if not ok:
         print(f"\n[FAIL] {detail}")
         sys.exit(1)
 
     try:
-        bus = can.interface.Bus(channel=args.channel, bustype=CAN_BUSTYPE, bitrate=args.bitrate)
+        bus = open_can_bus(channel=channel, bitrate=bitrate, bustype=bustype)
     except Exception as e:
         print(f"\n无法打开 CAN 总线: {e}")
-        print(f"请检查: sudo ip link set {args.channel} up type can bitrate {args.bitrate}")
         sys.exit(1)
 
     try:
@@ -846,7 +1026,7 @@ def main():
             run_listen(bus, args.duration)
 
         elif args.probe is not None:
-            if args.probe not in JOINT_CONFIG:
+            if args.probe not in JOINT_CONFIG or args.probe > max_joint:
                 print(f"错误: 关节 {args.probe} 不存在")
                 sys.exit(1)
             run_probe(bus, args.probe)
@@ -857,11 +1037,23 @@ def main():
     except KeyboardInterrupt:
         print("\n中断。")
     finally:
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            bus.shutdown()
-        except Exception:
-            pass
-        print("CAN 总线已关闭。")
+            if args.scan or args.monitor or args.probe is not None:
+                disable_joints = (
+                    [args.probe] if args.probe is not None else joints
+                )
+                if _disable_joints_and_flush(bus, disable_joints):
+                    print("所有已操作电机均已失能。")
+                else:
+                    print("[ERROR] 无法确认所有电机均已失能！")
+            try:
+                bus.shutdown()
+            except Exception as exc:
+                print(f"[ERROR] 关闭 CAN 总线失败: {exc}")
+            print("CAN 总线已关闭。")
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 if __name__ == "__main__":
